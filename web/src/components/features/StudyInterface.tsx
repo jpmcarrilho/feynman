@@ -9,6 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { createStudySession, getTopics, getSessionHistory, logAnswer, saveChatLog, getSessionWithExercises } from '@/app/actions'
 import { ChevronLeft, ChevronRight, PlusCircle, History, PlayCircle } from 'lucide-react'
 import { useLiveAPI } from '@/hooks/useLiveAPI'
@@ -151,70 +152,108 @@ export function StudyInterface() {
               <PlusCircle className="w-4 h-4" />
               Create Session
             </DialogTrigger>
-            <DialogContent className="max-w-md">
+            <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
               <DialogHeader>
-                <DialogTitle>New Study Session</DialogTitle>
+                <DialogTitle className="text-2xl">Configure Study Session</DialogTitle>
               </DialogHeader>
               <div className="py-4 space-y-6">
-                <div>
-                  <Label className="mb-2 block">Session Duration</Label>
-                  <select 
-                    value={sessionDuration / 60} 
-                    onChange={e => setSessionDuration(Number(e.target.value) * 60)}
-                    className="flex h-9 w-full rounded-md border border-input bg-transparent px-3 py-1 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                  >
-                    <option value="5">5 Minutes</option>
-                    <option value="10">10 Minutes</option>
-                    <option value="15">15 Minutes</option>
-                    <option value="30">30 Minutes</option>
-                    <option value="60">60 Minutes</option>
-                  </select>
+                <div className="flex gap-4 items-end">
+                  <div className="w-[200px]">
+                    <Label className="mb-2 block">Session Duration</Label>
+                    <select 
+                      value={sessionDuration / 60} 
+                      onChange={e => setSessionDuration(Number(e.target.value) * 60)}
+                      className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                    >
+                      <option value="5">5 Minutes</option>
+                      <option value="10">10 Minutes</option>
+                      <option value="15">15 Minutes</option>
+                      <option value="30">30 Minutes</option>
+                      <option value="60">60 Minutes</option>
+                    </select>
+                  </div>
                 </div>
 
                 <div>
-                  <div className="flex justify-between items-center mb-2">
-                    <Label>Select Topics</Label>
+                  <div className="flex justify-between items-center mb-4 pb-2 border-b">
+                    <div>
+                      <Label className="text-base">Select Topics</Label>
+                      <p className="text-sm text-muted-foreground mt-1">Select specific topics or leave blank to randomize across all courses.</p>
+                    </div>
                     <Button 
-                      variant="ghost" 
-                      size="sm" 
-                      className="h-auto p-0 text-xs text-muted-foreground"
+                      variant="outline" 
                       onClick={() => setSelectedTopics([])}
                     >
-                      Clear / Randomize All
+                      Clear All Filters
                     </Button>
                   </div>
-                  <ScrollArea className="h-[250px] border rounded-md p-3">
-                    {Object.keys(groupedTopics).map(courseCode => (
-                      <div key={courseCode} className="mb-4 last:mb-0">
-                        <div className="font-semibold text-sm text-foreground/80 mb-2 pb-1 border-b">
-                          {courseCode}
-                        </div>
-                        <div className="space-y-2 pl-1">
-                          {groupedTopics[courseCode].map((t: any) => (
-                            <div key={t.id} className="flex items-start space-x-2">
-                              <Checkbox 
-                                id={t.id} 
-                                checked={selectedTopics.includes(t.id)}
-                                className="mt-1"
-                                onCheckedChange={(c) => {
-                                  if (c) setSelectedTopics([...selectedTopics, t.id])
-                                  else setSelectedTopics(selectedTopics.filter(id => id !== t.id))
-                                }}
-                              />
-                              <label htmlFor={t.id} className="text-sm leading-tight cursor-pointer">
-                                {t.title}
-                              </label>
+                  
+                  <Accordion className="w-full">
+                    {Object.keys(groupedTopics).map(courseCode => {
+                      const courseTopics = groupedTopics[courseCode];
+                      const allSelected = courseTopics.every((t: any) => selectedTopics.includes(t.id));
+                      
+                      return (
+                        <AccordionItem value={courseCode} key={courseCode} className="border bg-card mb-2 rounded-lg overflow-hidden px-4">
+                          <AccordionTrigger className="hover:no-underline py-4">
+                            <div className="flex justify-between w-full pr-4 items-center">
+                              <span className="font-semibold text-lg">{courseCode}</span>
+                              <span className="text-sm font-normal text-muted-foreground mr-4">
+                                {courseTopics.filter((t: any) => selectedTopics.includes(t.id)).length} / {courseTopics.length} selected
+                              </span>
                             </div>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </ScrollArea>
+                          </AccordionTrigger>
+                          <AccordionContent>
+                            <div className="pt-2 pb-4">
+                              <div className="flex justify-end gap-2 mb-4">
+                                <Button 
+                                  variant="secondary" 
+                                  size="sm"
+                                  onClick={(e) => {
+                                    e.preventDefault();
+                                    const ids = courseTopics.map((t: any) => t.id);
+                                    if (allSelected) {
+                                      setSelectedTopics(selectedTopics.filter(id => !ids.includes(id)));
+                                    } else {
+                                      const newSelection = new Set([...selectedTopics, ...ids]);
+                                      setSelectedTopics(Array.from(newSelection));
+                                    }
+                                  }}
+                                >
+                                  {allSelected ? 'Deselect All' : 'Select All in Course'}
+                                </Button>
+                              </div>
+                              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pl-1">
+                                {courseTopics.map((t: any) => (
+                                  <div key={t.id} className="flex items-start space-x-3 bg-background p-3 rounded-md border shadow-sm hover:border-blue-400 transition-colors">
+                                    <Checkbox 
+                                      id={t.id} 
+                                      checked={selectedTopics.includes(t.id)}
+                                      className="mt-1"
+                                      onCheckedChange={(c) => {
+                                        if (c) setSelectedTopics([...selectedTopics, t.id])
+                                        else setSelectedTopics(selectedTopics.filter(id => id !== t.id))
+                                      }}
+                                    />
+                                    <label htmlFor={t.id} className="text-sm leading-tight cursor-pointer flex-1">
+                                      {t.title}
+                                    </label>
+                                  </div>
+                                ))}
+                              </div>
+                            </div>
+                          </AccordionContent>
+                        </AccordionItem>
+                      )
+                    })}
+                  </Accordion>
                 </div>
 
-                <Button onClick={handleStartSession} disabled={isLoading} className="w-full">
-                  {isLoading ? 'Generating Exercises...' : 'Start Session'}
-                </Button>
+                <div className="pt-4 border-t">
+                  <Button onClick={handleStartSession} disabled={isLoading} className="w-full text-lg h-12 bg-blue-600 hover:bg-blue-700 text-white">
+                    {isLoading ? 'Generating Exercises...' : (selectedTopics.length === 0 ? 'Start Random Session' : 'Start Focused Session')}
+                  </Button>
+                </div>
               </div>
             </DialogContent>
           </Dialog>
