@@ -152,7 +152,7 @@ export function StudyInterface() {
               <PlusCircle className="w-4 h-4" />
               Create Session
             </DialogTrigger>
-            <DialogContent className="max-w-4xl max-h-[90vh] overflow-y-auto">
+            <DialogContent className="max-w-6xl w-[90vw] max-h-[90vh] overflow-y-auto">
               <DialogHeader>
                 <DialogTitle className="text-2xl">Configure Study Session</DialogTitle>
               </DialogHeader>
@@ -325,6 +325,7 @@ export function StudyInterface() {
                   correctAnswer={currentExercise.correctAnswer}
                   explanation={currentExercise.explanation}
                   initialSelectedChoice={currentLog?.userAnswer}
+                  hasBeenAnswered={!!currentLog}
                   onAnswer={handleAnswer}
                   onRequestExplanation={handleRequestExplanation}
                 />
@@ -384,11 +385,19 @@ export function StudyInterface() {
                   <p className="text-sm"><strong>Date:</strong> {new Date(selectedHistory.startTime).toLocaleString()}</p>
                   <p className="text-sm"><strong>Score:</strong> {selectedHistory.logs.filter((l: any) => l.isCorrect).length} / {selectedHistory.logs.length} correct</p>
                   {selectedHistory.logs.length > 0 && (
-                    <ScrollArea className="h-[120px] border rounded-md p-3 mt-2 bg-muted/30">
+                    <ScrollArea className="h-[250px] border rounded-md p-3 mt-2 bg-muted/30">
                       {selectedHistory.logs.map((log: any, idx: number) => (
-                        <div key={log.id} className="text-sm py-1 border-b last:border-0 flex items-center gap-2">
-                          <span>{log.isCorrect ? '✅' : '❌'}</span>
-                          <span>Question {idx + 1}</span>
+                        <div key={log.id} className="text-sm py-3 border-b last:border-0 flex flex-col gap-1">
+                          <div className="flex items-start gap-2 font-medium">
+                            <span className="mt-0.5">{log.isCorrect ? '✅' : '❌'}</span>
+                            <span className="line-clamp-2">Q{idx + 1}: {log.exercise?.questionText}</span>
+                          </div>
+                          <div className="pl-6 space-y-0.5 text-xs">
+                            <p className="text-muted-foreground"><span className="font-semibold text-foreground/70">Your Answer:</span> {log.userAnswer || 'Skipped'}</p>
+                            {!log.isCorrect && (
+                              <p className="text-green-600 dark:text-green-500"><span className="font-semibold">Correct Answer:</span> {log.exercise?.correctAnswer}</p>
+                            )}
+                          </div>
                         </div>
                       ))}
                     </ScrollArea>

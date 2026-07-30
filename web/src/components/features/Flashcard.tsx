@@ -11,13 +11,14 @@ interface FlashcardProps {
   correctAnswer: string
   explanation?: string | null
   initialSelectedChoice?: string | null
+  hasBeenAnswered?: boolean
   onAnswer: (isCorrect: boolean, userAnswer: string) => void
   onRequestExplanation?: (userAnswer: string) => void
 }
 
-export function Flashcard({ questionText, choices, correctAnswer, explanation, initialSelectedChoice, onAnswer, onRequestExplanation }: FlashcardProps) {
+export function Flashcard({ questionText, choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, onAnswer, onRequestExplanation }: FlashcardProps) {
   const [selected, setSelected] = useState<string | null>(initialSelectedChoice || null)
-  const [showResult, setShowResult] = useState(!!initialSelectedChoice)
+  const [showResult, setShowResult] = useState(!!initialSelectedChoice || !!hasBeenAnswered)
   const [hasRequestedHelp, setHasRequestedHelp] = useState(false)
 
   const handleSelect = (choice: string) => {
@@ -43,13 +44,19 @@ export function Flashcard({ questionText, choices, correctAnswer, explanation, i
         <div className="grid gap-3">
           {choices.map((choice, idx) => {
             let variant: 'default' | 'outline' | 'secondary' | 'destructive' = 'outline'
+            let extraClasses = ''
+            
+            const isMatch = choice.trim() === correctAnswer.trim()
+            const isSelected = choice.trim() === (selected || '').trim()
+
             if (showResult) {
-              if (choice === correctAnswer) {
-                variant = 'default' // Highlight correct answer
-              } else if (choice === selected) {
-                variant = 'destructive' // Highlight wrong selected answer
+              if (isMatch) {
+                variant = 'default' 
+                extraClasses = 'bg-green-600 hover:bg-green-700 text-white border-green-600'
+              } else if (isSelected) {
+                variant = 'destructive'
               }
-            } else if (choice === selected) {
+            } else if (isSelected) {
               variant = 'secondary'
             }
 
@@ -57,7 +64,7 @@ export function Flashcard({ questionText, choices, correctAnswer, explanation, i
               <Button
                 key={idx}
                 variant={variant}
-                className="justify-start h-auto py-3 px-4 text-left whitespace-pre-wrap"
+                className={`justify-start h-auto py-3 px-4 text-left whitespace-pre-wrap ${extraClasses}`}
                 onClick={() => handleSelect(choice)}
                 disabled={showResult}
               >

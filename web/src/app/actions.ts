@@ -157,14 +157,14 @@ export async function getSessionHistory() {
   return prisma.studySession.findMany({
     orderBy: { startTime: 'desc' },
     take: 10,
-    include: { logs: true }
+    include: { logs: { include: { exercise: true } } }
   })
 }
 
 export async function getSessionWithExercises(sessionId: string) {
   const session = await prisma.studySession.findUnique({
     where: { id: sessionId },
-    include: { logs: true }
+    include: { logs: { include: { exercise: true } } }
   })
   
   if (!session || !session.exerciseIds) return null
