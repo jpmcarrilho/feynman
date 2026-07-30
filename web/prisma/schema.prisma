@@ -35,12 +35,13 @@ model Exercise {
 }
 
 model StudySession {
-  id        String        @id @default(uuid())
-  startTime DateTime      @default(now())
-  endTime   DateTime?
-  status    String        // e.g., "active", "completed"
-  chatLog   String?       // JSON string of chat messages
-  logs      ExerciseLog[]
+  id          String        @id @default(uuid())
+  startTime   DateTime      @default(now())
+  endTime     DateTime?
+  status      String        // e.g., "active", "completed"
+  chatLog     String?       // JSON string of chat messages
+  exerciseIds String?       // JSON array of exercise IDs selected for this session
+  logs        ExerciseLog[]
 }
 
 model ExerciseLog {

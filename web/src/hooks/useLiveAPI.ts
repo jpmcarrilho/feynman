@@ -76,126 +76,131 @@ export function useLiveAPI(systemInstructionText: string) {
     nextPlayTimeRef.current = playTime + buffer.duration
   }
 
-  const connect = async (audioEnabled: boolean = true) => {
-    setIsConnecting(true)
-    setError(null)
-    
-    try {
-      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 })
-      audioContextRef.current = audioCtx
-      nextPlayTimeRef.current = audioCtx.currentTime
+  const connect = (audioEnabled: boolean = true): Promise<void> => {
+    return new Promise(async (resolve, reject) => {
+      setIsConnecting(true)
+      setError(null)
+      
+      try {
+        const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 })
+        audioContextRef.current = audioCtx
+        nextPlayTimeRef.current = audioCtx.currentTime
 
-      if (audioEnabled) {
-        // 1. Init Audio Recording
-        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-        streamRef.current = stream
-        
-        await audioCtx.audioWorklet.addModule('/audio-worklet.js')
-        const source = audioCtx.createMediaStreamSource(stream)
-        sourceRef.current = source
-
-        const processor = new AudioWorkletNode(audioCtx, 'audio-recorder-worklet')
-        processorRef.current = processor
-      }
-
-      // 2. Init WebSocket
-      const key = process.env.NEXT_PUBLIC_GEMINI_API_KEY
-      if (!key) throw new Error("Missing NEXT_PUBLIC_GEMINI_API_KEY")
-
-      const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${key}`
-      const ws = new WebSocket(wsUrl)
-      wsRef.current = ws
-
-      ws.onopen = () => {
-        // Build system instruction with history if any
-        const historyText = messages.filter(m => !m.text.startsWith('[SYSTEM MESSAGE')).map(m => `${m.role}: ${m.text}`).join('\n')
-        const fullSystemInstruction = systemInstructionText + (historyText ? `\n\n[Previous conversation context:]\n${historyText}` : '')
-
-        // Send initial setup
-        ws.send(JSON.stringify({
-          setup: {
-            model: 'models/gemini-3.1-flash-live-preview',
-            generationConfig: {
-              responseModalities: audioEnabled ? ["AUDIO"] : ["TEXT"]
-            },
-            systemInstruction: {
-              parts: [{ text: fullSystemInstruction }]
-            }
-          }
-        }))
-        setIsConnected(true)
-        setIsConnecting(false)
-        
-        // Start processing audio if enabled
-        if (audioEnabled && processorRef.current && sourceRef.current) {
-          processorRef.current.port.onmessage = (e) => {
-            if (ws.readyState === WebSocket.OPEN) {
-              const base64 = arrayBufferToBase64(e.data)
-              ws.send(JSON.stringify({
-                realtimeInput: {
-                  audio: { mimeType: 'audio/pcm;rate=16000', data: base64 }
-                }
-              }))
-            }
-          }
-          sourceRef.current.connect(processorRef.current)
-          processorRef.current.connect(audioCtx.destination)
-        }
-      }
-
-      ws.onmessage = async (event) => {
-        try {
-          let text = event.data
-          if (event.data instanceof Blob) {
-            text = await event.data.text()
-          }
-          const data = JSON.parse(text)
+        if (audioEnabled) {
+          // 1. Init Audio Recording
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+          streamRef.current = stream
           
-          if (data.serverContent?.modelTurn?.parts) {
-            const parts = data.serverContent.modelTurn.parts
-            for (const part of parts) {
-              if (part.text) {
-                addMessage('model', part.text)
-              }
-              if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
-                playAudioChunk(part.inlineData.data)
+          await audioCtx.audioWorklet.addModule('/audio-worklet.js')
+          const source = audioCtx.createMediaStreamSource(stream)
+          sourceRef.current = source
+
+          const processor = new AudioWorkletNode(audioCtx, 'audio-recorder-worklet')
+          processorRef.current = processor
+        }
+
+        // 2. Init WebSocket
+        const key = process.env.NEXT_PUBLIC_GEMINI_API_KEY
+        if (!key) throw new Error("Missing NEXT_PUBLIC_GEMINI_API_KEY")
+
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${key}`
+        const ws = new WebSocket(wsUrl)
+        wsRef.current = ws
+
+        ws.onopen = () => {
+          // Build system instruction with history if any
+          const historyText = messages.filter(m => !m.text.startsWith('[SYSTEM MESSAGE')).map(m => `${m.role}: ${m.text}`).join('\n')
+          const fullSystemInstruction = systemInstructionText + (historyText ? `\n\n[Previous conversation context:]\n${historyText}` : '')
+
+          // Send initial setup
+          ws.send(JSON.stringify({
+            setup: {
+              model: 'models/gemini-3.1-flash-live-preview',
+              generationConfig: {
+                responseModalities: audioEnabled ? ["AUDIO"] : ["TEXT"]
+              },
+              systemInstruction: {
+                parts: [{ text: fullSystemInstruction }]
               }
             }
+          }))
+          setIsConnected(true)
+          setIsConnecting(false)
+          
+          // Start processing audio if enabled
+          if (audioEnabled && processorRef.current && sourceRef.current) {
+            processorRef.current.port.onmessage = (e) => {
+              if (ws.readyState === WebSocket.OPEN) {
+                const base64 = arrayBufferToBase64(e.data)
+                ws.send(JSON.stringify({
+                  realtimeInput: {
+                    audio: { mimeType: 'audio/pcm;rate=16000', data: base64 }
+                  }
+                }))
+              }
+            }
+            sourceRef.current.connect(processorRef.current)
+            processorRef.current.connect(audioCtx.destination)
           }
-
-          const inputTranscript = data.serverContent?.inputTranscription
-          if (inputTranscript) {
-            const transcriptText = inputTranscript.text || (inputTranscript.parts && inputTranscript.parts[0]?.text)
-            if (transcriptText) addMessage('user', transcriptText)
-          }
-
-          const outputTranscript = data.serverContent?.outputTranscription
-          if (outputTranscript) {
-            const transcriptText = outputTranscript.text || (outputTranscript.parts && outputTranscript.parts[0]?.text)
-            if (transcriptText) addMessage('model', transcriptText)
-          }
-
-        } catch (e) {
-          console.error("Error parsing message:", e)
+          resolve()
         }
-      }
 
-      ws.onerror = (e) => {
-        console.error("Live API WS Error:", e)
-        setError("Connection error occurred.")
-      }
+        ws.onmessage = async (event) => {
+          try {
+            let text = event.data
+            if (event.data instanceof Blob) {
+              text = await event.data.text()
+            }
+            const data = JSON.parse(text)
+            
+            if (data.serverContent?.modelTurn?.parts) {
+              const parts = data.serverContent.modelTurn.parts
+              for (const part of parts) {
+                if (part.text) {
+                  addMessage('model', part.text)
+                }
+                if (part.inlineData && part.inlineData.mimeType.startsWith('audio/pcm')) {
+                  playAudioChunk(part.inlineData.data)
+                }
+              }
+            }
 
-      ws.onclose = (event) => {
-        console.log("Live API WS Closed:", event.code, event.reason)
+            const inputTranscript = data.serverContent?.inputTranscription
+            if (inputTranscript) {
+              const transcriptText = inputTranscript.text || (inputTranscript.parts && inputTranscript.parts[0]?.text)
+              if (transcriptText) addMessage('user', transcriptText)
+            }
+
+            const outputTranscript = data.serverContent?.outputTranscription
+            if (outputTranscript) {
+              const transcriptText = outputTranscript.text || (outputTranscript.parts && outputTranscript.parts[0]?.text)
+              if (transcriptText) addMessage('model', transcriptText)
+            }
+
+          } catch (e) {
+            console.error("Error parsing message:", e)
+          }
+        }
+
+        ws.onerror = (e) => {
+          console.error("Live API WS Error:", e)
+          setError("Connection error occurred.")
+          reject(new Error("WebSocket error"))
+        }
+
+        ws.onclose = (event) => {
+          console.log("Live API WS Closed:", event.code, event.reason)
+          disconnect()
+        }
+
+      } catch (err: any) {
+        console.error(err)
+        setError(err.message || 'Failed to connect.')
+        setIsConnecting(false)
         disconnect()
+        reject(err)
       }
-
-    } catch (err: any) {
-      console.error(err)
-      setError(err.message || 'Failed to connect.')
-      setIsConnecting(false)
-      disconnect()
-    }
+    })
   }
 
   const disconnect = useCallback(() => {

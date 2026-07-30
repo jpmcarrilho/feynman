@@ -9,8 +9,8 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { createStudySession, getTopics, getSessionHistory, logAnswer, saveChatLog } from '@/app/actions'
-import { ChevronLeft, ChevronRight, PlusCircle, History } from 'lucide-react'
+import { createStudySession, getTopics, getSessionHistory, logAnswer, saveChatLog, getSessionWithExercises } from '@/app/actions'
+import { ChevronLeft, ChevronRight, PlusCircle, History, PlayCircle } from 'lucide-react'
 import { useLiveAPI } from '@/hooks/useLiveAPI'
 
 export function StudyInterface() {
@@ -366,6 +366,36 @@ export function StudyInterface() {
                   ) : (
                     <div className="text-sm text-muted-foreground text-center py-4">No conversation recorded.</div>
                   )}
+                </div>
+
+                <div className="pt-4 border-t">
+                  <Button 
+                    className="w-full bg-blue-600 hover:bg-blue-700 text-white" 
+                    onClick={async () => {
+                      setIsLoading(true)
+                      try {
+                        const data = await getSessionWithExercises(selectedHistory.id)
+                        if (data) {
+                          setSession(data.session)
+                          setExercises(data.exercises)
+                          setCurrentIndex(0)
+                          if (data.session.chatLog) {
+                            liveAPI.setMessages(JSON.parse(data.session.chatLog))
+                          } else {
+                            liveAPI.setMessages([])
+                          }
+                          setSelectedHistory(null)
+                        }
+                      } catch (e) {
+                        console.error(e)
+                      }
+                      setIsLoading(false)
+                    }}
+                    disabled={isLoading}
+                  >
+                    <PlayCircle className="w-4 h-4 mr-2" />
+                    Load This Session
+                  </Button>
                 </div>
               </>
             )}

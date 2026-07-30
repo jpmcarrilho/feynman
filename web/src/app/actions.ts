@@ -125,7 +125,8 @@ The questions should be challenging but educational. Each exercise MUST use one 
 
   const session = await prisma.studySession.create({
     data: {
-      status: 'active'
+      status: 'active',
+      exerciseIds: JSON.stringify(selected.map((e: any) => e.id))
     }
   })
 
@@ -158,21 +159,22 @@ export async function getSessionHistory() {
   })
 }
 
-export async function getSessionById(sessionId: string) {
+export async function getSessionWithExercises(sessionId: string) {
   const session = await prisma.studySession.findUnique({
     where: { id: sessionId },
     include: { logs: true }
   })
   
-  if (!session) return null
+  if (!session || !session.exerciseIds) return null
 
-  // To reconstruct the exercises, we might need a join table in a real app.
-  // For now, since logs only show answered ones, let's just return what we have or 
-  // we would ideally persist the selected exercises in a SessionExercise table.
-  // Since we don't have a SessionExercise mapping table, let's just return the session
-  // and we will update the schema to properly link them if needed, but for now 
-  // let's just fetch all exercises that are logged, plus some random ones to fill it up.
-  // Wait, without a join table, we lose the exact 10 questions we selected if they weren't answered.
-  // Let's modify the return to at least give back the session so the UI can clear it if not found.
-  return session;
+  const ids = JSON.parse(session.exerciseIds) as string[]
+  const exercises = await prisma.exercise.findMany({
+    where: { id: { in: ids } },
+    include: { topic: { include: { course: true } } }
+  })
+
+  // Restore original order
+  const orderedExercises = ids.map(id => exercises.find(e => e.id === id)).filter(Boolean)
+
+  return { session, exercises: orderedExercises }
 }
