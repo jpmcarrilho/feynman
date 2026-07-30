@@ -143,6 +143,13 @@ export async function logAnswer(sessionId: string, exerciseId: string, isCorrect
   })
 }
 
+export async function saveChatLog(sessionId: string, messages: any[]) {
+  await prisma.studySession.update({
+    where: { id: sessionId },
+    data: { chatLog: JSON.stringify(messages) }
+  })
+}
+
 export async function getSessionHistory() {
   return prisma.studySession.findMany({
     orderBy: { startTime: 'desc' },

@@ -74,7 +74,13 @@ export function VoiceHub({ liveAPI }: VoiceHubProps) {
             <Button 
               variant={isConnected ? "outline" : "default"}
               size="sm"
-              onClick={isConnected ? disconnect : connect}
+              onClick={() => {
+                if (isConnected) {
+                  disconnect()
+                } else {
+                  connect(true) // Explicitly enable audio
+                }
+              }}
               disabled={isConnecting}
               className={`flex-1 ${isConnected ? "text-red-600 border-red-200 hover:bg-red-50 dark:hover:bg-red-950/50" : "bg-blue-600 hover:bg-blue-700 text-white"}`}
             >
@@ -88,17 +94,29 @@ export function VoiceHub({ liveAPI }: VoiceHubProps) {
             </Button>
           </div>
 
-          <form onSubmit={handleSend} className="flex gap-2 w-full">
+          <form onSubmit={(e) => {
+            e.preventDefault();
+            if (!inputText.trim()) return;
+            
+            if (!isConnected) {
+              connect(false).then(() => { // Text-only mode
+                setTimeout(() => sendText(inputText), 1000)
+              });
+              setInputText('');
+            } else {
+              sendText(inputText);
+              setInputText('');
+            }
+          }} className="flex gap-2 w-full">
             <input
               type="text"
               value={inputText}
               onChange={(e) => setInputText(e.target.value)}
-              disabled={!isConnected}
-              placeholder={isConnected ? "Type a message..." : "Connect to chat"}
+              placeholder="Type a message to start chatting..."
               className="flex-1 rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-50"
             />
-            <Button type="submit" size="icon" disabled={!isConnected || !inputText.trim()}>
-              <Send className="h-4 w-4" />
+            <Button type="submit" size="icon" disabled={isConnecting || !inputText.trim()}>
+              {isConnecting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
             </Button>
           </form>
         </div>

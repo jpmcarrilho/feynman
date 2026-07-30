@@ -9,7 +9,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Checkbox } from '@/components/ui/checkbox'
 import { Label } from '@/components/ui/label'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { createStudySession, getTopics, getSessionHistory, logAnswer } from '@/app/actions'
+import { createStudySession, getTopics, getSessionHistory, logAnswer, saveChatLog } from '@/app/actions'
 import { ChevronLeft, ChevronRight, PlusCircle, History } from 'lucide-react'
 import { useLiveAPI } from '@/hooks/useLiveAPI'
 
@@ -24,6 +24,15 @@ export function StudyInterface() {
   const [session, setSession] = useState<any>(null)
   const [exercises, setExercises] = useState<any[]>([])
   const [currentIndex, setCurrentIndex] = useState(0)
+  const [selectedHistory, setSelectedHistory] = useState<any>(null)
+
+  const currentExercise = exercises[currentIndex]
+
+  const exerciseContext = currentExercise 
+    ? `Topic: ${currentExercise.topic?.title || 'Unknown'}\nQuestion: ${currentExercise.questionText}\nChoices: ${JSON.parse(currentExercise.choices).join(', ')}`
+    : ''
+
+  const liveAPI = useLiveAPI(`You are a helpful tutor for an MIT economics course. Help the student understand the concepts. Don't give them the direct answer unless they've exhausted options.`)
 
   useEffect(() => {
     // Load initial data
@@ -38,6 +47,9 @@ export function StudyInterface() {
         setSession(parsed.session)
         setExercises(parsed.exercises)
         setCurrentIndex(parsed.currentIndex || 0)
+        if (parsed.chatLog && Array.isArray(parsed.chatLog)) {
+          liveAPI.setMessages(parsed.chatLog)
+        }
       } catch (e) {
         console.error("Failed to parse saved session", e)
       }
@@ -50,10 +62,11 @@ export function StudyInterface() {
       localStorage.setItem('dedp_active_session', JSON.stringify({
         session,
         exercises,
-        currentIndex
+        currentIndex,
+        chatLog: liveAPI.messages
       }))
     }
-  }, [session, exercises, currentIndex])
+  }, [session, exercises, currentIndex, liveAPI.messages])
 
   const groupedTopics = useMemo(() => {
     return topics.reduce((acc, t) => {
@@ -80,19 +93,24 @@ export function StudyInterface() {
     setIsLoading(false)
   }
 
-  const currentExercise = exercises[currentIndex]
+  const handleFinishSession = async () => {
+    if (session) {
+      // Save the final chat log from liveAPI
+      await saveChatLog(session.id, liveAPI.messages)
+    }
+    setSession(null)
+    setExercises([])
+    setCurrentIndex(0)
+    liveAPI.setMessages([])
+    localStorage.removeItem('dedp_active_session')
+    getSessionHistory().then(setHistories)
+  }
 
   const handleAnswer = async (isCorrect: boolean) => {
     if (session && currentExercise) {
       await logAnswer(session.id, currentExercise.id, isCorrect, 30) // dummy duration
     }
   }
-
-  const exerciseContext = currentExercise 
-    ? `Topic: ${currentExercise.topic?.title || 'Unknown'}\nQuestion: ${currentExercise.questionText}\nChoices: ${JSON.parse(currentExercise.choices).join(', ')}`
-    : ''
-
-  const liveAPI = useLiveAPI(`You are a helpful tutor for an MIT economics course. Help the student understand the concepts. Don't give them the direct answer unless they've exhausted options.`)
 
   useEffect(() => {
     if (liveAPI.isConnected && currentExercise) {
@@ -106,8 +124,8 @@ export function StudyInterface() {
     const msg = `I selected "${userAnswer}", but the correct answer is "${currentExercise.correctAnswer}". Can you explain why I am wrong?`
     
     if (!liveAPI.isConnected) {
-      // Connect first, then send message after a brief delay to ensure ws is ready
-      liveAPI.connect().then(() => {
+      // Connect first (text-only), then send message after a brief delay
+      liveAPI.connect(false).then(() => {
         setTimeout(() => liveAPI.sendText(msg), 1500)
       })
     } else {
@@ -201,17 +219,25 @@ export function StudyInterface() {
             Session History
           </h3>
           <div className="space-y-2">
-            {histories.map(h => (
-              <div key={h.id} className="text-xs p-3 bg-white dark:bg-slate-900 border rounded-md shadow-sm">
-                <div className="font-medium text-foreground">{new Date(h.startTime).toLocaleString()}</div>
-                <div className="text-muted-foreground mt-1 flex justify-between">
-                  <span>Questions: {h.logs.length}</span>
-                  <span className={h.status === 'active' ? 'text-green-600' : 'text-blue-600'}>
-                    {h.status}
-                  </span>
+            {histories.map(h => {
+              const correct = h.logs.filter((l: any) => l.isCorrect).length
+              const total = h.logs.length
+              return (
+                <div 
+                  key={h.id} 
+                  className="text-xs p-3 bg-white dark:bg-slate-900 border rounded-md shadow-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors"
+                  onClick={() => setSelectedHistory(h)}
+                >
+                  <div className="font-medium text-foreground">{new Date(h.startTime).toLocaleString()}</div>
+                  <div className="text-muted-foreground mt-1 flex justify-between">
+                    <span>Score: {correct}/{total}</span>
+                    <span className={h.status === 'active' ? 'text-green-600' : 'text-blue-600'}>
+                      {h.status}
+                    </span>
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
             {histories.length === 0 && (
               <div className="text-sm text-muted-foreground text-center py-4">No past sessions</div>
             )}
@@ -237,7 +263,7 @@ export function StudyInterface() {
         
         {session ? (
           <div className="w-full max-w-3xl mx-auto space-y-8 pb-12">
-            <SessionTimer durationSeconds={sessionDuration} />
+            <SessionTimer durationSeconds={sessionDuration} startTime={session.startTime} />
             
             {currentExercise ? (
               <div className="space-y-4">
@@ -267,8 +293,13 @@ export function StudyInterface() {
                   </Button>
                   <Button 
                     variant={currentIndex === exercises.length - 1 ? "default" : "outline"}
-                    onClick={() => setCurrentIndex(Math.min(exercises.length - 1, currentIndex + 1))}
-                    disabled={currentIndex === exercises.length - 1}
+                    onClick={() => {
+                      if (currentIndex === exercises.length - 1) {
+                        handleFinishSession()
+                      } else {
+                        setCurrentIndex(Math.min(exercises.length - 1, currentIndex + 1))
+                      }
+                    }}
                   >
                     {currentIndex === exercises.length - 1 ? 'Finish Session' : 'Next'}
                     {currentIndex !== exercises.length - 1 && <ChevronRight className="w-4 h-4 ml-2" />}
@@ -293,6 +324,54 @@ export function StudyInterface() {
       <div className="w-[20vw] border-l bg-muted/10 shrink-0">
         <VoiceHub liveAPI={liveAPI} />
       </div>
+
+      <Dialog open={!!selectedHistory} onOpenChange={(open) => !open && setSelectedHistory(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle>Session Results</DialogTitle>
+          </DialogHeader>
+          <div className="py-4 space-y-6">
+            {selectedHistory && (
+              <>
+                <div className="space-y-2 border-b pb-4">
+                  <p className="text-sm"><strong>Date:</strong> {new Date(selectedHistory.startTime).toLocaleString()}</p>
+                  <p className="text-sm"><strong>Score:</strong> {selectedHistory.logs.filter((l: any) => l.isCorrect).length} / {selectedHistory.logs.length} correct</p>
+                  {selectedHistory.logs.length > 0 && (
+                    <ScrollArea className="h-[120px] border rounded-md p-3 mt-2 bg-muted/30">
+                      {selectedHistory.logs.map((log: any, idx: number) => (
+                        <div key={log.id} className="text-sm py-1 border-b last:border-0 flex items-center gap-2">
+                          <span>{log.isCorrect ? '✅' : '❌'}</span>
+                          <span>Question {idx + 1}</span>
+                        </div>
+                      ))}
+                    </ScrollArea>
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <Label className="font-semibold">Tutor Chat History</Label>
+                  {selectedHistory.chatLog ? (
+                    <ScrollArea className="h-[250px] border rounded-md p-3 bg-muted/10 scrollbar-thin">
+                      {JSON.parse(selectedHistory.chatLog).filter((m: any) => !m.text.startsWith('[SYSTEM')).map((msg: any, idx: number) => (
+                        <div key={idx} className={`flex mb-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                          <div className={`max-w-[85%] rounded-xl px-4 py-2 text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700'}`}>
+                            {msg.text}
+                          </div>
+                        </div>
+                      ))}
+                      {JSON.parse(selectedHistory.chatLog).filter((m: any) => !m.text.startsWith('[SYSTEM')).length === 0 && (
+                        <div className="text-sm text-muted-foreground text-center py-4">No conversation recorded.</div>
+                      )}
+                    </ScrollArea>
+                  ) : (
+                    <div className="text-sm text-muted-foreground text-center py-4">No conversation recorded.</div>
+                  )}
+                </div>
+              </>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

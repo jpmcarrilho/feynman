@@ -39,6 +39,7 @@ model StudySession {
   startTime DateTime      @default(now())
   endTime   DateTime?
   status    String        // e.g., "active", "completed"
+  chatLog   String?       // JSON string of chat messages
   logs      ExerciseLog[]
 }
 

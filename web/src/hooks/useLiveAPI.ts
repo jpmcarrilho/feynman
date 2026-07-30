@@ -76,25 +76,27 @@ export function useLiveAPI(systemInstructionText: string) {
     nextPlayTimeRef.current = playTime + buffer.duration
   }
 
-  const connect = async () => {
+  const connect = async (audioEnabled: boolean = true) => {
     setIsConnecting(true)
     setError(null)
-    setMessages([])
     
     try {
-      // 1. Init Audio Recording (16kHz for Gemini)
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      streamRef.current = stream
-      const audioCtx = new window.AudioContext({ sampleRate: 16000 })
+      const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 })
       audioContextRef.current = audioCtx
       nextPlayTimeRef.current = audioCtx.currentTime
 
-      await audioCtx.audioWorklet.addModule('/audio-worklet.js')
-      const source = audioCtx.createMediaStreamSource(stream)
-      sourceRef.current = source
+      if (audioEnabled) {
+        // 1. Init Audio Recording
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+        streamRef.current = stream
+        
+        await audioCtx.audioWorklet.addModule('/audio-worklet.js')
+        const source = audioCtx.createMediaStreamSource(stream)
+        sourceRef.current = source
 
-      const processor = new AudioWorkletNode(audioCtx, 'audio-recorder-worklet')
-      processorRef.current = processor
+        const processor = new AudioWorkletNode(audioCtx, 'audio-recorder-worklet')
+        processorRef.current = processor
+      }
 
       // 2. Init WebSocket
       const key = process.env.NEXT_PUBLIC_GEMINI_API_KEY
@@ -105,34 +107,40 @@ export function useLiveAPI(systemInstructionText: string) {
       wsRef.current = ws
 
       ws.onopen = () => {
+        // Build system instruction with history if any
+        const historyText = messages.filter(m => !m.text.startsWith('[SYSTEM MESSAGE')).map(m => `${m.role}: ${m.text}`).join('\n')
+        const fullSystemInstruction = systemInstructionText + (historyText ? `\n\n[Previous conversation context:]\n${historyText}` : '')
+
         // Send initial setup
         ws.send(JSON.stringify({
           setup: {
             model: 'models/gemini-3.1-flash-live-preview',
             generationConfig: {
-              responseModalities: ["AUDIO"]
+              responseModalities: audioEnabled ? ["AUDIO"] : ["TEXT"]
             },
             systemInstruction: {
-              parts: [{ text: systemInstructionText }]
+              parts: [{ text: fullSystemInstruction }]
             }
           }
         }))
         setIsConnected(true)
         setIsConnecting(false)
         
-        // Start processing audio
-        processor.port.onmessage = (e) => {
-          if (ws.readyState === WebSocket.OPEN) {
-            const base64 = arrayBufferToBase64(e.data)
-            ws.send(JSON.stringify({
-              realtimeInput: {
-                audio: { mimeType: 'audio/pcm;rate=16000', data: base64 }
-              }
-            }))
+        // Start processing audio if enabled
+        if (audioEnabled && processorRef.current && sourceRef.current) {
+          processorRef.current.port.onmessage = (e) => {
+            if (ws.readyState === WebSocket.OPEN) {
+              const base64 = arrayBufferToBase64(e.data)
+              ws.send(JSON.stringify({
+                realtimeInput: {
+                  audio: { mimeType: 'audio/pcm;rate=16000', data: base64 }
+                }
+              }))
+            }
           }
+          sourceRef.current.connect(processorRef.current)
+          processorRef.current.connect(audioCtx.destination)
         }
-        source.connect(processor)
-        processor.connect(audioCtx.destination) // Required for some browsers to keep the worklet active
       }
 
       ws.onmessage = async (event) => {
@@ -154,6 +162,19 @@ export function useLiveAPI(systemInstructionText: string) {
               }
             }
           }
+
+          const inputTranscript = data.serverContent?.inputTranscription
+          if (inputTranscript) {
+            const transcriptText = inputTranscript.text || (inputTranscript.parts && inputTranscript.parts[0]?.text)
+            if (transcriptText) addMessage('user', transcriptText)
+          }
+
+          const outputTranscript = data.serverContent?.outputTranscription
+          if (outputTranscript) {
+            const transcriptText = outputTranscript.text || (outputTranscript.parts && outputTranscript.parts[0]?.text)
+            if (transcriptText) addMessage('model', transcriptText)
+          }
+
         } catch (e) {
           console.error("Error parsing message:", e)
         }
@@ -219,6 +240,7 @@ export function useLiveAPI(systemInstructionText: string) {
     isConnecting,
     error,
     messages,
+    setMessages,
     connect,
     disconnect,
     sendText
