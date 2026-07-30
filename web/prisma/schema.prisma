@@ -49,6 +49,7 @@ model ExerciseLog {
   sessionId  String
   exerciseId String
   isCorrect  Boolean
+  userAnswer String?      // The exact choice selected by the user
   duration   Int          // Time taken in seconds
   timestamp  DateTime     @default(now())
   session    StudySession @relation(fields: [sessionId], references: [id])

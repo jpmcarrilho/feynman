@@ -115,7 +115,7 @@ export function useLiveAPI(systemInstructionText: string) {
           // Send initial setup
           ws.send(JSON.stringify({
             setup: {
-              model: 'models/gemini-3.1-flash-live-preview',
+              model: 'models/gemini-2.0-flash',
               generationConfig: {
                 responseModalities: audioEnabled ? ["AUDIO"] : ["TEXT"]
               },
@@ -231,8 +231,9 @@ export function useLiveAPI(systemInstructionText: string) {
   const sendText = (text: string) => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
-        realtimeInput: {
-          text: text
+        clientContent: {
+          turns: [{ role: 'user', parts: [{ text }] }],
+          turnComplete: true
         }
       }))
       // Force a new message block

@@ -127,18 +127,20 @@ The questions should be challenging but educational. Each exercise MUST use one 
     data: {
       status: 'active',
       exerciseIds: JSON.stringify(selected.map((e: any) => e.id))
-    }
+    },
+    include: { logs: true }
   })
 
   return { session, exercises: selected }
 }
 
-export async function logAnswer(sessionId: string, exerciseId: string, isCorrect: boolean, duration: number) {
+export async function logAnswer(sessionId: string, exerciseId: string, isCorrect: boolean, duration: number, userAnswer?: string) {
   await prisma.exerciseLog.create({
     data: {
       sessionId,
       exerciseId,
       isCorrect,
+      userAnswer,
       duration
     }
   })

@@ -10,13 +10,14 @@ interface FlashcardProps {
   choices: string[]
   correctAnswer: string
   explanation?: string | null
-  onAnswer: (isCorrect: boolean) => void
+  initialSelectedChoice?: string | null
+  onAnswer: (isCorrect: boolean, userAnswer: string) => void
   onRequestExplanation?: (userAnswer: string) => void
 }
 
-export function Flashcard({ questionText, choices, correctAnswer, explanation, onAnswer, onRequestExplanation }: FlashcardProps) {
-  const [selected, setSelected] = useState<string | null>(null)
-  const [showResult, setShowResult] = useState(false)
+export function Flashcard({ questionText, choices, correctAnswer, explanation, initialSelectedChoice, onAnswer, onRequestExplanation }: FlashcardProps) {
+  const [selected, setSelected] = useState<string | null>(initialSelectedChoice || null)
+  const [showResult, setShowResult] = useState(!!initialSelectedChoice)
   const [hasRequestedHelp, setHasRequestedHelp] = useState(false)
 
   const handleSelect = (choice: string) => {
@@ -24,7 +25,7 @@ export function Flashcard({ questionText, choices, correctAnswer, explanation, o
     setSelected(choice)
     const isCorrect = choice === correctAnswer
     setShowResult(true)
-    onAnswer(isCorrect)
+    onAnswer(isCorrect, choice)
   }
 
   const handleExplainMistake = () => {

@@ -106,9 +106,16 @@ export function StudyInterface() {
     getSessionHistory().then(setHistories)
   }
 
-  const handleAnswer = async (isCorrect: boolean) => {
+  const currentLog = session?.logs?.find((l: any) => l.exerciseId === currentExercise?.id)
+
+  const handleAnswer = async (isCorrect: boolean, userAnswer: string) => {
     if (session && currentExercise) {
-      await logAnswer(session.id, currentExercise.id, isCorrect, 30) // dummy duration
+      await logAnswer(session.id, currentExercise.id, isCorrect, 30, userAnswer) // dummy duration
+      
+      setSession((prev: any) => ({
+        ...prev,
+        logs: [...(prev.logs || []), { exerciseId: currentExercise.id, isCorrect, userAnswer }]
+      }))
     }
   }
 
@@ -278,6 +285,7 @@ export function StudyInterface() {
                   choices={JSON.parse(currentExercise.choices)}
                   correctAnswer={currentExercise.correctAnswer}
                   explanation={currentExercise.explanation}
+                  initialSelectedChoice={currentLog?.userAnswer}
                   onAnswer={handleAnswer}
                   onRequestExplanation={handleRequestExplanation}
                 />

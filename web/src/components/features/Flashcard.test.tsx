@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
 import { Flashcard } from './Flashcard'
 
@@ -12,6 +12,10 @@ describe('Flashcard Component', () => {
     onRequestExplanation: vi.fn(),
   }
 
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
   it('renders question and choices', () => {
     render(<Flashcard {...defaultProps} />)
     expect(screen.getByText('What is the capital of France?')).toBeInTheDocument()
@@ -23,7 +27,7 @@ describe('Flashcard Component', () => {
     const correctChoice = screen.getByText('Paris')
     fireEvent.click(correctChoice)
     
-    expect(defaultProps.onAnswer).toHaveBeenCalledWith(true)
+    expect(defaultProps.onAnswer).toHaveBeenCalledWith(true, 'Paris')
     expect(screen.getByText('Official Explanation:')).toBeInTheDocument()
     
     expect(screen.queryByText('Ask Voice Tutor to Explain My Mistake')).not.toBeInTheDocument()
@@ -34,7 +38,7 @@ describe('Flashcard Component', () => {
     const wrongChoice = screen.getByText('London')
     fireEvent.click(wrongChoice)
     
-    expect(defaultProps.onAnswer).toHaveBeenCalledWith(false)
+    expect(defaultProps.onAnswer).toHaveBeenCalledWith(false, 'London')
     
     const explainButton = screen.getByText('Ask Voice Tutor to Explain My Mistake')
     expect(explainButton).toBeInTheDocument()
