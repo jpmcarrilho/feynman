@@ -1,0 +1,54 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Course {
+  id     String  @id @default(uuid())
+  code   String  @unique
+  title  String
+  topics Topic[]
+}
+
+model Topic {
+  id        String     @id @default(uuid())
+  courseId  String
+  week      Int
+  title     String
+  type      String     // e.g., "lecture", "quiz"
+  course    Course     @relation(fields: [courseId], references: [id])
+  exercises Exercise[]
+}
+
+model Exercise {
+  id            String        @id @default(uuid())
+  topicId       String
+  questionText  String
+  choices       String        // Stored as JSON string
+  correctAnswer String
+  explanation   String?
+  topic         Topic         @relation(fields: [topicId], references: [id])
+  logs          ExerciseLog[]
+}
+
+model StudySession {
+  id        String        @id @default(uuid())
+  startTime DateTime      @default(now())
+  endTime   DateTime?
+  status    String        // e.g., "active", "completed"
+  logs      ExerciseLog[]
+}
+
+model ExerciseLog {
+  id         String       @id @default(uuid())
+  sessionId  String
+  exerciseId String
+  isCorrect  Boolean
+  duration   Int          // Time taken in seconds
+  timestamp  DateTime     @default(now())
+  session    StudySession @relation(fields: [sessionId], references: [id])
+  exercise   Exercise     @relation(fields: [exerciseId], references: [id])
+}
