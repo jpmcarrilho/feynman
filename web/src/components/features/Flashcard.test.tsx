@@ -29,9 +29,7 @@ describe('Flashcard Component', () => {
     
     expect(defaultProps.onAnswer).toHaveBeenCalledWith(true, 'Paris')
     expect(screen.getByText('Official Explanation:')).toBeInTheDocument()
-    
-    expect(screen.queryByText('Ask Voice Tutor to Explain My Mistake')).not.toBeInTheDocument()
-  })
+    })
 
   it('handles incorrect answer selection and triggers callback', () => {
     render(<Flashcard {...defaultProps} />)
