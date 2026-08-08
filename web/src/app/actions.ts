@@ -592,6 +592,15 @@ export async function getAnalyticsData() {
   };
 }
 
+function shuffleArray<T>(array: T[]): T[] {
+  const shuffled = [...array];
+  for (let i = shuffled.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+  }
+  return shuffled;
+}
+
 export async function generateNextExercise(sessionId: string, topicIds: string[], existingExerciseIds: string[], missingCount: number = 1) {
   if (topicIds.length === 0) return null;
 
@@ -708,12 +717,18 @@ Generate ONE of the following types for the new question:
 
     const genEx = object.newExercise;
 
+    // Explicitly randomize choices to eliminate LLM position bias
+    let finalChoices = genEx.choices;
+    if (genEx.exerciseType === 'single_choice' || genEx.exerciseType === 'multiple_choice' || genEx.exerciseType === 'dropdown') {
+      finalChoices = shuffleArray(genEx.choices);
+    }
+
     const newEx = await prisma.exercise.create({
       data: {
         topicId: primaryTopicId,
         questionText: genEx.questionText,
         exerciseType: genEx.exerciseType,
-        choices: JSON.stringify(genEx.choices),
+        choices: JSON.stringify(finalChoices),
         correctAnswer: genEx.correctAnswer,
         explanation: genEx.explanation
       },
