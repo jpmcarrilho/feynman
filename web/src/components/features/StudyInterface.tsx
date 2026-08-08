@@ -81,7 +81,10 @@ export function StudyInterface() {
     ? `Topic: ${currentExercise.topic?.title || 'Unknown'}\nQuestion: ${currentExercise.questionText}\nChoices: ${parsedChoices.join(', ')}`
     : ''
 
-  const liveAPI = useLiveAPI(`You are a helpful tutor for an MIT economics course. Help the student understand the concepts. Don't give them the direct answer unless they've exhausted options.`)
+  const liveAPI = useLiveAPI(`You are a helpful, brilliant professor for MIT MicroMasters courses, embodying the Feynman learning philosophy. Help the student understand complex concepts by breaking them down into simple, intuitive analogies when it makes sense, rather than relying on dry jargon. Adhere to these teaching guidelines:
+1. Simplify, but remain concise: Do not be verbose. Keep your explanations brief and focused unless asked for deep detail.
+2. The Feynman Technique: When a student is struggling or asks a question, encourage them to explain the concept in their own simple terms, or use a clear, colorful analogy (like a bongo drum, visual sketches, or water pipes) to clarify the intuition behind equations or economics theorems.
+3. Don't give away answers: Guide them with leading questions or hints to let them find the answer themselves.`)
 
   useEffect(() => {
     // Load initial data
@@ -444,9 +447,9 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
     <div className="flex w-full h-screen overflow-hidden bg-background font-sans relative">
 
       {/* FIXED FLOATING LOGO BAR - Top Left (stays in place whether left sidebar is active or collapsed) */}
-      <div className="absolute top-[17px] left-4 z-50 cursor-pointer flex items-center gap-2 select-none" onClick={() => window.location.href = '/'}>
-        <FeynmanLogo variant="mini" size={36} className="stroke-charcoal-graphite transition-transform duration-200 hover:scale-105 animate-sketch-draw" />
-        <span className="font-display text-xl italic font-bold tracking-tight text-charcoal-graphite transition-colors duration-200 hover:text-fountain-ink">Feynman</span>
+      <div className="absolute top-[16px] left-4 z-50 cursor-pointer flex items-center gap-2 select-none" onClick={() => window.location.href = '/'}>
+        <FeynmanLogo variant="mini" size={48} className="stroke-charcoal-graphite transition-transform duration-200 hover:scale-105 animate-sketch-draw" />
+        <span className="font-display text-2xl italic font-bold tracking-tight text-charcoal-graphite transition-colors duration-200 hover:text-fountain-ink">Feynman</span>
       </div>
 
       {/* LEFT SIDEBAR - 20vw */}
@@ -454,7 +457,7 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
         isFocusMode ? 'w-0 overflow-hidden border-r-0 opacity-0' : 'w-[20vw] opacity-100'
       }`}>
         {/* Header spacer to match the fixed absolute logo */}
-        <div className="h-[72px] border-b border-charcoal-graphite/10 shrink-0" />
+        <div className="h-[80px] border-b border-charcoal-graphite/10 shrink-0" />
 
         <div className="p-4 border-b border-charcoal-graphite/10 shrink-0">
           <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
