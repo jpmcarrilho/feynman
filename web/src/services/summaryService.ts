@@ -89,15 +89,6 @@ export async function createSessionSummary(sessionId: string) {
       materialContext += `Local Slides/Reading Path: ${t.localPath || 'None'}\n\n`
     })
 
-    // Compile exercise list for this week to target learning gaps
-    let performanceContext = ''
-    group.exercises.forEach((ex, idx) => {
-      performanceContext += `Question ${idx + 1}: ${ex.questionText}\n`
-      performanceContext += `Choices: ${ex.choices}\n`
-      performanceContext += `Correct Answer: ${ex.correctAnswer}\n`
-      performanceContext += `Professor's Explanation: ${ex.explanation || 'None'}\n\n`
-    })
-
     const prompt = `You are a brilliant, world-class professor specializing in economics and public policy (MIT MicroMasters style), embodying the Feynman learning philosophy.
 Your task is to generate a comprehensive, highly detailed permanent study guide and week summary for the following course week:
 
@@ -105,23 +96,20 @@ Course: ${group.courseCode} - ${course.title}
 Week: ${group.weekName}
 
 CRITICAL DIRECTIVES:
-1. Grounded in Lesson Content: Do NOT simply repeat or summarize the question texts. You must use the actual Covered Material Context (the lecture transcripts, slides outlines, and textbook readings) to summarize and explain the core academic concepts. 
+1. Grounded in Lesson Content: This is a permanent, high-quality textbook study guide. You must use the actual Covered Material Context (the lecture transcripts, slides outlines, and textbook readings) to summarize and explain the core academic concepts. 
 2. Be concise and simplified: Adhere to the Feynman Technique of making concepts incredibly simple and intuitive using elegant, grounded analogies (like bongos, water-flows, or balance scales), but do not be overly verbose or repetitive.
-3. This is a permanent study asset on disk: Formulate it as a durable textbook chapter study guide for "${group.courseCode} - ${group.weekName}".
+3. No Question Leakage: Under no circumstances should you generate or refer to specific sample questions or tests. Focus 100% on the core lecture topics and learning objectives.
 
 Covered Material Context (Extracted slides, transcripts, and reading content for this week):
 ${materialContext || 'No raw lesson materials available.'}
-
-Reference Question Context (Sample exercises for this week):
-${performanceContext}
 
 Generate a beautifully styled Markdown document. Break it down into these exact sections:
 1. # 📓 Course Study Guide: ${group.courseCode} | ${group.weekName}
    An elegant overview of this week's topics, general learning objectives, and core themes.
 2. ## 🧠 Concepts Demystified (Feynman Style)
    Explain the main 2-3 core academic concepts covered in this week's materials. Explain each one in simple terms, using an elegant analogy to convey the underlying economics or policy intuition.
-3. ## 🔍 Mistake Analyses & Pitfalls
-   Analyze common pitfalls and traps from the reference questions. Explain why incorrect options are tempting and how to think about the correct answer from first principles.
+3. ## 🔍 Common Pitfalls & Key Terms
+   Identify common misconceptions, tricky details, or academic traps in these specific topics, and explain how to understand them correctly from first principles.
 4. ## 📝 Custom Class Cheat Sheet
    A bulleted, extremely concise reference summarizing key equations, core definitions, or central principles from these specific lectures.
 5. ## 🚀 Recommended Next Steps
