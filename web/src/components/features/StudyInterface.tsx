@@ -1048,6 +1048,21 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                       <ReactMarkdown 
                         remarkPlugins={[remarkGfm, remarkMath]} 
                         rehypePlugins={[rehypeKatex]}
+                        components={{
+                          a: ({ href, children }: any) => {
+                            if (href && (href.startsWith('/api/file?path=') || href.includes('path='))) {
+                              return (
+                                <button 
+                                  onClick={() => handleViewFile(href)} 
+                                  className="text-fountain-ink hover:underline font-semibold inline-flex items-center gap-1 bg-transparent border-0 p-0 align-baseline text-left cursor-pointer"
+                                >
+                                  {children}
+                                </button>
+                              );
+                            }
+                            return <a href={href} target="_blank" rel="noopener noreferrer" className="text-fountain-ink hover:underline">{children}</a>;
+                          }
+                        }}
                       >
                         {preprocessLaTeX(fileContent)}
                       </ReactMarkdown>

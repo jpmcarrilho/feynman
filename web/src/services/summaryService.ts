@@ -26,100 +26,151 @@ export async function createSessionSummary(sessionId: string) {
     include: { topic: { include: { course: true } } }
   })
 
-  // 3. Gather lesson materials & transcription content for ALL topics in the entire session
-  const topicIds = Array.from(new Set(exercises.map(ex => ex.topicId).filter(Boolean))) as string[]
-  
-  let materialContext = ''
-  for (const topicId of topicIds) {
-    const topic = await prisma.topic.findUnique({ 
-      where: { id: topicId },
-      include: { course: true }
-    })
-    
-    if (topic && topic.className) {
-      // Find all topics in the same class (lesson) to capture full slideshow and outline content
-      const classTopics = await prisma.topic.findMany({
-        where: {
-          courseId: topic.courseId,
-          week: topic.week,
-          className: topic.className
-        },
-        include: { course: true }
-      })
-      
-      for (const t of classTopics) {
-        materialContext += `--- Course: ${t.course?.title || 'MIT DEDP'} | Class: ${t.className} | Topic Unit: ${t.title} ---\n`
-        materialContext += `Content/Transcription Outline:\n${t.content || 'No outline transcription available.'}\n`
-        materialContext += `Local Slide/Reading Path: ${t.localPath || 'None'}\n\n`
-      }
-    }
-  }
+  // 3. Group exercises and topics by Course and Week
+  const weekGroups = new Map<string, { courseCode: string, weekName: string, exercises: typeof exercises }>()
 
-  // 4. Compile the student's actual performance so far
-  let performanceContext = ''
-  const logsMap = new Map(session.logs.map(log => [log.exerciseId, log]))
-  
-  exercises.forEach((ex, index) => {
-    const log = logsMap.get(ex.id)
-    performanceContext += `Question ${index + 1}: ${ex.questionText}\n`
-    performanceContext += `Choices: ${ex.choices}\n`
-    performanceContext += `Correct Answer: ${ex.correctAnswer}\n`
-    if (log) {
-      performanceContext += `Student's Answer: ${log.userAnswer || 'Skipped'}\n`
-      performanceContext += `Was Correct: ${log.isCorrect ? 'YES' : 'NO'}\n`
-    } else {
-      performanceContext += `Student's Answer: (Unanswered Yet)\n`
+  exercises.forEach(ex => {
+    if (ex.topic && ex.topic.week && ex.topic.course) {
+      const courseCode = ex.topic.course.code
+      const weekName = ex.topic.week.replace(/\s+/g, '_') // safe filesystem naming, e.g. Week_01
+      const groupKey = `${courseCode}_${weekName}`
+      
+      if (!weekGroups.has(groupKey)) {
+        weekGroups.set(groupKey, { courseCode, weekName: ex.topic.week, exercises: [] })
+      }
+      weekGroups.get(groupKey)!.exercises.push(ex)
     }
-    performanceContext += `Professor's Explanation: ${ex.explanation || 'None'}\n\n`
   })
 
-  // 5. Build strict Feynman prompt
-  const prompt = `You are a brilliant, world-class professor specializing in economics and public policy (MIT MicroMasters style), embodying the Feynman learning philosophy.
-Your task is to generate a comprehensive, highly detailed study guide and study session summary for a student based on their entire study session.
+  const summariesDir = path.join(process.cwd(), 'summaries')
+  if (!fs.existsSync(summariesDir)) {
+    fs.mkdirSync(summariesDir, { recursive: true })
+  }
+
+  const results: { courseCode: string, weekName: string, filePath: string, reloaded: boolean }[] = []
+
+  // 4. Generate or re-load summaries for each week covered in the session
+  for (const [groupKey, group] of weekGroups.entries()) {
+    const courseDir = path.join(summariesDir, group.courseCode)
+    if (!fs.existsSync(courseDir)) {
+      fs.mkdirSync(courseDir, { recursive: true })
+    }
+
+    const weekFileSlug = group.weekName.replace(/\s+/g, '_')
+    const weekSummaryFilePath = path.join(courseDir, `${weekFileSlug}.md`)
+
+    // Check if the Feynman study guide for this week has already been generated as a permanent asset
+    if (fs.existsSync(weekSummaryFilePath)) {
+      results.push({
+        courseCode: group.courseCode,
+        weekName: group.weekName,
+        filePath: weekSummaryFilePath,
+        reloaded: true
+      })
+      continue
+    }
+
+    // If it doesn't exist, we generate it from the week's lesson transcripts and outlines
+    // Find all topics under the same course and week to capture the entire lecture outlines and transcriptions
+    const course = await prisma.course.findUnique({ where: { code: group.courseCode } })
+    if (!course) continue
+
+    const classTopics = await prisma.topic.findMany({
+      where: {
+        courseId: course.id,
+        week: group.weekName
+      }
+    })
+
+    let materialContext = ''
+    classTopics.forEach(t => {
+      materialContext += `--- Lesson Name: ${t.className || 'Unknown'} | Topic Unit: ${t.title} ---\n`
+      materialContext += `Content/Transcription Outline:\n${t.content || 'No outline transcription available.'}\n`
+      materialContext += `Local Slides/Reading Path: ${t.localPath || 'None'}\n\n`
+    })
+
+    // Compile exercise list for this week to target learning gaps
+    let performanceContext = ''
+    group.exercises.forEach((ex, idx) => {
+      performanceContext += `Question ${idx + 1}: ${ex.questionText}\n`
+      performanceContext += `Choices: ${ex.choices}\n`
+      performanceContext += `Correct Answer: ${ex.correctAnswer}\n`
+      performanceContext += `Professor's Explanation: ${ex.explanation || 'None'}\n\n`
+    })
+
+    const prompt = `You are a brilliant, world-class professor specializing in economics and public policy (MIT MicroMasters style), embodying the Feynman learning philosophy.
+Your task is to generate a comprehensive, highly detailed permanent study guide and week summary for the following course week:
+
+Course: ${group.courseCode} - ${course.title}
+Week: ${group.weekName}
 
 CRITICAL DIRECTIVES:
-1. Grounded in Source Materials: Do NOT simply repeat or summarize the question texts. You must use the actual Covered Material Context (the lecture transcripts, slides outlines, and textbook readings) to summarize and explain the core academic concepts. 
-2. The summary must cover ALL topics, weeks, and slides configured for this entire session (not just the current or answered questions).
-3. Be concise and simplified: Adhere to the Feynman Technique of making concepts incredibly simple and intuitive using elegant, grounded analogies (like bongos, water-flows, or balance scales), but do not be overly verbose or repetitive.
+1. Grounded in Lesson Content: Do NOT simply repeat or summarize the question texts. You must use the actual Covered Material Context (the lecture transcripts, slides outlines, and textbook readings) to summarize and explain the core academic concepts. 
+2. Be concise and simplified: Adhere to the Feynman Technique of making concepts incredibly simple and intuitive using elegant, grounded analogies (like bongos, water-flows, or balance scales), but do not be overly verbose or repetitive.
+3. This is a permanent study asset on disk: Formulate it as a durable textbook chapter study guide for "${group.courseCode} - ${group.weekName}".
 
-Covered Material Context (Extracted slides, transcripts, and reading content):
+Covered Material Context (Extracted slides, transcripts, and reading content for this week):
 ${materialContext || 'No raw lesson materials available.'}
 
-Student's Performance Context (All exercises in the study session):
+Reference Question Context (Sample exercises for this week):
 ${performanceContext}
 
 Generate a beautifully styled Markdown document. Break it down into these exact sections:
-1. # 📓 Feynman Session Summary & Study Guide
-   A high-level executive summary of what was covered across the entire session, the courses involved, overall performance so far, and the general learning objectives.
+1. # 📓 Course Study Guide: ${group.courseCode} | ${group.weekName}
+   An elegant overview of this week's topics, general learning objectives, and core themes.
 2. ## 🧠 Concepts Demystified (Feynman Style)
-   Pick the main 2-3 core academic concepts covered in this study session's lecture content. Explain each one in simple terms, using an elegant analogy to convey the underlying economics or public policy intuition.
-3. ## 🔍 Performance & Pitfall Analysis
-   For any questions answered incorrectly, explain the common pitfall and how to think about the correct answer from first principles. If a question is unanswered, frame it as a preview warning on what to focus on.
+   Explain the main 2-3 core academic concepts covered in this week's materials. Explain each one in simple terms, using an elegant analogy to convey the underlying economics or policy intuition.
+3. ## 🔍 Mistake Analyses & Pitfalls
+   Analyze common pitfalls and traps from the reference questions. Explain why incorrect options are tempting and how to think about the correct answer from first principles.
 4. ## 📝 Custom Class Cheat Sheet
    A bulleted, extremely concise reference summarizing key equations, core definitions, or central principles from these specific lectures.
 5. ## 🚀 Recommended Next Steps
-   Suggested concrete review goals (e.g., specific weeks, slides, or chapters to focus on).
+   Suggested concrete review goals (e.g., specific slides, read-throughs, or topic units).
 
 Ensure all equations are nicely formatted in standard LaTeX format when appropriate (wrap math blocks in $$ block $$ or $ inline $).`
 
-  try {
-    const { text } = await generateText({
-      model: google('gemini-3.6-flash'),
-      prompt,
+    try {
+      const { text } = await generateText({
+        model: google('gemini-3.6-flash'),
+        prompt,
+      })
+
+      fs.writeFileSync(weekSummaryFilePath, text, 'utf8')
+
+      results.push({
+        courseCode: group.courseCode,
+        weekName: group.weekName,
+        filePath: weekSummaryFilePath,
+        reloaded: false
+      })
+    } catch (error) {
+      console.error(`Error generating week summary for ${groupKey}:`, error)
+      throw error
+    }
+  }
+
+  // 5. Handle master index generation if multiple weeks are covered in the session
+  if (results.length === 1) {
+    // If only one week is covered, serve its study guide directly!
+    const singleResult = results[0]
+    const content = fs.readFileSync(singleResult.filePath, 'utf8')
+    return { filePath: singleResult.filePath, content }
+  } else {
+    // If multiple weeks are covered, generate an interactive Master Index file on the fly!
+    let indexMarkdown = `# 📓 Feynman Session Study Guides\n`
+    indexMarkdown += `This study session covers multiple weeks of material. We have retrieved and prepared dedicated Feynman study guides for each week. Click on a link below to open its comprehensive study guide:\n\n`
+    
+    results.forEach(res => {
+      const statusText = res.reloaded ? '⚡ Loaded from memory asset' : '✨ Freshly compiled by AI'
+      indexMarkdown += `* 📖 [**${res.courseCode} - ${res.weekName} Study Guide**](/api/file?path=${encodeURIComponent(res.filePath)}) \n  *(${statusText} | PDF/Slides-grounded)*\n\n`
     })
 
-    // 6. Ensure directory and write to disk
-    const summariesDir = path.join(process.cwd(), 'summaries')
-    if (!fs.existsSync(summariesDir)) {
-      fs.mkdirSync(summariesDir, { recursive: true })
-    }
+    indexMarkdown += `---\n`
+    indexMarkdown += `*Note: Week summaries are permanently saved on disk under \`/summaries/\`. Any future session covering these weeks will re-load them instantly in milliseconds!*`
 
-    const summaryFilePath = path.join(summariesDir, `session_${sessionId}.md`)
-    fs.writeFileSync(summaryFilePath, text, 'utf8')
+    const sessionIndexFilePath = path.join(summariesDir, `session_${sessionId}_index.md`)
+    fs.writeFileSync(sessionIndexFilePath, indexMarkdown, 'utf8')
 
-    return { filePath: summaryFilePath, content: text }
-  } catch (error) {
-    console.error('Error in createSessionSummary service:', error)
-    throw error
+    return { filePath: sessionIndexFilePath, content: indexMarkdown }
   }
 }
