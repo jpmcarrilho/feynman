@@ -19,7 +19,7 @@ describe('VoiceHub Component', () => {
 
   it('renders correctly in initial state', () => {
     render(<VoiceHub liveAPI={defaultLiveAPI} />)
-    expect(screen.getByText('Live Voice Tutor')).toBeInTheDocument()
+    expect(screen.getByText('Talk to the Professor')).toBeInTheDocument()
     expect(screen.getByText('Connect to start chatting hands-free.')).toBeInTheDocument()
     expect(screen.getByText('Start Voice Tutor')).toBeInTheDocument()
   })

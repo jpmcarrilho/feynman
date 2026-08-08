@@ -12,11 +12,16 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { createStudySession, getTopics, getSessionHistory, logAnswer, saveChatLog, getSessionWithExercises, getClassContextForTopic, generateNextExercise, deleteStudySession } from '@/app/actions'
-import { ChevronLeft, ChevronRight, PlusCircle, History, PlayCircle, Loader2, Trash2, X, Search, Maximize2, Minimize2 } from 'lucide-react'
+import { createStudySession, getTopics, getSessionHistory, logAnswer, saveChatLog, getSessionWithExercises, getClassContextForTopic, generateNextExercise, deleteStudySession, generateSessionSummary } from '@/app/actions'
+import { ChevronLeft, ChevronRight, PlusCircle, History, PlayCircle, Loader2, Trash2, X, Search, Maximize2, Minimize2, Sparkles } from 'lucide-react'
 import { useLiveAPI } from '@/hooks/useLiveAPI'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
 import { FeynmanLogo } from './FeynmanLogo'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 
 const formatDisplayName = (name: string | null | undefined): string => {
   if (!name) return '';
@@ -48,6 +53,7 @@ export function StudyInterface() {
   const [activeFileTitle, setActiveFileTitle] = useState<string>('')
   const [fileContent, setFileContent] = useState<string>('')
   const [fileLoading, setFileLoading] = useState<boolean>(false)
+  const [isGeneratingSummary, setIsGeneratingSummary] = useState<boolean>(false)
   
   type Platform = 'mac' | 'windows' | 'linux' | 'other'
   const [platform, setPlatform] = useState<Platform>('other')
@@ -248,6 +254,33 @@ export function StudyInterface() {
     setActiveFileHighlight(null)
     setActiveFileTitle('')
     setFileContent('')
+  }
+
+  const preprocessLaTeX = (text: string | null | undefined) => {
+    if (!text) return '';
+    let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
+    processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
+    return processed;
+  }
+
+  const handleGenerateSummary = async () => {
+    if (!session) return
+    setIsGeneratingSummary(true)
+    try {
+      const result = await generateSessionSummary(session.id)
+      if (result && result.filePath) {
+        // Force the visualizer to show the newly generated markdown file!
+        setActiveFile(result.filePath)
+        setActiveFileTitle("Session Summary Study Guide")
+        setActiveFilePage(null)
+        setActiveFileHighlight(null)
+        setFileContent(result.content || '')
+      }
+    } catch (e) {
+      console.error("Failed to generate session summary:", e)
+    } finally {
+      setIsGeneratingSummary(false)
+    }
   }
 
   useEffect(() => {
@@ -858,20 +891,38 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
             </Button>
           </div>
 
-          {session && (
-            <Button 
-              variant="ghost" 
-              className="text-lecture-red hover:text-lecture-red hover:bg-lecture-red/10 border border-transparent hover:border-lecture-red/20 font-medium" 
-              onClick={() => {
-                setSession(null)
-                setExercises([])
-                setCurrentIndex(0)
-                localStorage.removeItem('dedp_active_session')
-              }}
-            >
-              End Session
-            </Button>
-          )}
+          <div className="flex items-center gap-2">
+            {session && (
+              <Button 
+                variant="outline"
+                className="text-fountain-ink border-fountain-ink/30 hover:bg-fountain-ink/5 font-medium flex items-center gap-1.5 shadow-sm h-10"
+                onClick={handleGenerateSummary}
+                disabled={isGeneratingSummary}
+              >
+                {isGeneratingSummary ? (
+                  <Loader2 className="w-4 h-4 animate-spin text-fountain-ink" />
+                ) : (
+                  <Sparkles className="w-4 h-4 text-bongo-gold fill-bongo-gold" />
+                )}
+                Session Summary
+              </Button>
+            )}
+
+            {session && (
+              <Button 
+                variant="ghost" 
+                className="text-lecture-red hover:text-lecture-red hover:bg-lecture-red/10 border border-transparent hover:border-lecture-red/20 font-medium h-10" 
+                onClick={() => {
+                  setSession(null)
+                  setExercises([])
+                  setCurrentIndex(0)
+                  localStorage.removeItem('dedp_active_session')
+                }}
+              >
+                End Session
+              </Button>
+            )}
+          </div>
         </div>
         
         <TabsContent value="study" className="flex-1 overflow-y-auto p-8 m-0 min-w-0">
@@ -986,14 +1037,25 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                 className="w-full h-full border-0"
               />
             ) : (
-              <ScrollArea className="h-full w-full p-4">
-                <div className="prose dark:prose-invert max-w-none text-xs leading-relaxed whitespace-pre-wrap font-sans">
+              <ScrollArea className="h-full w-full p-4 bg-background scrollbar-thin">
+                <div className="prose dark:prose-invert max-w-none text-sm leading-relaxed font-sans text-charcoal-graphite">
                   {fileLoading ? (
                     <div className="flex items-center justify-center py-12">
-                      <Loader2 className="w-6 h-6 animate-spin text-blue-600" />
+                      <Loader2 className="w-6 h-6 animate-spin text-fountain-ink" />
+                    </div>
+                  ) : activeFile.toLowerCase().endsWith('.md') ? (
+                    <div className="prose max-w-none text-charcoal-graphite/90 prose-p:leading-relaxed prose-headings:font-display prose-headings:italic prose-strong:text-charcoal-graphite">
+                      <ReactMarkdown 
+                        remarkPlugins={[remarkGfm, remarkMath]} 
+                        rehypePlugins={[rehypeKatex]}
+                      >
+                        {preprocessLaTeX(fileContent)}
+                      </ReactMarkdown>
                     </div>
                   ) : (
-                    renderTranscriptWithHighlight(fileContent, activeFileHighlight)
+                    <div className="whitespace-pre-wrap text-xs">
+                      {renderTranscriptWithHighlight(fileContent, activeFileHighlight)}
+                    </div>
                   )}
                 </div>
               </ScrollArea>

@@ -3,6 +3,7 @@
 import { generateText, generateObject } from 'ai'
 import { google } from '@ai-sdk/google'
 import { prisma } from '@/lib/db'
+import { createSessionSummary } from '@/services/summaryService'
 import { z } from 'zod'
 import fs from 'fs'
 import path from 'path'
@@ -701,5 +702,14 @@ export async function deleteStudySession(sessionId: string) {
   } catch (error) {
     console.error("Failed to delete study session:", error);
     return false;
+  }
+}
+
+export async function generateSessionSummary(sessionId: string) {
+  try {
+    return await createSessionSummary(sessionId);
+  } catch (error) {
+    console.error('Error in generateSessionSummary action:', error)
+    throw error
   }
 }
