@@ -1,86 +1,133 @@
 import 'dotenv/config'
+process.env.DATABASE_URL = process.env.DATABASE_URL || 'file:./dev.db';
 import { PrismaClient } from '@prisma/client'
 import Database from 'better-sqlite3'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import * as fs from 'fs'
 import * as path from 'path'
-import { parseLessonContent } from '../services/ingest'
+import { parseRegistryCsv, parsePdfBuffer, parseExerciseMarkdown } from '../services/ingest'
 
-const adapter = new PrismaBetterSqlite3({ url: process.env.DATABASE_URL || 'file:./dev.db' })
-const prisma = new PrismaClient({ adapter })
-
-const BASE_DIR = path.join(__dirname, '../../../MIT_Learn_Courses')
+const adapter = new PrismaBetterSqlite3({ url: 'file:./dev.db' });
+const prisma = new PrismaClient({ adapter });
 
 async function main() {
-  console.log('Starting seed process...')
-  const courses = ['JPAL102x', '14.750x']
+  console.log('Starting seed process...');
 
-  for (const courseCode of courses) {
-    let course = await prisma.course.findUnique({ where: { code: courseCode } })
-    if (!course) {
-      course = await prisma.course.create({
-        data: { code: courseCode, title: courseCode }
-      })
-    }
-    console.log(`Processing course: ${course.code}`)
+  // The CSV and course files are located one folder up from 'web', in 'MIT_Learn_Courses'
+  const baseDir = path.resolve(process.cwd(), '../MIT_Learn_Courses');
+  const csvPath = path.join(baseDir, 'resources_registry.csv');
 
-    const outlinePath = path.join(BASE_DIR, `${courseCode}_outline.json`)
-    if (!fs.existsSync(outlinePath)) {
-      console.log(`Outline not found: ${outlinePath}`)
-      continue
-    }
+  if (!fs.existsSync(csvPath)) {
+    console.error(`CSV not found at ${csvPath}`);
+    return;
+  }
 
-    const outline = JSON.parse(fs.readFileSync(outlinePath, 'utf8'))
+  const records = parseRegistryCsv(csvPath);
+  console.log(`Found ${records.length} records in the CSV.`);
 
-    for (let s = 0; s < outline.length; s++) {
-      const section = outline[s]
-      const weekFolder = `Week_${String(s + 1).padStart(2, '0')}_${section.sectionTitle.replace(/[^a-zA-Z0-9]/g, '_').slice(0, 30)}`
-      const targetDir = path.join(BASE_DIR, courseCode, weekFolder)
-      
-      for (const link of section.links) {
-        const safeName = link.text.replace(/[^a-zA-Z0-9]/g, '_')
-        const txtFilePath = path.join(targetDir, `${safeName}.txt`)
-        
-        if (!fs.existsSync(txtFilePath)) continue;
-        
-        const content = fs.readFileSync(txtFilePath, 'utf8')
-        const parsed = parseLessonContent(content)
-        
-        let topicType = 'lecture'
-        if (link.text.toLowerCase().includes('quiz') || link.text.toLowerCase().includes('problem') || link.text.toLowerCase().includes('exam')) {
-          topicType = 'quiz'
+  for (const row of records) {
+    const courseId = row['Course'];
+    if (!courseId) continue;
+
+    // 1. Ensure the Course exists in the database
+    const course = await prisma.course.upsert({
+      where: { code: courseId },
+      update: {},
+      create: {
+        code: courseId,
+        title: courseId, // E.g., "14.750x"
+        description: `Auto-generated course for ${courseId}`
+      }
+    });
+
+    const localPath = row['Local Path'];
+    const fullPath = localPath.startsWith('/') ? localPath : path.join(baseDir, localPath);
+
+    let rawText = '';
+    let content = '';
+    
+    // 2. Read and parse the actual file or directory
+    if (fs.existsSync(fullPath)) {
+      const stat = fs.statSync(fullPath);
+      if (stat.isFile()) {
+        if (fullPath.toLowerCase().endsWith('.pdf')) {
+          const buffer = fs.readFileSync(fullPath);
+          content = await parsePdfBuffer(buffer);
+        } else {
+          rawText = fs.readFileSync(fullPath, 'utf-8');
+          content = rawText;
         }
-
-        const topic = await prisma.topic.create({
-          data: {
-            courseId: course.id,
-            week: s + 1,
-            title: link.text,
-            type: topicType
+      } else if (stat.isDirectory()) {
+        const files = fs.readdirSync(fullPath);
+        for (const file of files) {
+          const filePath = path.join(fullPath, file);
+          if (fs.statSync(filePath).isFile()) {
+            if (filePath.toLowerCase().endsWith('.pdf')) {
+              const buffer = fs.readFileSync(filePath);
+              content += await parsePdfBuffer(buffer) + '\n\n';
+            } else {
+              rawText += fs.readFileSync(filePath, 'utf-8') + '\n\n';
+            }
           }
-        })
+        }
+        if (!content) {
+            content = rawText;
+        } else if (rawText) {
+            content += '\n\n' + rawText;
+        }
+      }
 
+      // 3. Save the Topic with full hierarchy data
+      const topic = await prisma.topic.create({
+        data: {
+          courseId: course.id,
+          week: row['Week'],
+          className: row['Class / Sequential'],
+          unit: row['Unit Number'],
+          title: row['Unit Title'],
+          resourceType: row['Resource Type'],
+          localPath: localPath,
+          content: content
+        }
+      });
+      console.log(`Created topic: [${topic.week}] ${topic.title}`);
+
+      // 4. If it's an exercise, parse it into individual flashcards/questions
+      if (row['Resource Type'].toLowerCase().includes('exercise') || localPath.toLowerCase().includes('question') || localPath.endsWith('.md')) {
+        const exercises = parseExerciseMarkdown(rawText);
+        
         let exCount = 0;
-        for (const ex of parsed.exercises) {
+        for (const ex of exercises) {
           if (!ex.correctAnswer || ex.choices.length === 0) continue;
           await prisma.exercise.create({
             data: {
               topicId: topic.id,
               questionText: ex.questionText,
-              choices: JSON.stringify(ex.choices),
+              choices: JSON.stringify(ex.choices), 
               correctAnswer: ex.correctAnswer,
-              explanation: ex.explanation || null
+              explanation: ex.explanation,
+              exerciseType: ex.exerciseType || 'single_choice'
             }
-          })
+          });
           exCount++;
         }
         if (exCount > 0) {
-          console.log(`  - Inserted ${exCount} exercises for ${link.text}`)
+          console.log(`  -> Added ${exCount} exercises to the database.`);
         }
       }
+    } else {
+      console.warn(`  [Warning] File not found on disk: ${fullPath}`);
     }
   }
-  console.log('Seed process completed successfully!')
+
+  console.log('Seeding completed successfully!');
 }
 
-main().catch(console.error).finally(() => prisma.$disconnect())
+main()
+  .catch((e) => {
+    console.error(e);
+    process.exit(1);
+  })
+  .finally(async () => {
+    await prisma.$disconnect();
+  });

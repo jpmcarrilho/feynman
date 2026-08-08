@@ -12,6 +12,13 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
 
+const preprocessLaTeX = (text: string | null | undefined) => {
+  if (!text) return '';
+  let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
+  processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
+  return processed;
+}
+
 interface FlashcardProps {
   questionText: string
   exerciseType?: string
@@ -25,9 +32,26 @@ interface FlashcardProps {
 }
 
 export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, onAnswer, onRequestExplanation }: FlashcardProps) {
+  const hasDropdownChoices = choices.some(c => /^\[Dropdown \d+\]/.test(c));
+  const effectiveExerciseType = hasDropdownChoices ? 'dropdown' : exerciseType;
+
+  let adjustedQuestionText = questionText;
+  if (effectiveExerciseType === 'dropdown') {
+    const dropdownsInChoices = new Set<string>();
+    choices.forEach(c => {
+      const match = c.match(/^(\[Dropdown \d+\])/);
+      if (match) dropdownsInChoices.add(match[1]);
+    });
+    dropdownsInChoices.forEach(dd => {
+      if (!adjustedQuestionText.includes(dd)) {
+        adjustedQuestionText += ` ${dd}`;
+      }
+    });
+  }
+
   const [selected, setSelected] = useState<string | null>(initialSelectedChoice || null)
   const [multiSelected, setMultiSelected] = useState<string[]>(() => {
-    if (!initialSelectedChoice || exerciseType !== 'multiple_choice') return []
+    if (!initialSelectedChoice || effectiveExerciseType !== 'multiple_choice') return []
     try {
       return JSON.parse(initialSelectedChoice)
     } catch (e) {
@@ -36,7 +60,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
   })
   const [numericValue, setNumericValue] = useState<string>(initialSelectedChoice || '')
   const [dropdownValues, setDropdownValues] = useState<Record<string, string>>(() => {
-    if (!initialSelectedChoice || exerciseType !== 'dropdown') return {}
+    if (!initialSelectedChoice || effectiveExerciseType !== 'dropdown') return {}
     try {
       return JSON.parse(initialSelectedChoice)
     } catch(e) {
@@ -54,10 +78,10 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
     let isCorrect = false;
     let answerStr = '';
 
-    if (exerciseType === 'single_choice') {
+    if (effectiveExerciseType === 'single_choice') {
       isCorrect = selected === correctAnswer;
       answerStr = selected || '';
-    } else if (exerciseType === 'multiple_choice') {
+    } else if (effectiveExerciseType === 'multiple_choice') {
       try {
         const correctArr = JSON.parse(correctAnswer);
         // Simple strict match for now
@@ -67,11 +91,11 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
         isCorrect = multiSelected.join(',') === correctAnswer;
       }
       answerStr = JSON.stringify(multiSelected);
-    } else if (exerciseType === 'numeric') {
+    } else if (effectiveExerciseType === 'numeric') {
       // Allow slight floating point variations
       isCorrect = Math.abs(parseFloat(numericValue) - parseFloat(correctAnswer)) < 0.01;
       answerStr = numericValue;
-    } else if (exerciseType === 'dropdown') {
+    } else if (effectiveExerciseType === 'dropdown') {
       const expectedAnswers = correctAnswer.split('|').map(s => s.trim());
       const selectedAnswers = Object.entries(dropdownValues).map(([k, v]) => k === '[BLANK]' ? v : `${k} ${v}`).map(s => s.trim());
       
@@ -98,9 +122,9 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
     if (onRequestExplanation) {
       setHasRequestedHelp(true)
       let answerStr = selected || '';
-      if (exerciseType === 'multiple_choice') answerStr = JSON.stringify(multiSelected);
-      if (exerciseType === 'numeric') answerStr = numericValue;
-      if (exerciseType === 'dropdown') {
+      if (effectiveExerciseType === 'multiple_choice') answerStr = JSON.stringify(multiSelected);
+      if (effectiveExerciseType === 'numeric') answerStr = numericValue;
+      if (effectiveExerciseType === 'dropdown') {
         answerStr = Object.entries(dropdownValues).map(([k, v]) => k === '[BLANK]' ? v : `${k} ${v}`).join(' | ');
       }
       onRequestExplanation(answerStr)
@@ -108,11 +132,11 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
   }
 
   const renderQuestionText = () => {
-    if (exerciseType === 'dropdown') {
-      const parts = questionText.split(/(\[BLANK\]|\[Dropdown \d+\])/g);
+    if (effectiveExerciseType === 'dropdown') {
+      const parts = adjustedQuestionText.split(/(\[BLANK\]|\[Dropdown \d+\])/g);
       
       if (parts.length === 1) {
-        return <div className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{questionText}</ReactMarkdown></div>;
+        return <div className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(adjustedQuestionText)}</ReactMarkdown></div>;
       }
 
       return (
@@ -120,7 +144,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           {parts.map((part, index) => {
             const isPlaceholder = part === '[BLANK]' || /^\[Dropdown \d+\]$/.test(part);
             if (!isPlaceholder) {
-              return <span key={index} className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{part}</ReactMarkdown></span>;
+              return <span key={index} className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(part)}</ReactMarkdown></span>;
             }
 
             const relevantChoices = choices.filter(c => {
@@ -148,7 +172,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
         </span>
       )
     }
-    return <div className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{questionText}</ReactMarkdown></div>;
+    return <div className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(adjustedQuestionText)}</ReactMarkdown></div>;
   }
 
   return (
@@ -158,7 +182,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
       </CardHeader>
       <CardContent className="space-y-4">
         
-        {exerciseType === 'single_choice' && (
+        {effectiveExerciseType === 'single_choice' && (
           <div className="grid gap-3">
             {choices.map((choice, idx) => {
               let variant: 'default' | 'outline' | 'secondary' | 'destructive' = 'outline'
@@ -186,14 +210,14 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
                   onClick={() => handleSelectSingle(choice)}
                   disabled={showResult}
                 >
-                  <div className="prose dark:prose-invert max-w-none text-sm break-words"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{choice}</ReactMarkdown></div>
+                  <div className="prose dark:prose-invert max-w-none text-sm break-words"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(choice)}</ReactMarkdown></div>
                 </Button>
               )
             })}
           </div>
         )}
 
-        {exerciseType === 'multiple_choice' && (
+        {effectiveExerciseType === 'multiple_choice' && (
           <div className="grid gap-3">
             {choices.map((choice, idx) => {
               let isCorrectChoice = false;
@@ -224,7 +248,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
                     className="mt-1"
                   />
                   <label htmlFor={`choice-${idx}`} className="cursor-pointer flex-1 break-words min-w-0">
-                    <div className="prose dark:prose-invert max-w-none text-sm font-medium leading-tight"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{choice}</ReactMarkdown></div>
+                    <div className="prose dark:prose-invert max-w-none text-sm font-medium leading-tight"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(choice)}</ReactMarkdown></div>
                   </label>
                 </div>
               )
@@ -237,7 +261,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           </div>
         )}
 
-        {exerciseType === 'numeric' && (
+        {effectiveExerciseType === 'numeric' && (
           <div className="flex flex-col gap-4">
             <Input 
               type="number" 
@@ -260,7 +284,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           </div>
         )}
 
-        {exerciseType === 'dropdown' && (
+        {effectiveExerciseType === 'dropdown' && (
           <div className="flex flex-col gap-4">
             {!showResult && (
               <Button onClick={handleSubmit} disabled={Object.values(dropdownValues).filter(Boolean).length === 0}>
@@ -281,7 +305,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           {explanation && (
             <div className="text-sm w-full">
               <strong>Official Explanation:</strong>
-              <div className="mt-2 prose dark:prose-invert max-w-none text-sm break-words"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{explanation}</ReactMarkdown></div>
+              <div className="mt-2 prose dark:prose-invert max-w-none text-sm break-words"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(explanation)}</ReactMarkdown></div>
             </div>
           )}
           

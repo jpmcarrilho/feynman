@@ -4,17 +4,45 @@ import { useState, useRef, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Mic, MicOff, Volume2, Loader2, AlertCircle, Send } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import remarkMath from 'remark-math'
+import rehypeKatex from 'rehype-katex'
+import 'katex/dist/katex.min.css'
 
-interface VoiceHubProps {
-  liveAPI: any
+const preprocessLaTeX = (text: string | null | undefined) => {
+  if (!text) return '';
+  let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
+  processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
+  return processed;
 }
 
-export function VoiceHub({ liveAPI }: VoiceHubProps) {
-  const { isConnected, isConnecting, error, messages, connect, disconnect, sendText } = liveAPI
+interface VoiceHubProps {
+  liveAPI: any;
+  onViewFile?: (filePath: string) => void;
+}
+
+export function VoiceHub({ liveAPI, onViewFile }: VoiceHubProps) {
+  const { isConnected, isConnecting, error, messages, connect, disconnect, sendText, isMuted, setMuted } = liveAPI
   
   const [inputText, setInputText] = useState('')
-  const [isMuted, setIsMuted] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  
+  type Platform = 'mac' | 'windows' | 'linux' | 'other'
+  const [platform, setPlatform] = useState<Platform>('other')
+
+  useEffect(() => {
+    const userAgent = navigator.userAgent.toLowerCase();
+    if (userAgent.indexOf('mac') !== -1) {
+      setPlatform('mac');
+    } else if (userAgent.indexOf('win') !== -1) {
+      setPlatform('windows');
+    } else if (userAgent.indexOf('linux') !== -1) {
+      setPlatform('linux');
+    } else {
+      setPlatform('other');
+    }
+  }, [])
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -27,6 +55,7 @@ export function VoiceHub({ liveAPI }: VoiceHubProps) {
   const handleSend = (e: React.FormEvent) => {
     e.preventDefault()
     if (inputText.trim() && isConnected) {
+      setMuted(true)
       sendText(inputText)
       setInputText('')
     }
@@ -60,7 +89,29 @@ export function VoiceHub({ liveAPI }: VoiceHubProps) {
             messages.filter((msg: any) => !msg.text.startsWith('[SYSTEM MESSAGE')).map((msg: any) => (
               <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div className={`max-w-[85%] rounded-xl px-4 py-2 text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700'}`}>
-                  {msg.text}
+                  <div className={`prose max-w-none text-sm ${msg.role === 'user' ? 'text-white prose-p:text-white prose-strong:text-white prose-a:text-white' : 'dark:prose-invert'}`}>
+                    <ReactMarkdown 
+                      remarkPlugins={[remarkGfm, remarkMath]} 
+                      rehypePlugins={[rehypeKatex]}
+                      components={{
+                        a: ({ href, children }: any) => {
+                          if (href && (href.startsWith('/api/file?path=') || href.includes('path='))) {
+                            return (
+                              <button 
+                                onClick={() => onViewFile?.(href)} 
+                                className="text-blue-600 dark:text-blue-400 hover:underline font-semibold inline-flex items-center gap-1 bg-transparent border-0 p-0 align-baseline text-left cursor-pointer"
+                              >
+                                {children}
+                              </button>
+                            );
+                          }
+                          return <a href={href} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">{children}</a>;
+                        }
+                      }}
+                    >
+                      {preprocessLaTeX(msg.text)}
+                    </ReactMarkdown>
+                  </div>
                 </div>
               </div>
             ))
@@ -87,16 +138,37 @@ export function VoiceHub({ liveAPI }: VoiceHubProps) {
               {isConnecting ? (
                 <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Connecting...</>
               ) : isConnected ? (
-                <><MicOff className="mr-2 h-4 w-4" /> End Call</>
+                <div className="flex items-center justify-between w-full px-1">
+                  <span className="flex items-center"><MicOff className="mr-2 h-4 w-4" /> End Call</span>
+                  <kbd className="text-[10px] opacity-60 font-mono bg-background border rounded px-1 shrink-0 ml-2">{platform === 'mac' ? 'Opt+V' : 'Alt+V'}</kbd>
+                </div>
               ) : (
-                <><Mic className="mr-2 h-4 w-4" /> Start Voice Tutor</>
+                <div className="flex items-center justify-between w-full px-1">
+                  <span className="flex items-center"><Mic className="mr-2 h-4 w-4" /> Start Voice Tutor</span>
+                  <kbd className="text-[10px] opacity-70 font-mono bg-blue-700 dark:bg-blue-900 border border-blue-500 text-white rounded px-1 shrink-0 ml-2">{platform === 'mac' ? 'Opt+V' : 'Alt+V'}</kbd>
+                </div>
               )}
             </Button>
+
+            {isConnected && (
+              <Button
+                variant={isMuted ? "destructive" : "outline"}
+                size="sm"
+                onClick={() => setMuted(!isMuted)}
+                className="px-3 shrink-0 flex items-center gap-1.5"
+                title={isMuted ? "Unmute Microphone" : "Mute Microphone"}
+              >
+                {isMuted ? <MicOff className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                <kbd className="text-[10px] opacity-60 font-mono bg-background border rounded px-1 shrink-0">{platform === 'mac' ? 'Opt+M' : 'Alt+M'}</kbd>
+              </Button>
+            )}
           </div>
 
           <form onSubmit={(e) => {
             e.preventDefault();
             if (!inputText.trim()) return;
+            
+            setMuted(true); // Mute mic when sending text
             
             if (!isConnected) {
               connect(false).then(() => { // Text-only mode

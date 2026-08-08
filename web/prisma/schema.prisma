@@ -7,26 +7,37 @@ datasource db {
 }
 
 model Course {
-  id     String  @id @default(uuid())
-  code   String  @unique
-  title  String
-  topics Topic[]
+  id          String   @id @default(uuid())
+  code        String   @unique
+  title       String
+  description String?
+  topics      Topic[]
 }
 
 model Topic {
-  id        String     @id @default(uuid())
-  courseId  String
-  week      Int
-  title     String
-  type      String     // e.g., "lecture", "quiz"
-  course    Course     @relation(fields: [courseId], references: [id])
-  exercises Exercise[]
+  id           String     @id @default(uuid())
+  courseId     String
+  
+  // --- NEW HIERARCHY FIELDS ---
+  week         String?  // e.g., "Week 01"
+  className    String?  // e.g., "Introduction to Political Economy"
+  unit         String?  // e.g., "1"
+  title        String   // Unit Title, e.g., "Intro to Political Economy part1"
+  
+  // --- CONTENT DETAILS ---
+  resourceType String?  // e.g., "Video", "Slides PDF", "Exercise"
+  content      String?   // The actual extracted text from the file
+  localPath    String?  // Keep track of the original file path
+
+  course       Course     @relation(fields: [courseId], references: [id])
+  exercises    Exercise[]
 }
 
 model Exercise {
   id            String        @id @default(uuid())
   topicId       String
   questionText  String
+  exerciseType  String        @default("single_choice") // "single_choice", "multiple_choice", "numeric", "dropdown"
   choices       String        // Stored as JSON string
   correctAnswer String
   explanation   String?
@@ -36,6 +47,7 @@ model Exercise {
 
 model StudySession {
   id          String        @id @default(uuid())
+  title       String?       // e.g., "JPAL102x - Week 4"
   startTime   DateTime      @default(now())
   endTime     DateTime?
   status      String        // e.g., "active", "completed"

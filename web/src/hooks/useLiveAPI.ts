@@ -11,7 +11,9 @@ export function useLiveAPI(systemInstructionText: string) {
   const [isConnecting, setIsConnecting] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
   const [error, setError] = useState<string | null>(null)
+  const [isMuted, setIsMuted] = useState(false)
 
+  const isMutedRef = useRef(false)
   const wsRef = useRef<WebSocket | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -20,6 +22,79 @@ export function useLiveAPI(systemInstructionText: string) {
   
   // For playback scheduling
   const nextPlayTimeRef = useRef<number>(0)
+  const activeSourcesRef = useRef<AudioBufferSourceNode[]>([])
+
+  const setMuted = useCallback(async (muted: boolean) => {
+    isMutedRef.current = muted;
+    setIsMuted(muted);
+
+    if (muted) {
+      // If muting, stop the microphone tracks to turn off the recording indicator
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach(t => t.stop())
+        streamRef.current = null
+      }
+      if (sourceRef.current) {
+        sourceRef.current.disconnect()
+        sourceRef.current = null
+      }
+    } else {
+      // If unmuting, ensure audio context is running
+      if (audioContextRef.current) {
+        if (audioContextRef.current.state === 'suspended') {
+          await audioContextRef.current.resume().catch(console.error)
+        }
+
+        // If the stream wasn't initialized or was stopped, initialize it now!
+        if (!streamRef.current) {
+          try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+            streamRef.current = stream
+
+            // Ensure worklet is loaded and processor is created
+            if (!processorRef.current) {
+              try {
+                await audioContextRef.current.audioWorklet.addModule('/audio-worklet.js')
+              } catch (e) {
+                console.log("Audio worklet module add attempt:", e)
+              }
+              const processor = new AudioWorkletNode(audioContextRef.current, 'audio-recorder-worklet')
+              processorRef.current = processor
+            }
+
+            const source = audioContextRef.current.createMediaStreamSource(stream)
+            sourceRef.current = source
+
+            // Hook up processor port to current websocket
+            processorRef.current.port.onmessage = (e) => {
+              if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isMutedRef.current) {
+                const base64 = arrayBufferToBase64(e.data)
+                wsRef.current.send(JSON.stringify({
+                  realtimeInput: {
+                    audio: { mimeType: 'audio/pcm;rate=16000', data: base64 }
+                  }
+                }))
+              }
+            }
+
+            source.connect(processorRef.current)
+            processorRef.current.connect(audioContextRef.current.destination)
+          } catch (err) {
+            console.error("Failed to re-initialize microphone stream on unmute:", err)
+            setError("Failed to access microphone.")
+            // Revert state to muted
+            isMutedRef.current = true;
+            setIsMuted(true);
+          }
+        } else {
+          // If stream exists, make sure tracks are enabled
+          streamRef.current.getAudioTracks().forEach(t => {
+            t.enabled = true
+          })
+        }
+      }
+    }
+  }, [])
 
   // Converts ArrayBuffer (PCM16) to Base64 string
   const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
@@ -62,6 +137,9 @@ export function useLiveAPI(systemInstructionText: string) {
 
   const playAudioChunk = (base64: string) => {
     if (!audioContextRef.current) return
+    if (audioContextRef.current.state === 'suspended') {
+      audioContextRef.current.resume().catch(console.error)
+    }
     const float32 = base64ToFloat32Array(base64)
     const buffer = audioContextRef.current.createBuffer(1, float32.length, 24000)
     buffer.getChannelData(0).set(float32)
@@ -72,14 +150,39 @@ export function useLiveAPI(systemInstructionText: string) {
 
     const currentTime = audioContextRef.current.currentTime
     const playTime = Math.max(currentTime, nextPlayTimeRef.current)
+    
+    // Register active source and clean up when it ends
+    activeSourcesRef.current.push(source)
+    source.onended = () => {
+      activeSourcesRef.current = activeSourcesRef.current.filter(s => s !== source)
+    }
+
     source.start(playTime)
     nextPlayTimeRef.current = playTime + buffer.duration
   }
+
+  const stopAllAudio = useCallback(() => {
+    activeSourcesRef.current.forEach(source => {
+      try {
+        source.stop()
+      } catch (e) {
+        // Node was already stopped or not started yet
+      }
+    })
+    activeSourcesRef.current = []
+    if (audioContextRef.current) {
+      nextPlayTimeRef.current = audioContextRef.current.currentTime
+    }
+  }, [])
 
   const connect = (audioEnabled: boolean = true): Promise<void> => {
     return new Promise(async (resolve, reject) => {
       setIsConnecting(true)
       setError(null)
+      
+      // Initialize correct initial muted state based on audioEnabled
+      isMutedRef.current = !audioEnabled
+      setIsMuted(!audioEnabled)
       
       try {
         const audioCtx = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 })
@@ -115,9 +218,9 @@ export function useLiveAPI(systemInstructionText: string) {
           // Send initial setup
           ws.send(JSON.stringify({
             setup: {
-              model: 'models/gemini-2.0-flash',
+              model: 'models/gemini-3.1-flash-live-preview',
               generationConfig: {
-                responseModalities: audioEnabled ? ["AUDIO"] : ["TEXT"]
+                responseModalities: ["AUDIO"]
               },
               systemInstruction: {
                 parts: [{ text: fullSystemInstruction }]
@@ -130,7 +233,7 @@ export function useLiveAPI(systemInstructionText: string) {
           // Start processing audio if enabled
           if (audioEnabled && processorRef.current && sourceRef.current) {
             processorRef.current.port.onmessage = (e) => {
-              if (ws.readyState === WebSocket.OPEN) {
+              if (ws.readyState === WebSocket.OPEN && !isMutedRef.current) {
                 const base64 = arrayBufferToBase64(e.data)
                 ws.send(JSON.stringify({
                   realtimeInput: {
@@ -152,6 +255,11 @@ export function useLiveAPI(systemInstructionText: string) {
               text = await event.data.text()
             }
             const data = JSON.parse(text)
+            
+            if (data.serverContent?.interrupted) {
+              console.log("User interrupted, stopping playback.")
+              stopAllAudio()
+            }
             
             if (data.serverContent?.modelTurn?.parts) {
               const parts = data.serverContent.modelTurn.parts
@@ -204,6 +312,7 @@ export function useLiveAPI(systemInstructionText: string) {
   }
 
   const disconnect = useCallback(() => {
+    stopAllAudio()
     if (wsRef.current) {
       wsRef.current.close()
       wsRef.current = null
@@ -226,9 +335,10 @@ export function useLiveAPI(systemInstructionText: string) {
     }
     setIsConnected(false)
     setIsConnecting(false)
-  }, [])
+  }, [stopAllAudio])
 
   const sendText = (text: string) => {
+    stopAllAudio()
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
         clientContent: {
@@ -249,6 +359,8 @@ export function useLiveAPI(systemInstructionText: string) {
     setMessages,
     connect,
     disconnect,
-    sendText
+    sendText,
+    isMuted,
+    setMuted
   }
 }

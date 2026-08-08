@@ -1,143 +1,120 @@
+import fs from 'fs';
+import { parse } from 'csv-parse/sync';
+import { PDFParse } from 'pdf-parse';
+
+export interface CsvResourceRow {
+  Course: string;
+  Week: string;
+  'Class / Sequential': string;
+  'Unit Number': string;
+  'Unit Title': string;
+  'Resource Type': string;
+  'Local Path': string;
+}
+
 export interface ParsedExercise {
   questionText: string;
   choices: string[];
   correctAnswer: string;
-  explanation?: string;
+  explanation: string;
+  exerciseType?: string;
 }
 
-export interface ParsedLesson {
-  url: string;
-  slidesUrl: string;
-  transcript: string;
-  exercises: ParsedExercise[];
-  contents: string[];
-}
-
-export function parseExerciseBlock(blockText: string): ParsedExercise {
-  const lines = blockText.split('\n').map(l => l.trim());
-  const choices: string[] = [];
-  let correctAnswer = '';
-  
-  const questionLines: string[] = [];
-  const explanationLines: string[] = [];
-  
-  let inExplanation = false;
-  let inChoices = false;
-  
-  const junkPhrases = [
-    'show answer', 'submit', 'you have used', 'grading method', 
-    'some problems have options', 'correct', 'skip to main content',
-    'point (graded)', 'choices:'
-  ];
-  
-  for (const line of lines) {
-    if (line === '') continue;
-
-    if (line.toLowerCase().startsWith('explanation:') || line.toLowerCase().startsWith('solution:')) {
-      inExplanation = true;
-      explanationLines.push(line.replace(/^(explanation|solution):\s*/i, ''));
-      continue;
-    }
-    
-    if (inExplanation) {
-      explanationLines.push(line);
-      continue;
-    }
-    
-    if (line.startsWith('- [ ]') || line.startsWith('- [x]')) {
-      inChoices = true;
-      const choiceText = line.substring(5).trim();
-      choices.push(choiceText);
-      if (line.startsWith('- [x]')) {
-        correctAnswer = choiceText;
-      }
-      continue;
-    }
-
-    if (inChoices) {
-      // Past the choices, ignore junk
-      const lower = line.toLowerCase();
-      if (junkPhrases.some(p => lower.includes(p))) continue;
-      continue; 
-    } else {
-      // Still in question text
-      const lower = line.toLowerCase();
-      if (junkPhrases.some(p => lower === p || lower.startsWith(p))) continue;
-      if (line.toLowerCase() === 'question:') continue;
-      questionLines.push(line);
-    }
-  }
-  
-  // Post-process question lines to remove duplicated choices
-  const cleanedQuestionLines = questionLines.filter(qLine => {
-    // If this line is exactly one of the choices, skip it
-    return !choices.some(c => c === qLine);
+/**
+ * Reads the resources_registry.csv and returns typed records
+ */
+export function parseRegistryCsv(csvFilePath: string): CsvResourceRow[] {
+  const fileContent = fs.readFileSync(csvFilePath, 'utf-8');
+  const records = parse(fileContent, {
+    columns: true, // Uses the first row as object keys
+    skip_empty_lines: true,
+    relax_quotes: true,
+    relax_column_count: true,
   });
-  
-  return {
-    questionText: cleanedQuestionLines.join('\n').trim(),
-    choices,
-    correctAnswer,
-    explanation: explanationLines.length > 0 ? explanationLines.join('\n').trim() : undefined
-  };
+  return records as CsvResourceRow[];
 }
 
-export function parseLessonContent(content: string): ParsedLesson {
-  const parsed: ParsedLesson = {
-    url: '',
-    slidesUrl: '',
-    transcript: '',
-    exercises: [],
-    contents: []
-  };
+/**
+ * Extracts clean text from PDF using pdf-parse
+ */
+export async function parsePdfBuffer(buffer: Buffer): Promise<string> {
+  try {
+    const parser = new PDFParse({ data: buffer });
+    const data = await parser.getText();
+    return data.text.trim();
+  } catch (error: any) {
+    console.warn(`  [Warning] Failed to parse PDF: ${error.message || 'Unknown error'}`);
+    return "";
+  }
+}
+
+/**
+ * Parses markdown exercises into structured JSON 
+ * (Question, Choices, Correct Answer, Explanation)
+ */
+export function parseExerciseMarkdown(rawText: string): ParsedExercise[] {
+  const exercises: ParsedExercise[] = [];
   
-  const urlMatch = content.match(/URL:\s*(https:\/\/[^\n]+)/);
-  if (urlMatch) parsed.url = urlMatch[1].trim();
-  
-  let currentBlockType: string | null = null;
-  let currentBlockLines: string[] = [];
-  
-  const flushCurrentBlock = () => {
-    if (!currentBlockType) return;
-    const blockText = currentBlockLines.join('\n').trim();
-    if (currentBlockType === 'transcript') {
-      parsed.transcript = blockText;
-    } else if (currentBlockType === 'exercise') {
-      parsed.exercises.push(parseExerciseBlock(blockText));
-    } else if (currentBlockType === 'content') {
-      parsed.contents.push(blockText);
+  // Split the file by "# Question"
+  const blocks = rawText.split(/^# Question/m).filter(b => b.trim().length > 0);
+
+  for (const block of blocks) {
+    // Filter out EdX junk phrases like "1/1 point (graded)"
+    const cleanedBlock = block.replace(/\d+\/\d+\s+point\s+\(graded\)/gi, '').trim();
+
+    // Find the boundaries of the sections
+    const choicesMatch = cleanedBlock.match(/## Choices\n([\s\S]*?)(?=## Explanation\/Solution|$)/);
+    const explanationMatch = cleanedBlock.match(/## Explanation\/Solution\n([\s\S]*)$/);
+    
+    // Extract Question Text
+    let questionText = cleanedBlock;
+    if (choicesMatch) {
+      questionText = cleanedBlock.substring(0, choicesMatch.index).trim();
+    } else if (explanationMatch) {
+      questionText = cleanedBlock.substring(0, explanationMatch.index).trim();
     }
-    currentBlockType = null;
-    currentBlockLines = [];
-  };
-  
-  const lines = content.split('\n');
-  for (const line of lines) {
-    if (line.startsWith('[SLIDES PDF]')) {
-      flushCurrentBlock();
-      currentBlockType = 'slides';
-    } else if (line.startsWith('[TRANSCRIPT]')) {
-      flushCurrentBlock();
-      currentBlockType = 'transcript';
-    } else if (line.startsWith('[EXERCISE/PROBLEM]')) {
-      flushCurrentBlock();
-      currentBlockType = 'exercise';
-    } else if (line.startsWith('[CONTENT]')) {
-      flushCurrentBlock();
-      currentBlockType = 'content';
-    } else if (line.startsWith('==================') && currentBlockType) {
-      flushCurrentBlock();
-    } else if (currentBlockType) {
-      if (currentBlockType === 'slides' && line.startsWith('Slide URL: ')) {
-        parsed.slidesUrl = line.replace('Slide URL: ', '').trim();
-        currentBlockType = null;
-      } else {
-        currentBlockLines.push(line);
+
+    // Extract Choices and Correct Answer
+    const choicesRaw = choicesMatch ? choicesMatch[1].trim().split('\n') : [];
+    const choices: string[] = [];
+    const correctAnswersList: string[] = [];
+
+    for (const choice of choicesRaw) {
+      const trimmed = choice.trim();
+      if (trimmed.startsWith('- [x]') || trimmed.startsWith('- [X]')) {
+        const answerText = trimmed.substring(5).trim();
+        choices.push(answerText);
+        correctAnswersList.push(answerText);
+      } else if (trimmed.startsWith('- [ ]')) {
+        choices.push(trimmed.substring(5).trim());
+      } else if (trimmed.length > 0) {
+         const cleaned = trimmed.replace(/^-/, '').trim();
+         if (/^(correct|incorrect|unanswered|answered)$/i.test(cleaned)) continue;
+         choices.push(cleaned); // Fallback for weird formatting
       }
     }
+
+    // Extract Explanation
+    const explanation = explanationMatch ? explanationMatch[1].trim() : '';
+
+    let exerciseType = 'single_choice';
+    let correctAnswer = '';
+    
+    if (correctAnswersList.length > 1) {
+      exerciseType = 'multiple_choice';
+      correctAnswer = JSON.stringify(correctAnswersList);
+    } else if (correctAnswersList.length === 1) {
+      correctAnswer = correctAnswersList[0];
+    }
+
+    exercises.push({
+      questionText,
+      choices,
+      correctAnswer,
+      explanation,
+      exerciseType
+    });
   }
-  
-  flushCurrentBlock();
-  
-  return parsed;
+
+  return exercises;
 }
