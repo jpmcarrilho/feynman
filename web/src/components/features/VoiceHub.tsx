@@ -57,8 +57,7 @@ export function VoiceHub({ liveAPI, onViewFile }: VoiceHubProps) {
     <Card className="w-full h-full flex flex-col shadow-none border-0 rounded-none bg-card text-charcoal-graphite">
       <CardHeader className="pb-3 shrink-0 border-b border-charcoal-graphite/10">
         <div className="flex items-center justify-between">
-          <CardTitle className="text-xl flex items-center gap-3 font-display italic text-fountain-ink select-none">
-            <FeynmanLogo variant="mini" size={32} className="stroke-fountain-ink transition-transform duration-200 hover:scale-105" />
+          <CardTitle className="text-xl font-display italic text-fountain-ink select-none">
             Talk to the Professor
           </CardTitle>
         </div>
