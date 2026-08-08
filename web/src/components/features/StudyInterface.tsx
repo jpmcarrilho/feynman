@@ -13,9 +13,10 @@ import { Input } from '@/components/ui/input'
 import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/components/ui/accordion'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { createStudySession, getTopics, getSessionHistory, logAnswer, saveChatLog, getSessionWithExercises, getClassContextForTopic, generateNextExercise, deleteStudySession } from '@/app/actions'
-import { ChevronLeft, ChevronRight, PlusCircle, History, PlayCircle, Loader2, Trash2, X, Search } from 'lucide-react'
+import { ChevronLeft, ChevronRight, PlusCircle, History, PlayCircle, Loader2, Trash2, X, Search, Maximize2, Minimize2 } from 'lucide-react'
 import { useLiveAPI } from '@/hooks/useLiveAPI'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
+import { FeynmanLogo } from './FeynmanLogo'
 
 const formatDisplayName = (name: string | null | undefined): string => {
   if (!name) return '';
@@ -38,6 +39,7 @@ export function StudyInterface() {
   const [isGeneratingNext, setIsGeneratingNext] = useState(false)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [selectedHistory, setSelectedHistory] = useState<any>(null)
+  const [isFocusMode, setIsFocusMode] = useState(false)
 
   // Side Visualizer States
   const [activeFile, setActiveFile] = useState<string | null>(null)
@@ -439,19 +441,30 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
   }
 
   return (
-    <div className="flex w-full h-screen overflow-hidden bg-background">
-      
+    <div className="flex w-full h-screen overflow-hidden bg-background font-sans relative">
+
+      {/* FIXED FLOATING LOGO BAR - Top Left (stays in place whether left sidebar is active or collapsed) */}
+      <div className="absolute top-[17px] left-4 z-50 cursor-pointer flex items-center gap-2 select-none" onClick={() => window.location.href = '/'}>
+        <FeynmanLogo variant="mini" size={36} className="stroke-charcoal-graphite transition-transform duration-200 hover:scale-105 animate-sketch-draw" />
+        <span className="font-display text-xl italic font-bold tracking-tight text-charcoal-graphite transition-colors duration-200 hover:text-fountain-ink">Feynman</span>
+      </div>
+
       {/* LEFT SIDEBAR - 20vw */}
-      <div className="w-[20vw] border-r flex flex-col bg-muted/20 shrink-0">
-        <div className="p-4 border-b">
+      <div className={`h-full border-r flex flex-col bg-card text-charcoal-graphite shrink-0 transition-all duration-300 ease-in-out border-charcoal-graphite/10 relative z-30 ${
+        isFocusMode ? 'w-0 overflow-hidden border-r-0 opacity-0' : 'w-[20vw] opacity-100'
+      }`}>
+        {/* Header spacer to match the fixed absolute logo */}
+        <div className="h-[72px] border-b border-charcoal-graphite/10 shrink-0" />
+
+        <div className="p-4 border-b border-charcoal-graphite/10 shrink-0">
           <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-            <DialogTrigger render={<Button className="w-full flex gap-2" />}>
+            <DialogTrigger render={<Button className="w-full flex gap-2 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-11 shrink-0" />}>
               <PlusCircle className="w-4 h-4" />
               Create Session
             </DialogTrigger>
-            <DialogContent className="sm:max-w-5xl md:max-w-6xl w-[90vw] max-h-[90vh] overflow-y-auto">
-              <DialogHeader>
-                <DialogTitle className="text-2xl">Configure Study Session</DialogTitle>
+            <DialogContent className="sm:max-w-5xl md:max-w-6xl w-[90vw] max-h-[90vh] overflow-y-auto bg-background border-2 border-charcoal-graphite/20 shadow-2xl rounded-xl p-6 font-sans">
+              <DialogHeader className="border-b border-charcoal-graphite/10 pb-4 mb-4">
+                <DialogTitle className="text-2xl font-display italic text-charcoal-graphite">Configure Study Session</DialogTitle>
               </DialogHeader>
               <div className="py-4 space-y-6">
                   <div className="flex gap-4 items-end mb-4">
@@ -527,12 +540,12 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                                   setSelectedUnits([]);
                                 }}
                                 className={`w-full text-left px-2.5 py-1.5 rounded-sm transition-colors text-xs hover:bg-muted flex items-start justify-between group ${
-                                  isSelected ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 font-semibold' : 'text-foreground/80'
+                                  isSelected ? 'bg-fountain-ink/15 text-fountain-ink font-semibold' : 'text-charcoal-graphite/80'
                                 }`}
                                 title={c}
                               >
                                 <span className="whitespace-normal break-words pr-2">{c}</span>
-                                {isSelected && <span className="text-[10px] bg-blue-100 dark:bg-blue-900 px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
+                                {isSelected && <span className="text-[10px] bg-fountain-ink/20 text-fountain-ink px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
                               </button>
                             );
                           })}
@@ -565,12 +578,12 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                                   setSelectedUnits([]);
                                 }}
                                 className={`w-full text-left px-2.5 py-1.5 rounded-sm transition-colors text-xs hover:bg-muted flex items-start justify-between group ${
-                                  isSelected ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 font-semibold' : 'text-foreground/80'
+                                  isSelected ? 'bg-fountain-ink/15 text-fountain-ink font-semibold' : 'text-charcoal-graphite/80'
                                 }`}
                                 title={cleaned}
                               >
                                 <span className="whitespace-normal break-words pr-2">{cleaned}</span>
-                                {isSelected && <span className="text-[10px] bg-blue-100 dark:bg-blue-900 px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
+                                {isSelected && <span className="text-[10px] bg-fountain-ink/20 text-fountain-ink px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
                               </button>
                             );
                           })}
@@ -602,12 +615,12 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                                   setSelectedUnits([]);
                                 }}
                                 className={`w-full text-left px-2.5 py-1.5 rounded-sm transition-colors text-xs hover:bg-muted flex items-start justify-between group ${
-                                  isSelected ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 font-semibold' : 'text-foreground/80'
+                                  isSelected ? 'bg-fountain-ink/15 text-fountain-ink font-semibold' : 'text-charcoal-graphite/80'
                                 }`}
                                 title={cleaned}
                               >
                                 <span className="whitespace-normal break-words pr-2">{cleaned}</span>
-                                {isSelected && <span className="text-[10px] bg-blue-100 dark:bg-blue-900 px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
+                                {isSelected && <span className="text-[10px] bg-fountain-ink/20 text-fountain-ink px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
                               </button>
                             );
                           })}
@@ -638,12 +651,12 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                                   }
                                 }}
                                 className={`w-full text-left px-2.5 py-1.5 rounded-sm transition-colors text-xs hover:bg-muted flex items-start justify-between group ${
-                                  isSelected ? 'bg-blue-50 dark:bg-blue-950/40 text-blue-600 dark:text-blue-400 font-semibold' : 'text-foreground/80'
+                                  isSelected ? 'bg-fountain-ink/15 text-fountain-ink font-semibold' : 'text-charcoal-graphite/80'
                                 }`}
                                 title={cleaned}
                               >
                                 <span className="whitespace-normal break-words pr-2">{cleaned}</span>
-                                {isSelected && <span className="text-[10px] bg-blue-100 dark:bg-blue-900 px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
+                                {isSelected && <span className="text-[10px] bg-fountain-ink/20 text-fountain-ink px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
                               </button>
                             );
                           })}
@@ -737,9 +750,9 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                   </div>
 
                 <div className="pt-4 border-t space-y-3">
-                  <Button onClick={handleStartSession} disabled={isLoading} className="w-full text-lg h-12 bg-blue-600 hover:bg-blue-700 text-white">
+                  <Button onClick={handleStartSession} disabled={isLoading} className="w-full text-lg h-12 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold">
                     {isLoading ? (
-                      <><Loader2 className="mr-2 h-5 w-5 animate-spin" /> Generating Exercises...</>
+                      <><FeynmanLogo variant="thinking" size={20} className="mr-2" /> Generating Exercises...</>
                     ) : (
                       selectedTopics.length === 0 ? 'Start Random Session' : 'Start Focused Session'
                     )}
@@ -756,8 +769,8 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
         </div>
         
         <div className="flex-1 overflow-auto p-4">
-          <h3 className="font-semibold mb-4 flex items-center gap-2 text-sm text-muted-foreground">
-            <History className="w-4 h-4" />
+          <h3 className="font-semibold mb-4 flex items-center gap-2 text-sm text-charcoal-graphite/60">
+            <History className="w-4 h-4 text-fountain-ink" />
             Session History
           </h3>
           <div className="space-y-2">
@@ -765,26 +778,39 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
               const answeredLogs = h.logs.filter((l: any) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '');
               const correct = answeredLogs.filter((l: any) => l.isCorrect).length
               const total = answeredLogs.length
+              const isActiveSession = session?.id === h.id;
               return (
                 <div 
                   key={h.id} 
-                  className="text-xs p-3 bg-white dark:bg-slate-900 border rounded-md shadow-sm cursor-pointer hover:bg-slate-50 dark:hover:bg-slate-800 transition-colors group relative pr-8"
+                  className={`text-xs p-3 border rounded-md shadow-sm cursor-pointer transition-colors group relative pr-8 ${
+                    isActiveSession 
+                      ? 'bg-background text-charcoal-graphite border-fountain-ink/40 shadow-md font-semibold' 
+                      : 'bg-muted/40 text-charcoal-graphite/70 border-charcoal-graphite/10 hover:bg-muted hover:text-charcoal-graphite'
+                  }`}
                   onClick={() => setSelectedHistory(h)}
                 >
-                  <div className="font-medium text-foreground">{h.title || new Date(h.startTime).toLocaleString()}</div>
+                  <div className="font-medium text-charcoal-graphite">
+                    {h.title || new Date(h.startTime).toLocaleString()}
+                  </div>
                   {h.title && (
-                    <div className="text-[10px] text-muted-foreground mt-0.5">{new Date(h.startTime).toLocaleString()}</div>
+                    <div className="text-[10px] mt-0.5 text-charcoal-graphite/50">
+                      {new Date(h.startTime).toLocaleString()}
+                    </div>
                   )}
-                  <div className="text-muted-foreground mt-1 flex justify-between">
+                  <div className="mt-1 flex justify-between text-charcoal-graphite/60">
                     <span>Score: {correct}/{total}</span>
-                    <span className={h.status === 'active' ? 'text-green-600' : 'text-blue-600'}>
+                    <span className={h.status === 'active' ? 'text-lecture-red font-semibold' : isActiveSession ? 'text-fountain-ink' : 'text-fountain-ink/80'}>
                       {h.status}
                     </span>
                   </div>
                   <Button
                     variant="ghost"
                     size="icon"
-                    className="h-6 w-6 absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 text-muted-foreground hover:text-red-500 hover:bg-red-50 dark:hover:bg-red-950 transition-opacity"
+                    className={`h-6 w-6 absolute right-2 top-1/2 -translate-y-1/2 opacity-0 group-hover:opacity-100 transition-opacity ${
+                      isActiveSession 
+                        ? 'text-lecture-red hover:bg-lecture-red/10' 
+                        : 'text-charcoal-graphite/40 hover:text-lecture-red hover:bg-lecture-red/10'
+                    }`}
                     onClick={(e) => handleDeleteSession(e, h.id)}
                   >
                     <Trash2 className="w-3.5 h-3.5" />
@@ -800,19 +826,46 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
       </div>
 
       {/* CENTER - 60vw / 45vw */}
-      <Tabs defaultValue="study" className={`flex-1 flex flex-col ${activeFile ? 'w-[45vw]' : 'w-[60vw]'}`}>
-        <div className="px-8 pt-8 pb-4 flex justify-between items-center border-b">
-          <TabsList>
-            <TabsTrigger value="study">Study Session</TabsTrigger>
-            <TabsTrigger value="analytics">Analytics</TabsTrigger>
-          </TabsList>
+      <Tabs 
+        defaultValue="study" 
+        className={`flex-1 flex flex-col transition-all duration-300 ease-in-out bg-background ${
+          isFocusMode 
+            ? activeFile ? 'w-[55vw]' : 'w-[80vw]'
+            : activeFile ? 'w-[35vw]' : 'w-[60vw]'
+        }`}
+      >
+        <div className={`pt-8 pb-4 pr-8 flex justify-between items-center border-b border-charcoal-graphite/10 transition-all duration-300 ${
+          isFocusMode ? 'pl-48' : 'pl-8'
+        }`}>
+          <div className="flex items-center gap-4">
+            <TabsList className="bg-muted border border-charcoal-graphite/5 p-1 rounded-lg">
+              <TabsTrigger value="study" className="data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold">Study Session</TabsTrigger>
+              <TabsTrigger value="analytics" className="data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold">Analytics</TabsTrigger>
+            </TabsList>
+            
+            {/* Focus Mode Trigger */}
+            <Button 
+              variant="ghost" 
+              size="icon" 
+              onClick={() => setIsFocusMode(!isFocusMode)}
+              title={isFocusMode ? "Exit Focus Mode" : "Focus Mode"}
+              className="h-8 w-8 text-charcoal-graphite/70 hover:bg-muted hover:text-charcoal-graphite rounded-md transition-all duration-200 border border-charcoal-graphite/5 shadow-sm"
+            >
+              {isFocusMode ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+            </Button>
+          </div>
+
           {session && (
-            <Button variant="ghost" className="text-red-500 hover:text-red-700 hover:bg-red-50" onClick={() => {
-              setSession(null)
-              setExercises([])
-              setCurrentIndex(0)
-              localStorage.removeItem('dedp_active_session')
-            }}>
+            <Button 
+              variant="ghost" 
+              className="text-lecture-red hover:text-lecture-red hover:bg-lecture-red/10 border border-transparent hover:border-lecture-red/20 font-medium" 
+              onClick={() => {
+                setSession(null)
+                setExercises([])
+                setCurrentIndex(0)
+                localStorage.removeItem('dedp_active_session')
+              }}
+            >
               End Session
             </Button>
           )}
@@ -825,17 +878,17 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
               
               {currentExercise ? (
                 <div className="space-y-4">
-                  <div className="flex justify-between items-center text-sm font-medium text-muted-foreground bg-muted/50 p-3 rounded-lg border">
+                  <div className="flex justify-between items-center text-sm font-medium text-charcoal-graphite bg-card p-3 rounded-lg border border-charcoal-graphite/10 shadow-sm">
                     <div className="flex items-center gap-4">
                       <span>Question {currentIndex + 1} of {exercises.length + missingCount}</span>
                       {missingCount > 0 && (
-                        <span className="flex items-center text-blue-600 dark:text-blue-400 text-xs">
-                          <Loader2 className="w-3 h-3 mr-1 animate-spin" />
+                        <span className="flex items-center text-fountain-ink text-xs font-semibold animate-pulse">
+                          <FeynmanLogo variant="thinking" size={14} className="mr-1" />
                           Generating {missingCount} more...
                         </span>
                       )}
                     </div>
-                    <span className="font-semibold">{currentExercise.topic?.course?.code || ''} - {currentExercise.topic?.title}</span>
+                    <span className="font-semibold text-fountain-ink">{currentExercise.topic?.course?.code || ''} - {currentExercise.topic?.title}</span>
                   </div>
                   
                   <Flashcard 
@@ -886,11 +939,17 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
               )}
             </div>
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center h-full text-muted-foreground gap-4 pt-32">
-              <div className="w-16 h-16 rounded-full bg-muted flex items-center justify-center">
-                <PlusCircle className="w-8 h-8 text-muted-foreground/50" />
+            <div className="flex-1 flex flex-col items-center justify-center h-full text-charcoal-graphite gap-6 py-24 select-none">
+              <FeynmanLogo size={280} />
+              <div className="text-center max-w-sm px-4 space-y-2">
+                <h2 className="font-display text-2xl font-bold italic text-charcoal-graphite">Feynman Study Hub</h2>
+                <p className="text-sm text-charcoal-graphite/60 leading-relaxed font-sans">
+                  "Understand everything. Simplify anything."
+                </p>
+                <p className="text-xs text-charcoal-graphite/40 mt-6 pt-4 border-t border-charcoal-graphite/10 font-sans">
+                  Configure and start a custom study session from the left sidebar to begin.
+                </p>
               </div>
-              <p>Create a session from the left sidebar to begin.</p>
             </div>
           )}
         </TabsContent>
@@ -941,7 +1000,7 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
       )}
 
       {/* RIGHT SIDEBAR - 20vw */}
-      <div className="w-[20vw] border-l bg-muted/10 shrink-0">
+      <div className="h-full border-l bg-card shrink-0 flex flex-col border-charcoal-graphite/10 relative z-30 w-[20vw]">
         <VoiceHub liveAPI={liveAPI} onViewFile={handleViewFile} />
       </div>
 
@@ -982,7 +1041,11 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
                     <ScrollArea className="h-[250px] border rounded-md p-3 bg-muted/10 scrollbar-thin">
                       {JSON.parse(selectedHistory.chatLog).filter((m: any) => !m.text.startsWith('[SYSTEM')).map((msg: any, idx: number) => (
                         <div key={idx} className={`flex mb-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                          <div className={`max-w-[85%] rounded-xl px-4 py-2 text-sm ${msg.role === 'user' ? 'bg-blue-600 text-white' : 'bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700'}`}>
+                          <div className={`max-w-[85%] rounded-xl px-4 py-2 text-sm shadow-sm border ${
+                            msg.role === 'user' 
+                              ? 'bg-fountain-ink/15 border-fountain-ink/25 text-charcoal-graphite' 
+                              : 'bg-background border-charcoal-graphite/10 text-charcoal-graphite/90'
+                          }`}>
                             {msg.text}
                           </div>
                         </div>
@@ -998,7 +1061,7 @@ Example: [Lecture Slides](/api/file?path=/Users/name/slides.pdf#page=5) or [Lect
 
                 <div className="pt-4 border-t">
                   <Button 
-                    className="w-full bg-blue-600 hover:bg-blue-700 text-white" 
+                    className="w-full bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-11" 
                     onClick={async () => {
                       setIsLoading(true)
                       try {

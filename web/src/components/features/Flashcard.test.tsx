@@ -28,7 +28,7 @@ describe('Flashcard Component', () => {
     fireEvent.click(correctChoice)
     
     expect(defaultProps.onAnswer).toHaveBeenCalledWith(true, 'Paris')
-    expect(screen.getByText('Official Explanation:')).toBeInTheDocument()
+    expect(screen.getByText("Professor's Explanation:")).toBeInTheDocument()
     })
 
   it('handles incorrect answer selection and triggers callback', () => {

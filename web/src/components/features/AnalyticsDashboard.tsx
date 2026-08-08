@@ -26,15 +26,15 @@ export function AnalyticsDashboard() {
 
   if (isLoading || !data) {
     return (
-      <div className="flex-1 w-[60vw] flex items-center justify-center text-muted-foreground p-8">
+      <div className="flex-1 w-full flex items-center justify-center text-muted-foreground p-8 bg-background font-sans">
         Loading analytics...
       </div>
     )
   }
 
   return (
-    <div className="flex-1 w-[60vw] p-8 overflow-y-auto">
-      <h1 className="text-3xl font-bold tracking-tight mb-8">Analytics Dashboard</h1>
+    <div className="flex-1 w-full p-8 overflow-y-auto bg-background text-charcoal-graphite font-sans">
+      <h1 className="text-3xl font-bold tracking-tight mb-8 font-display italic">Analytics Dashboard</h1>
       
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-8">
         <Card>
@@ -85,7 +85,7 @@ export function AnalyticsDashboard() {
                 />
                 <YAxis allowDecimals={false} />
                 <Tooltip />
-                <Line type="monotone" dataKey="sessions" stroke="#2563eb" strokeWidth={2} dot={{ r: 4 }} />
+                <Line type="monotone" dataKey="sessions" stroke="var(--charcoal-graphite, #2C2E33)" strokeWidth={2.5} dot={{ r: 4, fill: "var(--fountain-ink)", stroke: "var(--charcoal-graphite)", strokeWidth: 1.5 }} />
               </LineChart>
             </ResponsiveContainer>
           </CardContent>
@@ -103,7 +103,7 @@ export function AnalyticsDashboard() {
                 <XAxis dataKey="name" tick={{ fontSize: 12 }} />
                 <YAxis domain={[0, 100]} />
                 <Tooltip cursor={{ fill: 'transparent' }} />
-                <Bar dataKey="accuracy" fill="#16a34a" radius={[4, 4, 0, 0]} />
+                <Bar dataKey="accuracy" fill="var(--fountain-ink, #3B6D9A)" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           </CardContent>
@@ -122,13 +122,25 @@ export function AnalyticsDashboard() {
                     <h3 className="font-semibold mb-3">{courseData.course}</h3>
                     <div className="flex flex-wrap gap-2">
                       {courseData.weeks.sort((a: any, b: any) => a.week.localeCompare(b.week)).map((weekData: any) => {
-                        let bgColor = 'bg-slate-100 dark:bg-slate-800 text-slate-800 dark:text-slate-200'; // Default low/no data
+                        let bgColor = 'bg-muted/40 text-charcoal-graphite/40 border-charcoal-graphite/10'; // Default low/no data
+                        let sketchClass = '';
                         if (weekData.total > 0) {
-                          if (weekData.accuracy >= 80) bgColor = 'bg-green-600 text-white';
-                          else if (weekData.accuracy >= 60) bgColor = 'bg-green-400 text-white';
-                          else if (weekData.accuracy >= 40) bgColor = 'bg-yellow-400 text-slate-900';
-                          else if (weekData.accuracy >= 20) bgColor = 'bg-orange-400 text-slate-900';
-                          else bgColor = 'bg-red-500 text-white';
+                          if (weekData.accuracy >= 80) {
+                            bgColor = 'bg-green-100 text-green-900 border-green-400 font-semibold';
+                            sketchClass = 'sketch-crosshatch-green';
+                          } else if (weekData.accuracy >= 60) {
+                            bgColor = 'bg-green-50 text-green-800 border-green-300';
+                            sketchClass = 'sketch-crosshatch-green opacity-90';
+                          } else if (weekData.accuracy >= 40) {
+                            bgColor = 'bg-yellow-100 text-yellow-900 border-yellow-400 font-semibold';
+                            sketchClass = 'sketch-crosshatch-yellow';
+                          } else if (weekData.accuracy >= 20) {
+                            bgColor = 'bg-orange-100 text-orange-950 border-orange-400';
+                            sketchClass = 'sketch-crosshatch-red opacity-80';
+                          } else {
+                            bgColor = 'bg-red-100 text-red-900 border-lecture-red/40 font-semibold';
+                            sketchClass = 'sketch-crosshatch-red';
+                          }
                         }
                         
                         const cleanedWeekName = formatDisplayName(weekData.week);
@@ -136,7 +148,7 @@ export function AnalyticsDashboard() {
                         return (
                           <div 
                             key={weekData.week} 
-                            className={`flex flex-col items-center justify-center p-3 rounded-md min-w-[80px] text-center ${bgColor}`}
+                            className={`flex flex-col items-center justify-center p-3 rounded-md min-w-[90px] text-center border relative overflow-hidden shadow-sm transition-all duration-200 ${bgColor} ${sketchClass}`}
                             title={`${cleanedWeekName}: ${weekData.accuracy}% accuracy (${weekData.total} questions)`}
                           >
                             <span className="text-[10px] font-semibold uppercase tracking-wider opacity-85 mb-1 break-words max-w-full" title={cleanedWeekName}>

@@ -176,7 +176,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
   }
 
   return (
-    <Card className="w-full max-w-2xl mx-auto shadow-md">
+    <Card className="w-full max-w-2xl mx-auto shadow-md border border-charcoal-graphite/10 bg-card">
       <CardHeader>
         <div className="w-full">{renderQuestionText()}</div>
       </CardHeader>
@@ -193,20 +193,26 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
 
               if (showResult) {
                 if (isMatch) {
-                  variant = 'default' 
-                  extraClasses = 'bg-green-600 hover:bg-green-700 text-white border-green-600'
+                  variant = 'outline' 
+                  extraClasses = 'bg-green-100/60 hover:bg-green-100/60 text-green-900 border-green-400 font-semibold shadow-sm'
                 } else if (isSelected) {
-                  variant = 'destructive'
+                  variant = 'outline'
+                  extraClasses = 'bg-lecture-red/10 hover:bg-lecture-red/10 text-lecture-red border-lecture-red/40'
+                } else {
+                  extraClasses = 'border-charcoal-graphite/5 text-charcoal-graphite/40'
                 }
               } else if (isSelected) {
-                variant = 'secondary'
+                variant = 'outline'
+                extraClasses = 'bg-fountain-ink/15 text-fountain-ink border-fountain-ink font-semibold shadow-sm'
+              } else {
+                extraClasses = 'hover:bg-fountain-ink/5 border-charcoal-graphite/15 text-charcoal-graphite/90'
               }
 
               return (
                 <Button
                   key={idx}
                   variant={variant}
-                  className={`justify-start h-auto py-3 px-4 text-left whitespace-normal ${extraClasses}`}
+                  className={`justify-start h-auto py-3 px-4 text-left whitespace-normal transition-all duration-200 ${extraClasses}`}
                   onClick={() => handleSelectSingle(choice)}
                   disabled={showResult}
                 >
@@ -229,14 +235,17 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
 
               const isChecked = multiSelected.includes(choice);
               
-              let bgColor = '';
+              let bgColor = 'border-charcoal-graphite/10 hover:bg-fountain-ink/5 text-charcoal-graphite/90';
               if (showResult) {
-                if (isCorrectChoice) bgColor = 'bg-green-100 border-green-500';
-                else if (isChecked && !isCorrectChoice) bgColor = 'bg-red-100 border-red-500';
+                if (isCorrectChoice) bgColor = 'bg-green-100/60 border-green-400 text-green-900 font-medium';
+                else if (isChecked && !isCorrectChoice) bgColor = 'bg-lecture-red/10 border-lecture-red/40 text-lecture-red';
+                else bgColor = 'border-charcoal-graphite/5 text-charcoal-graphite/40';
+              } else if (isChecked) {
+                bgColor = 'bg-fountain-ink/10 border-fountain-ink text-fountain-ink font-semibold';
               }
 
               return (
-                <div key={idx} className={`flex items-start space-x-3 p-3 rounded-md border ${bgColor}`}>
+                <div key={idx} className={`flex items-start space-x-3 p-3 rounded-md border transition-all duration-200 ${bgColor}`}>
                   <Checkbox 
                     id={`choice-${idx}`}
                     checked={isChecked}
@@ -245,7 +254,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
                       if (checked) setMultiSelected([...multiSelected, choice]);
                       else setMultiSelected(multiSelected.filter(c => c !== choice));
                     }}
-                    className="mt-1"
+                    className="mt-1 data-[state=checked]:bg-fountain-ink data-[state=checked]:border-fountain-ink"
                   />
                   <label htmlFor={`choice-${idx}`} className="cursor-pointer flex-1 break-words min-w-0">
                     <div className="prose dark:prose-invert max-w-none text-sm font-medium leading-tight"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(choice)}</ReactMarkdown></div>
@@ -254,7 +263,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
               )
             })}
             {!showResult && (
-              <Button className="mt-4 w-full" onClick={handleSubmit} disabled={multiSelected.length === 0}>
+              <Button className="mt-4 w-full bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={multiSelected.length === 0}>
                 Submit Answer
               </Button>
             )}
@@ -269,16 +278,22 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
               value={numericValue}
               onChange={(e) => setNumericValue(e.target.value)}
               disabled={showResult}
-              className={showResult ? (Math.abs(parseFloat(numericValue) - parseFloat(correctAnswer)) < 0.01 ? 'border-green-500 bg-green-50' : 'border-red-500 bg-red-50') : ''}
+              className={`transition-all duration-200 focus-visible:ring-fountain-ink ${
+                showResult 
+                  ? Math.abs(parseFloat(numericValue) - parseFloat(correctAnswer)) < 0.01 
+                    ? 'border-green-400 bg-green-100/30 text-green-900 font-semibold' 
+                    : 'border-lecture-red bg-lecture-red/10 text-lecture-red'
+                  : 'border-charcoal-graphite/20 bg-transparent'
+              }`}
             />
             {!showResult && (
-              <Button onClick={handleSubmit} disabled={!numericValue}>
+              <Button className="bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={!numericValue}>
                 Submit Answer
               </Button>
             )}
             {showResult && (
               <div className="text-sm font-medium">
-                Correct Answer: <span className="text-green-600">{correctAnswer}</span>
+                Correct Answer: <span className="text-green-600 font-semibold">{correctAnswer}</span>
               </div>
             )}
           </div>
@@ -287,13 +302,13 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
         {effectiveExerciseType === 'dropdown' && (
           <div className="flex flex-col gap-4">
             {!showResult && (
-              <Button onClick={handleSubmit} disabled={Object.values(dropdownValues).filter(Boolean).length === 0}>
+              <Button className="bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={Object.values(dropdownValues).filter(Boolean).length === 0}>
                 Submit Answer
               </Button>
             )}
             {showResult && (
               <div className="text-sm font-medium">
-                Correct Answer: <span className="text-green-600">{correctAnswer}</span>
+                Correct Answer: <span className="text-green-600 font-semibold">{correctAnswer}</span>
               </div>
             )}
           </div>
@@ -301,11 +316,11 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
 
       </CardContent>
       {showResult && (
-        <CardFooter className="bg-muted/50 p-6 rounded-b-xl border-t flex flex-col items-start gap-4">
+        <CardFooter className="bg-muted p-6 rounded-b-xl border-t border-charcoal-graphite/10 flex flex-col items-start gap-4 shadow-sm">
           {explanation && (
             <div className="text-sm w-full">
-              <strong>Official Explanation:</strong>
-              <div className="mt-2 prose dark:prose-invert max-w-none text-sm break-words"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(explanation)}</ReactMarkdown></div>
+              <strong className="text-charcoal-graphite font-display italic text-base block mb-2">Professor's Explanation:</strong>
+              <div className="mt-2 prose dark:prose-invert max-w-none text-sm break-words leading-relaxed text-charcoal-graphite/85"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(explanation)}</ReactMarkdown></div>
             </div>
           )}
           
@@ -313,13 +328,14 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
             <Button 
               variant="outline" 
               onClick={handleExplainMistake}
+              className="mt-2 text-fountain-ink border-fountain-ink/30 hover:bg-fountain-ink/5"
             >
               Ask Voice Tutor to Explain My Mistake
             </Button>
           )}
 
           {hasRequestedHelp && (
-            <div className="text-sm text-blue-600 dark:text-blue-400 italic">
+            <div className="text-sm text-fountain-ink italic font-medium mt-2 animate-pulse">
               Asking Tutor... Check the chat sidebar.
             </div>
           )}
