@@ -470,8 +470,8 @@ export async function getAnalyticsData() {
   let totalCorrect = 0;
 
   const courseStats: Record<string, { total: number, correct: number }> = {};
-  const heatmapStats: Record<string, Record<string, { total: number, correct: number }>> = {};
-  
+  const heatmapStats: Record<string, Record<string, { total: number, correct: number, classes: Record<string, any> }>> = {};
+
   // Last 7 days activity (by date)
   const activityByDate: Record<string, number> = {};
   const today = new Date();
@@ -489,13 +489,16 @@ export async function getAnalyticsData() {
 
     session.logs.forEach(log => {
       if (log.userAnswer === null || log.userAnswer === undefined || log.userAnswer === '') return;
-      
+
       totalExercises++;
       if (log.isCorrect) totalCorrect++;
 
       const courseCode = log.exercise?.topic?.course?.code || 'Unknown';
       const week = log.exercise?.topic?.week || 'Unknown';
-      
+      const className = log.exercise?.topic?.className || 'Unknown Class';
+      const unit = log.exercise?.topic?.unit || '';
+      const subtopicTitle = log.exercise?.topic?.title || 'Unknown Subtopic';
+
       if (!courseStats[courseCode]) {
         courseStats[courseCode] = { total: 0, correct: 0 };
       }
@@ -506,10 +509,35 @@ export async function getAnalyticsData() {
         heatmapStats[courseCode] = {};
       }
       if (!heatmapStats[courseCode][week]) {
-        heatmapStats[courseCode][week] = { total: 0, correct: 0 };
+        heatmapStats[courseCode][week] = { total: 0, correct: 0, classes: {} };
       }
       heatmapStats[courseCode][week].total++;
       if (log.isCorrect) heatmapStats[courseCode][week].correct++;
+
+      // Nest class/subtopic details
+      const classKey = className;
+      if (!heatmapStats[courseCode][week].classes[classKey]) {
+        heatmapStats[courseCode][week].classes[classKey] = {
+          className,
+          total: 0,
+          correct: 0,
+          subtopics: {}
+        };
+      }
+      heatmapStats[courseCode][week].classes[classKey].total++;
+      if (log.isCorrect) heatmapStats[courseCode][week].classes[classKey].correct++;
+
+      const subtopicKey = `${unit ? `Unit ${unit}: ` : ''}${subtopicTitle}`;
+      if (!heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey]) {
+        heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey] = {
+          unit,
+          title: subtopicTitle,
+          total: 0,
+          correct: 0
+        };
+      }
+      heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].total++;
+      if (log.isCorrect) heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].correct++;
     });
   });
 
@@ -525,11 +553,32 @@ export async function getAnalyticsData() {
   }));
 
   const heatmapData = Object.entries(heatmapStats).map(([course, weeksMap]) => {
-    const weeks = Object.entries(weeksMap).map(([week, stats]) => ({
-      week,
-      accuracy: stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0,
-      total: stats.total
-    }));
+    const weeks = Object.entries(weeksMap).map(([week, stats]) => {
+      const classes = Object.values(stats.classes).map((cl: any) => {
+        const subtopics = Object.values(cl.subtopics).map((sub: any) => ({
+          unit: sub.unit,
+          title: sub.title,
+          accuracy: sub.total > 0 ? Math.round((sub.correct / sub.total) * 100) : 0,
+          total: sub.total,
+          correct: sub.correct
+        }));
+        
+        return {
+          className: cl.className,
+          accuracy: cl.total > 0 ? Math.round((cl.correct / cl.total) * 100) : 0,
+          total: cl.total,
+          correct: cl.correct,
+          subtopics
+        };
+      });
+
+      return {
+        week,
+        accuracy: stats.total > 0 ? Math.round((stats.correct / stats.total) * 100) : 0,
+        total: stats.total,
+        classes
+      };
+    });
     return { course, weeks };
   });
 
