@@ -413,6 +413,21 @@ export async function saveChatLog(sessionId: string, messages: any[]) {
   }
 }
 
+export async function finishStudySession(sessionId: string) {
+  try {
+    return await prisma.studySession.update({
+      where: { id: sessionId },
+      data: { 
+        status: 'completed',
+        endTime: new Date()
+      }
+    })
+  } catch (error: any) {
+    console.error("Failed to finish study session:", error.message)
+    return null
+  }
+}
+
 export async function getSessionHistory() {
   return prisma.studySession.findMany({
     orderBy: { startTime: 'desc' },

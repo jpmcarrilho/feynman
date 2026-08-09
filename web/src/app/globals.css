@@ -208,3 +208,126 @@
   background-image: repeating-linear-gradient(45deg, rgba(239, 68, 68, 0.12) 0px, rgba(239, 68, 68, 0.12) 1.5px, transparent 1.5px, transparent 6px),
                     repeating-linear-gradient(-45deg, rgba(239, 68, 68, 0.12) 0px, rgba(239, 68, 68, 0.12) 1.5px, transparent 1.5px, transparent 6px);
 }
+
+/* --- Unified Loading/Drawing Transitions --- */
+
+@keyframes unified-loop-fade {
+  /* Active window is first 25% of the 16s cycle (i.e. 4s) */
+  0% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  3% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  22% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  25% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+}
+
+@keyframes unified-loop-draw {
+  0% {
+    stroke-dashoffset: 1200;
+  }
+  8% {
+    stroke-dashoffset: 0;
+  }
+  17% {
+    stroke-dashoffset: 0;
+  }
+  25% {
+    stroke-dashoffset: 1200;
+  }
+  100% {
+    stroke-dashoffset: 1200;
+  }
+}
+
+@keyframes unified-loop-text-fade {
+  0% {
+    opacity: 0;
+  }
+  7% {
+    opacity: 0;
+  }
+  9% {
+    opacity: 1;
+  }
+  16% {
+    opacity: 1;
+  }
+  18% {
+    opacity: 0;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+.animate-unified-loop-0 {
+  animation: unified-loop-fade 16s infinite;
+  animation-delay: 0s;
+}
+.animate-unified-loop-0 path,
+.animate-unified-loop-0 ellipse,
+.animate-unified-loop-0 line {
+  stroke-dasharray: 1200;
+  stroke-dashoffset: 1200;
+  animation: unified-loop-draw 16s infinite;
+  animation-delay: 0s;
+}
+
+.animate-unified-loop-1 {
+  animation: unified-loop-fade 16s infinite;
+  animation-delay: -4s;
+}
+.animate-unified-loop-1 path,
+.animate-unified-loop-1 ellipse,
+.animate-unified-loop-1 line {
+  stroke-dasharray: 1200;
+  stroke-dashoffset: 1200;
+  animation: unified-loop-draw 16s infinite;
+  animation-delay: -4s;
+}
+
+.animate-unified-loop-2 {
+  animation: unified-loop-fade 16s infinite;
+  animation-delay: -8s;
+}
+.animate-unified-loop-2 path,
+.animate-unified-loop-2 ellipse,
+.animate-unified-loop-2 line {
+  stroke-dasharray: 1200;
+  stroke-dashoffset: 1200;
+  animation: unified-loop-draw 16s infinite;
+  animation-delay: -8s;
+}
+
+.animate-unified-loop-3 {
+  animation: unified-loop-fade 16s infinite;
+  animation-delay: -12s;
+}
+.animate-unified-loop-3 path,
+.animate-unified-loop-3 ellipse,
+.animate-unified-loop-3 line {
+  stroke-dasharray: 1200;
+  stroke-dashoffset: 1200;
+  animation: unified-loop-draw 16s infinite;
+  animation-delay: -12s;
+}
+.animate-unified-loop-3 text {
+  opacity: 0;
+  animation: unified-loop-text-fade 16s infinite;
+  animation-delay: -12s;
+}
+

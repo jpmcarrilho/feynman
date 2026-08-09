@@ -1,0 +1,11 @@
+<svg viewBox="50 40 300 300" xmlns="http://www.w3.org/2000/svg">
+  <g font-family="Georgia, serif" font-style="italic" fill="#1a1a1a">
+    <text x="60" y="140" font-size="30">∫</text>
+    <text x="95" y="135" font-size="22">ψ(x) dx</text>
+    <text x="70" y="200" font-size="26">e^iπ + 1 = 0</text>
+    <text x="90" y="260" font-size="24">∂/∂t</text>
+  </g>
+  <path d="M 55 175 Q 200 190 340 170" fill="none" stroke="#1a1a1a" stroke-width="1" stroke-dasharray="0.1 6"/>
+  <text x="200" y="330" font-family="Georgia, serif" font-size="20" font-style="italic"
+        fill="#1a1a1a" text-anchor="middle">Feynman</text>
+</svg>

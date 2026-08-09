@@ -7,7 +7,7 @@ export default function Home() {
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-6 bg-background">
       <div className="flex flex-col items-center mb-4 select-none">
-        <FeynmanLogo size={200} />
+        <FeynmanLogo size={200} variant="thinking" />
       </div>
       <Card className="w-full max-w-md border border-charcoal-graphite/10 shadow-lg bg-background/50">
         <CardHeader className="text-center pb-4">

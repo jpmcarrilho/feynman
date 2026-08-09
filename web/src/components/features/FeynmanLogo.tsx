@@ -25,20 +25,65 @@ export function FeynmanLogo({ className = '', variant = 'default', size }: Feynm
   if (variant === 'thinking') {
     return (
       <div 
-        className={`inline-flex items-center justify-center animate-sketch-scratch ${className}`}
+        className={`relative inline-flex items-center justify-center ${className}`}
         style={{ width: actualSize, height: actualSize }}
       >
+        {/* Step 0: Cups */}
         <svg 
-          viewBox="0 0 400 400" 
-          className="w-full h-full"
+          viewBox="115 130 130 130" 
+          className="absolute inset-0 w-full h-full animate-unified-loop-0"
           xmlns="http://www.w3.org/2000/svg"
         >
-          <g stroke="var(--charcoal-graphite, #2C2E33)" strokeWidth="3" fill="none" strokeLinecap="round" strokeLinejoin="round">
+          <g stroke="var(--charcoal-graphite, #2C2E33)" strokeWidth="3.2" fill="none" strokeLinecap="round" strokeLinejoin="round">
             <path d="M 120 170 Q 140 150 175 165 L 175 220 Q 145 235 120 218 Z"/>
             <ellipse cx="147" cy="165" rx="27" ry="12"/>
             <path d="M 175 178 Q 205 160 240 178 L 240 230 Q 205 245 175 225 Z"/>
             <ellipse cx="207" cy="178" rx="28" ry="12"/>
           </g>
+        </svg>
+
+        {/* Step 1: Pipe */}
+        <svg 
+          viewBox="102 112 160 160" 
+          className="absolute inset-0 w-full h-full animate-unified-loop-1"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <g stroke="var(--charcoal-graphite, #2C2E33)" fill="none" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M 110 190 Q 180 185 230 200" strokeWidth="3.2"/>
+            <path d="M 230 200 Q 245 203 245 220 Q 245 238 228 242 Q 210 246 202 232 L 202 208" strokeWidth="3.2"/>
+            <path d="M 235 190 Q 242 175 233 162 Q 226 152 235 138" strokeWidth="2"/>
+            <path d="M 245 175 Q 255 165 250 150" strokeWidth="1.8"/>
+          </g>
+        </svg>
+
+        {/* Step 2: Diagram */}
+        <svg 
+          viewBox="60 110 220 220" 
+          className="absolute inset-0 w-full h-full animate-unified-loop-2"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <g stroke="var(--charcoal-graphite, #2C2E33)" fill="none" strokeLinecap="round" strokeLinejoin="round">
+            <line x1="100" y1="120" x2="170" y2="180" strokeWidth="3.2"/>
+            <line x1="240" y1="120" x2="170" y2="180" strokeWidth="3.2"/>
+            <path d="M 170 180 Q 195 205 185 240 Q 178 265 200 285" strokeWidth="2.4"/>
+            <line x1="200" y1="285" x2="140" y2="270" strokeWidth="3.2"/>
+            <line x1="200" y1="285" x2="140" y2="320" strokeWidth="3.2"/>
+          </g>
+        </svg>
+
+        {/* Step 3: Equation */}
+        <svg 
+          viewBox="45 35 300 300" 
+          className="absolute inset-0 w-full h-full animate-unified-loop-3"
+          xmlns="http://www.w3.org/2000/svg"
+        >
+          <g fontFamily="var(--font-display, Georgia, serif)" fontStyle="italic" fill="var(--charcoal-graphite, #2C2E33)">
+            <text x="60" y="140" fontSize="34">∫</text>
+            <text x="95" y="135" fontSize="26">ψ(x) dx</text>
+            <text x="70" y="200" fontSize="30">e^iπ + 1 = 0</text>
+            <text x="90" y="260" fontSize="28">∂/∂t</text>
+          </g>
+          <path d="M 55 175 Q 200 190 340 170" fill="none" stroke="var(--charcoal-graphite, #2C2E33)" strokeWidth="1.8"/>
         </svg>
       </div>
     )
@@ -48,7 +93,7 @@ export function FeynmanLogo({ className = '', variant = 'default', size }: Feynm
     return (
       <svg 
         key={animationKey}
-        viewBox="0 0 400 400" 
+        viewBox="85 105 160 160" 
         style={{ width: actualSize, height: actualSize }}
         className={`animate-sketch-draw select-none cursor-pointer ${className}`}
         xmlns="http://www.w3.org/2000/svg"
@@ -74,7 +119,7 @@ export function FeynmanLogo({ className = '', variant = 'default', size }: Feynm
       onMouseEnter={handleMouseEnter}
     >
       <svg 
-        viewBox="0 0 400 400" 
+        viewBox="65 105 210 210" 
         className="w-full h-full animate-sketch-draw"
         xmlns="http://www.w3.org/2000/svg"
       >
