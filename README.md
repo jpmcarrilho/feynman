@@ -2,27 +2,7 @@
 ### *Personal Socratic AI Tutor & Universal Adaptive Study Workspace*
 
 <p align="center">
-  <svg viewBox="40 112 260 260" width="180" height="180" xmlns="http://www.w3.org/2000/svg">
-    <g stroke="#2C2E33" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
-      <line x1="100" y1="120" x2="170" y2="180" stroke-width="3"/>
-      <line x1="240" y1="120" x2="170" y2="180" stroke-width="3"/>
-      <path d="M 170 180 Q 195 205 185 240 Q 178 265 200 285" stroke-width="2.2" stroke-dasharray="0.1 8"/>
-      <line x1="200" y1="285" x2="140" y2="270" stroke-width="3"/>
-      <line x1="200" y1="285" x2="140" y2="320" stroke-width="3"/>
-    </g>
-    <text 
-      x="200" 
-      y="360" 
-      font-family="Georgia, serif" 
-      font-size="24" 
-      font-style="italic"
-      font-weight="bold"
-      fill="#2C2E33" 
-      text-anchor="middle"
-    >
-      Feynman
-    </text>
-  </svg>
+  <img src="web/public/logo.png" width="160" alt="Feynman Study Platform Logo" />
 </p>
 
 The **Feynman Study Platform** is a highly personalized, adaptive, and visually rich educational workspace designed to help students master any advanced academic curriculum.
