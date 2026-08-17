@@ -1,5 +1,5 @@
-# 🎓 Feynman DEDP Study Platform
-### *Personal Socratic AI Tutor & Adaptive Workspace for MIT DEDP MicroMasters*
+# 🎓 Feynman Study Platform
+### *Personal Socratic AI Tutor & Universal Adaptive Study Workspace*
 
 <p align="center">
   <svg viewBox="40 112 260 260" width="180" height="180" xmlns="http://www.w3.org/2000/svg">
@@ -25,9 +25,14 @@
   </svg>
 </p>
 
-The **Feynman DEDP Study Platform** is a highly personalized, adaptive, and visually rich educational workspace designed to help students master **MIT’s Data, Economics, and Development Policy (DEDP) MicroMasters** curriculum. 
+The **Feynman Study Platform** is a highly personalized, adaptive, and visually rich educational workspace designed to help students master any advanced academic curriculum.
 
-Instead of passive, cookie-cutter cramming, the platform transforms static textbooks, lecture slide decks, and transcripts into an interactive, **hands-free Socratic learning environment**. It utilizes sophisticated AI reasoning, real-time bidirectional voice tutoring, performance-based adaptive question mixes, and detailed econometric diagnostics to identify and bridge your critical conceptual gaps.
+### 🌟 Origins of the Platform
+The inception of this platform came directly from my personal journey studying for **MIT's Data, Economics, and Development Policy (DEDP) MicroMasters** program. Faced with highly complex, mathematically rigorous econometric papers, regression tables, and lecture slides, I searched for an active learning assistant that supported typeset LaTeX formulas, diagnostic conceptual-gap analysis, and hands-free conversational Socratic instruction—but found **no existing system** that met those academic needs. To solve this, I designed and built this platform.
+
+While born from DEDP-level econometric and statistics demands, the platform has evolved into a general-purpose, student-centric Socratic engine. Any student can upload their own course slide PDFs, notes, or transcripts, and the platform's AI automatically segments and organizes them into an active, hands-free tutoring workspace.
+
+Instead of passive, cookie-cutter cramming, the platform transforms static documents into an interactive **Socratic learning environment**. It utilizes sophisticated AI reasoning, real-time bidirectional voice tutoring, performance-based adaptive question mixes, and detailed conceptual diagnostics to identify and bridge your critical learning gaps.
 
 ---
 
