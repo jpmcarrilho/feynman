@@ -87,7 +87,6 @@ This deployment script will:
 To understand the core designs, algorithms, and models powering our DEDP Study Hub, see the following dedicated architectural guides:
 
 *   **[Core Platform & Question Generation Architecture (QUESTION_GENERATION.md)](QUESTION_GENERATION.md)**: Details on the Adaptive Performance-based Sourcing Mix, Iterative Background AI Generator, Dynamic Context Enrichment and Table Reconstruction, Timed Mock Exam Simulator, Proportional "One-Wrong-Cancels-One-Right" Partial Credit Scoring, Professor Cognitive-Trap Diagnosis Engines, Socratic Curriculums Timeline Schedulers, and Micro-Meso-Macro analytics tracking.
-*   **[Feynman & MAGI Policy Simulator (FEYNMAN_MAGI_DESIGN.md)](FEYNMAN_MAGI_DESIGN.md)**: Vision and specs on shareable SaaS course workspaces and multi-agent econometric policy debate simulations ("MAGI").
 *   **[Ideas for GraphRAG Ingestion Pipelines (IDEAS_GRAPH_RAG.md)](IDEAS_GRAPH_RAG.md)**: Conceptual specifications for expanding database nodes/edges to construct high-fidelity relational knowledge graphs for grounding AI responses.
 
 ## Testing
