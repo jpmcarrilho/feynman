@@ -5,12 +5,12 @@
   <img src="web/public/logo.png" width="160" alt="Feynman Study Platform Logo" />
 </p>
 
-The **Feynman Study Platform** is a highly personalized, adaptive, and visually rich educational workspace designed to help students master any advanced academic curriculum.
+The **Feynman Study Platform** is a highly personalized, adaptive, and visually rich educational workspace originally built to help students master complex graduate-level academic curricula. **Please note**: The platform is currently in its initial pre-seeded release state; it does **not yet** support uploading custom files, creating new courses, or customizing topics directly through the user interface. These user-customization features represent our immediate upcoming development milestones.
 
 ### 🌟 Origins of the Platform
 The inception of this platform came directly from my personal journey studying for **MIT's Data, Economics, and Development Policy (DEDP) MicroMasters** program. Faced with highly complex, mathematically rigorous econometric papers, regression tables, and lecture slides, I searched for an active learning assistant that supported typeset LaTeX formulas, diagnostic conceptual-gap analysis, and hands-free conversational Socratic instruction—but found **no existing system** that met those academic needs. To solve this, I designed and built this platform.
 
-While born from DEDP-level econometric and statistics demands, the platform has evolved into a general-purpose, student-centric Socratic engine. Any student can upload their own course slide PDFs, notes, or transcripts, and the platform's AI automatically segments and organizes them into an active, hands-free tutoring workspace.
+While born from DEDP-level econometric and statistics demands, the ultimate goal of the platform is to evolve into a universal, student-centric Socratic engine. In our upcoming roadmap, any student will be able to drag-and-drop their own course slide PDFs, notes, or transcripts, and let the platform's AI automatically segment and organize them into an active, hands-free tutoring workspace.
 
 Instead of passive, cookie-cutter cramming, the platform transforms static documents into an interactive **Socratic learning environment**. It utilizes sophisticated AI reasoning, real-time bidirectional voice tutoring, performance-based adaptive question mixes, and detailed conceptual diagnostics to identify and bridge your critical learning gaps.
 
@@ -164,6 +164,12 @@ For deep dives into the algorithms, features, and engineering designs powering t
 ## 🔮 The 10x Vision & Student-Centric Roadmap
 
 Our development strategy is centered around building an **open-source, private-first workspace** where any student can upload their own materials and let the platform's AI automatically parse, index, and organize them into a personalized Socratic curriculum.
+
+⚠️ **Current Status & Limitation Notice**: 
+Please note that the platform is **not yet fully generalized** for arbitrary file uploads directly through the web interface. It currently operates using pre-seeded local index files. Designing a fully universal pipeline—where any student can drag-and-drop their own course slide PDFs, notes, or transcripts and let the platform auto-segment and auto-organize them instantly—is our immediate **next major milestone**.
+
+🚀 **Creator's Timeline & Contributions**:
+In the **next 1 month**, I will be starting another academic course and will begin building out these universal auto-ingestion, modularization, and auto-organization features in the codebase. **Contributions are highly welcome!** If you are excited about building a universal Socratic tutor, optimizing Next.js server components, or integrating Gemini Live API chalkboard streams, please feel free to open an issue, submit a pull request, or collaborate to build this vision together!
 
 ### Phase 1: Codebase Modularization & Auto-Ingestion (Immediate Roadmap)
 1. **Service Extraction (`src/services/`)**: Separating monolithic code inside `actions.ts` into thin, domain-driven services (`sessionService.ts`, `diagnosticService.ts`, `studyPlanService.ts`) to improve maintainability.
