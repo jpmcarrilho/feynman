@@ -153,54 +153,53 @@ For deep dives into the algorithms, features, and engineering designs powering t
 
 ---
 
-## 🔮 The 10x Vision & Technical Roadmap
+## 🔮 The 10x Vision & Student-Centric Roadmap
 
-Our plan is structured in two distinct phases: immediate refactoring to solidify the Next.js core, followed by a series of paradigm-shifting educational upgrades.
+Our development strategy is centered around building an **open-source, private-first workspace** where any student can upload their own materials and let the platform's AI automatically parse, index, and organize them into a personalized Socratic curriculum.
 
-### Phase 1: Codebase Modularization (Immediate Roadmap)
-To improve maintainability, prevent layout bottlenecks, and streamline compilation times, we are separating our monolithic hubs (`src/app/actions.ts` and `src/components/features/StudyInterface.tsx`) into clean domain layers:
-1. **Service Extraction (`src/services/`)**:
-   * `sessionService.ts`: Manage study session progress, metrics recording, and database logging.
-   * `diagnosticService.ts`: Handle prompt compilers, error logs, and LaTeX pre-processing.
-   * `studyPlanService.ts`: Focus on chronological syllabus generators and JSON formatted curriculum maps.
-2. **Frontend Component Decomposition (`src/components/features/study/`)**:
-   * Extract state management into a custom, type-safe `useStudySession.ts` hook.
-   * Isolating independent sub-components: `StudyHeader.tsx` (sidebar state), `ActiveSessionPanel.tsx` (cards & page views), and `DiagnosticReportView.tsx` (charts and post-exam reports) to prevent unnecessary top-level re-renders.
+### Phase 1: Codebase Modularization & Auto-Ingestion (Immediate Roadmap)
+1. **Service Extraction (`src/services/`)**: Separating monolithic code inside `actions.ts` into thin, domain-driven services (`sessionService.ts`, `diagnosticService.ts`, `studyPlanService.ts`) to improve maintainability.
+2. **Universal Drag-and-Drop Uploader**: Upgrading the database ingestion logic (`web/src/services/ingest.ts`) to support uploading custom study PDFs, slides, or transcripts directly through the web user interface.
+3. **AI-Driven Auto-Organization**: Integrating a structured schema extraction layer. When a student uploads a new document, the system automatically uses Gemini (`generateObject`) to:
+   * **Identify & Title** the core academic course, week, and session.
+   * **Segment** the document into distinct, coherent study topics.
+   * **Generate** a localized mock question database modeling potential cognitive traps based *solely* on that uploaded text.
+4. **Frontend Component Decomposition**: Decomposing monolithic view elements into highly isolated sub-components (`StudyHeader.tsx`, `ActiveSessionPanel.tsx`, `DiagnosticReportView.tsx`) managed by a custom `useStudySession.ts` state hook to eliminate React re-render lag.
 
-### Phase 2: The 10x Product Blueprint (Upcoming Upgrades)
-To turn this dashboard into a category-defining educational tool, we have mapped out four groundbreaking AI features:
+### Phase 2: The 10x Cognitive Blueprint (Upcoming AI Core)
 1. **Multi-Modal Deep Graph RAG (Knowledge Graphs)**:
-   * Build a prerequisite concept dependency web. If a student consistently gets *Instrumental Variables* questions wrong, the AI traverses backward to the prerequisite nodes (*OLS assumptions*, *Endogeneity*) to dynamically construct an interactive remedial lesson.
+   * As students upload various files (notes, books, papers), the system builds a prerequisite concept dependency web. If a student makes conceptual errors during study, the AI backtracks through the dependency nodes to dynamically synthesize custom remedial lessons.
 2. **Dual-Stream Shared Chalkboard (Gemini Live Audio-Video API)**:
-   * Integrate real-time audio and canvas streaming to create a digital workspace where students can draw math models or sketch utility curves. The AI Professor analyzes their drawings live and annotates corrections on their screen.
+   * A real-time, bidirectional audio-visual chalkboard allowing students to draw math models or write out equations. The Socratic AI Professor analyzes their drawings live and actively annotates corrections on the virtual whiteboard.
 3. **SM-17 Cognitive Spaced Repetition (AI-Drills)**:
-   * Analyze answer latency and mathematical step patterns to predict the exact day a concept falls below a 90% retention curve. The engine auto-schedules 5-minute cognitive drills delivered via web or mobile.
+   * Analyzes answer latency and reasoning steps to calculate retention decay and automatically sends short, micro-habit AI study drills to keep performance high.
 4. **Interactive Peer-Group AI Debate Seminars**:
-   * Enter collaborative mock seminars with 3 AI peer students (with distinct cognitive learning personas, e.g., the *proof-seeker*, the *policy-maker*, and the *struggling intuitive*). The professor poses a policy question, the peers debate, and the student's task is to step in, spot logical fallacies using the Feynman Technique, and defend their econometric models.
-
-### Sibling Products: Path A (SaaS Workspace) vs. Path B (MAGI World Model)
-* **Path A: Generic Shareable Course Workspace**: Abstract the ingestion pipeline so students or teachers can drag-and-drop any academic PDF to instantly generate an interactive study guide and shareable workspace link.
-* **Path B: Macro Policy World Model ("MAGI")**: Create an econometric sandbox where users submit any tax or spending policy, and 50 census-modeled demographic AI agents execute utility formulas to debate, vote, and dynamically recalculate national indicators (Gini, GDP, Inflation).
+   * Collaborative mock seminars with 3 AI peer students who hold different perspectives or skill levels. The AI peers debate a policy or proof, make logical mistakes, and challenge you to step in, identify their fallacies using the Feynman Technique, and defend your model.
 
 ---
 
-## 🛡️ Copyright, Licensing & Legal Compliance
+## 🛡️ Legals, Copyright & Compliance Safety-Net
 
-Because this application interfaces with official university course curricula, we enforce strict compliance guidelines to ensure legal and ethical usage:
+This repository has been structured with extreme legal rigor to protect both developers and contributors. By enforcing the boundaries below, this project establishes a bulletproof copyright and safety-net defense:
 
-### 1. Creative Commons Compatibility (CC BY-NC-SA 4.0)
-Most educational materials published on **MIT OpenCourseWare (OCW)** and public **MITx** modules are distributed under the **Creative Commons Attribution-NonCommercial-ShareAlike** license. If you host, fork, or redistribute this repository, you **MUST** strictly adhere to these three pillars:
-* **Attribution (BY)**: You must give appropriate credit to MIT OpenCourseWare and the respective faculty authors (such as *Benjamin Olken*, *Abhijit Banerjee*, *Esther Duflo*, *Daron Acemoglu*, etc.) in any deployed version or derivative work.
-* **Non-Commercial (NC)**: You may **NOT** sell, monetize, or charge access fees for this application or any derivative work. This is a 100% free, non-commercial educational study helper.
-* **ShareAlike (SA)**: Any transformed, adapted, or extended version of this software must be released under the exact same **CC BY-NC-SA 4.0** license.
+### 1. Zero Copyrighted Materials Distributed
+* **No Content Hosting**: **This repository contains exactly 0% copyrighted lecture slide PDFs, protected university transcripts, protected test questions, or proprietary textbooks.** 
+* **Local-Only Execution**: The codebase is a set of open-source algorithmic instructions. All data ingestion, crawling, or seeding (`seed.ts`, `check_auth.js`) occurs **entirely locally on the student's personal machine**.
+* **Personal Authorization**: The platform only processes files that the student already has legitimate, authorized personal access to (such as files downloaded under their own credentials on university edX/MITx portals or course directories).
 
-### 2. Legal Disclaimers
-* **Unofficial Companion**: This project is an independent, unofficial study companion developed by developers for personal educational use. It has **no** affiliation, sponsorship, endorsement, or joint venture with the Massachusetts Institute of Technology (MIT), edX, MITx, or the JPAL Global program.
-* **No Trademark Misuse**: The names "MIT", "MITx Online", "MIT OpenCourseWare", and official university seals or logos are trademarks of their respective owners. They are used in this repository purely for descriptive, educational purposes, and do not imply any relationship or endorsement.
-* **Personal Ingestion Guidelines**: The crawler utilities (such as `check_auth.js`) are intended to help students index and query materials they already have legitimate, authorized access to on the university portals. No commercial harvesting or unauthorized redistribution of private university exams/materials is supported or encouraged.
+### 2. Creative Commons (CC BY-NC-SA 4.0) Compliance
+Any study materials from MIT OpenCourseWare (OCW) or public MITx courses are protected under Creative Commons BY-NC-SA 4.0. This repository fully complies with and enforces this license:
+* **Attribution (BY)**: Appropriate credit is programmatically and visually given to MIT OpenCourseWare and original faculty authors (*Benjamin Olken*, *Abhijit Banerjee*, *Esther Duflo*, *Daron Acemoglu*, etc.) in all dashboards.
+* **Strict Non-Commercial Use (NC)**: This project contains **zero** commercial intent, advertising, paywalls, premium tiers, or SaaS monetization. It is shared for free as an open-source educational utility under the MIT software license. It is strictly for personal, non-commercial self-study.
+* **ShareAlike (SA)**: Any adapted, modified, or fork version of this codebase that integrates original or derivative CC-licensed educational files must be shared under the exact same **CC BY-NC-SA 4.0** license terms.
 
-### 3. Open Source License
-The application source code is distributed under the **MIT License**, while any embedded educational course content or derivative schemas derived from crawled course assets remain governed under the **Creative Commons BY-NC-SA 4.0 License** of the original authors.
+### 3. Legal Safe Harbor & Disclaimers
+* **Unofficial Educational Tool**: This is an independent, unofficial study platform developed by students, for students. It has **no** endorsement, affiliation, sponsorship, joint venture, or authorization from the Massachusetts Institute of Technology (MIT), edX, MITx, or the JPAL program.
+* **Trademark Use**: The terms "MIT", "MITx Online", "MIT OpenCourseWare", and all related logos are trademarks of their respective owners. They are used here purely for nominative, descriptive, and non-commercial educational purposes, which qualifies as Fair Use under trademark law.
+* **Takedown & Good Faith Compliance**: In the event that any institution, copyright holder, or faculty member objects to any code reference or default indexing pattern, we commit to immediate good-faith cooperation. Please file an issue on this repository, and any references will be removed or altered within 24 hours.
+
+### 4. Software License
+The software's structural source code, database structures, and Next.js interfaces are released under the open-source **MIT License**. Any local, user-supplied course assets or processed metadata remain under the respective intellectual property licenses of their original authors or the **CC BY-NC-SA 4.0** license.
 
 ---
 
