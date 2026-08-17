@@ -2,8 +2,24 @@ import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { FeynmanLogo } from '@/components/features/FeynmanLogo'
+import { checkIsAuthenticated } from '@/app/auth-actions'
+import { LoginForm } from '@/components/features/LoginForm'
 
-export default function Home() {
+export const dynamic = 'force-dynamic'
+
+export default async function Home() {
+  const isAuthenticated = await checkIsAuthenticated()
+
+  // If the passcode has not been verified or doesn't match, block access and show the login form.
+  if (!isAuthenticated) {
+    return (
+      <main className="flex min-h-screen flex-col items-center justify-center p-6 bg-background">
+        <LoginForm />
+      </main>
+    )
+  }
+
+  // Once verified, serve the main dashboard page.
   return (
     <main className="flex min-h-screen flex-col items-center justify-center p-6 bg-background">
       <div className="flex flex-col items-center mb-4 select-none">

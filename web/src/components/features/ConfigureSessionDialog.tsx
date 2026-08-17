@@ -25,7 +25,7 @@ interface ConfigureSessionDialogProps {
   setSessionDuration: (duration: number) => void;
   questionCount: number;
   setQuestionCount: (count: number) => void;
-  onStartSession: () => void;
+  onStartSession: (mode: 'study' | 'exam', timeLimit: number | null, sourcingMix: number, weakPct: number, unstudiedPct: number, expertPct: number) => void;
   isLoading: boolean;
 }
 
@@ -45,6 +45,38 @@ export function ConfigureSessionDialog({
   const [selectedClasses, setSelectedClasses] = useState<string[]>([])
   const [selectedUnits, setSelectedUnits] = useState<string[]>([])
   const [topicSearchText, setTopicSearchText] = useState('')
+
+  // Local state for Timed Exams and Custom Sourcing Mix Controls
+  const [sessionMode, setSessionMode] = useState<'study' | 'exam'>('study')
+  const [examDuration, setExamDuration] = useState<number>(75) // Default 75 mins for exam
+  const [sourcingMix, setSourcingMix] = useState<number>(50) // Default 50% AI / 50% Ingested
+
+  // Local state for Custom Retrieval Spacing Proportions (Weak vs Unstudied vs Expert)
+  const [retrievalFocus, setRetrievalFocus] = useState<string>('balanced')
+  const [weakPct, setWeakPct] = useState<number>(60)
+  const [unstudiedPct, setUnstudiedPct] = useState<number>(20)
+  const [expertPct, setExpertPct] = useState<number>(20)
+
+  const handleFocusChange = (val: string) => {
+    setRetrievalFocus(val);
+    if (val === 'balanced') {
+      setWeakPct(60);
+      setUnstudiedPct(20);
+      setExpertPct(20);
+    } else if (val === 'remedial') {
+      setWeakPct(80);
+      setUnstudiedPct(10);
+      setExpertPct(10);
+    } else if (val === 'unstudied') {
+      setWeakPct(10);
+      setUnstudiedPct(85);
+      setExpertPct(5);
+    } else if (val === 'maintenance') {
+      setWeakPct(10);
+      setUnstudiedPct(10);
+      setExpertPct(80);
+    }
+  };
 
   const courses = useMemo(() => Array.from(new Set(topics.map(t => t.course?.code).filter(Boolean))), [topics])
 
@@ -97,23 +129,54 @@ export function ConfigureSessionDialog({
         <DialogTitle className="text-xl sm:text-2xl font-display italic text-charcoal-graphite">Configure Study Session</DialogTitle>
       </DialogHeader>
       <div className="py-2 sm:py-4 space-y-6">
-        <div className="flex flex-col sm:flex-row gap-4 sm:items-end mb-4">
-          <div className="w-full sm:w-[200px]">
-            <Label className="mb-2 block text-xs sm:text-sm">Session Duration</Label>
+        <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 sm:items-end mb-4 bg-card/20 p-4 rounded-lg border border-border/40">
+          <div className="flex flex-col">
+            <Label htmlFor="session-mode-select" className="mb-2 block text-xs sm:text-sm font-semibold">Session Mode</Label>
             <select 
-              value={sessionDuration / 60} 
-              onChange={e => setSessionDuration(Number(e.target.value) * 60)}
-              className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              id="session-mode-select"
+              value={sessionMode} 
+              onChange={e => setSessionMode(e.target.value as 'study' | 'exam')}
+              className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-sans"
             >
-              <option value="5">5 Minutes</option>
-              <option value="10">10 Minutes</option>
-              <option value="15">15 Minutes</option>
-              <option value="30">30 Minutes</option>
-              <option value="60">60 Minutes</option>
+              <option value="study">🎓 Practice / Study Mode</option>
+              <option value="exam">⏱️ Timed Exam Mode</option>
             </select>
           </div>
-          <div className="w-full sm:w-[200px]">
-            <Label className="mb-2 block text-xs sm:text-sm">Number of Questions</Label>
+
+          <div className="flex flex-col">
+            <Label className="mb-2 block text-xs sm:text-sm font-semibold">
+              {sessionMode === 'exam' ? 'Exam Duration' : 'Practice Duration'}
+            </Label>
+            {sessionMode === 'study' ? (
+              <select 
+                value={sessionDuration / 60} 
+                onChange={e => setSessionDuration(Number(e.target.value) * 60)}
+                className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="5">5 Minutes</option>
+                <option value="10">10 Minutes</option>
+                <option value="15">15 Minutes</option>
+                <option value="30">30 Minutes</option>
+                <option value="60">60 Minutes</option>
+              </select>
+            ) : (
+              <select 
+                value={examDuration} 
+                onChange={e => setExamDuration(Number(e.target.value))}
+                className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              >
+                <option value="15">15 Minutes</option>
+                <option value="30">30 Minutes</option>
+                <option value="45">45 Minutes</option>
+                <option value="60">60 Minutes</option>
+                <option value="75">75 Minutes</option>
+                <option value="0">Unlimited (No Timer)</option>
+              </select>
+            )}
+          </div>
+
+          <div className="flex flex-col">
+            <Label className="mb-2 block text-xs sm:text-sm font-semibold">Number of Questions</Label>
             <select 
               value={questionCount} 
               onChange={e => setQuestionCount(Number(e.target.value))}
@@ -122,9 +185,83 @@ export function ConfigureSessionDialog({
               <option value="5">5 Questions</option>
               <option value="10">10 Questions</option>
               <option value="20">20 Questions</option>
+              <option value="32">32 Questions (14.750x Final)</option>
               <option value="50">50 Questions</option>
+              <option value="53">53 Questions (JPAL102x Final)</option>
             </select>
           </div>
+
+          <div className="flex flex-col">
+            <Label className="mb-2 block text-xs sm:text-sm font-semibold">Question Sourcing Mix</Label>
+            <select 
+              value={sourcingMix} 
+              onChange={e => setSourcingMix(Number(e.target.value))}
+              className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+            >
+              <option value="0">100% Ingested (Historical)</option>
+              <option value="25">75% Ingested / 25% AI-Generated</option>
+              <option value="50">50% Ingested / 50% AI-Generated</option>
+              <option value="75">25% Ingested / 75% AI-Generated</option>
+              <option value="100">100% Fresh AI-Generated</option>
+            </select>
+          </div>
+        </div>
+
+        {/* Syllabus Retrieval Spacing Focus Panel */}
+        <div className="grid grid-cols-1 md:grid-cols-4 gap-4 sm:items-end mb-4 bg-card/10 p-4 rounded-lg border border-border/30">
+          <div className="flex flex-col md:col-span-1">
+            <Label className="mb-2 block text-xs sm:text-sm font-semibold">Syllabus Retrieval Focus</Label>
+            <select 
+              value={retrievalFocus} 
+              onChange={e => handleFocusChange(e.target.value)}
+              className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring font-sans"
+            >
+              <option value="balanced">⚖️ Balanced Mix (60% Weak, 20% Unseen, 20% Expert)</option>
+              <option value="remedial">🔥 Remedial Sprint (80% Weak, 10% Unseen, 10% Expert)</option>
+              <option value="unstudied">✨ Fresh Exploration (10% Weak, 85% Unseen, 5% Expert)</option>
+              <option value="maintenance">📖 Maintenance Review (10% Weak, 10% Unseen, 80% Expert)</option>
+              <option value="custom">🛠️ Custom Proportions...</option>
+            </select>
+          </div>
+
+          {retrievalFocus === 'custom' ? (
+            <div className="md:col-span-3 grid grid-cols-3 gap-3">
+              <div className="flex flex-col">
+                <Label className="mb-2 block text-[10px] font-semibold text-charcoal-graphite/60 uppercase">% Weakest (Accuracy &lt; 60%)</Label>
+                <Input 
+                  type="number" 
+                  min="0" max="100"
+                  value={weakPct}
+                  onChange={e => setWeakPct(Math.min(100, Math.max(0, Number(e.target.value))))}
+                  className="h-10 text-xs bg-transparent border-input"
+                />
+              </div>
+              <div className="flex flex-col">
+                <Label className="mb-2 block text-[10px] font-semibold text-charcoal-graphite/60 uppercase">% Unstudied (0 Logs)</Label>
+                <Input 
+                  type="number" 
+                  min="0" max="100"
+                  value={unstudiedPct}
+                  onChange={e => setUnstudiedPct(Math.min(100, Math.max(0, Number(e.target.value))))}
+                  className="h-10 text-xs bg-transparent border-input"
+                />
+              </div>
+              <div className="flex flex-col">
+                <Label className="mb-2 block text-[10px] font-semibold text-charcoal-graphite/60 uppercase">% Expert (Accuracy &gt; 70%)</Label>
+                <Input 
+                  type="number" 
+                  min="0" max="100"
+                  value={expertPct}
+                  onChange={e => setExpertPct(Math.min(100, Math.max(0, Number(e.target.value))))}
+                  className="h-10 text-xs bg-transparent border-input"
+                />
+              </div>
+            </div>
+          ) : (
+            <div className="md:col-span-3 text-xs text-muted-foreground italic h-10 flex items-center bg-muted/20 px-3 rounded border border-dashed">
+              💡 Current strategy is locked to: {weakPct}% Worst Topics, {unstudiedPct}% Unstudied Topics, and {expertPct}% Spaced Expert Review. Select "Custom Proportions" to adjust manually.
+            </div>
+          )}
         </div>
 
         <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 mb-4 pb-2 border-b">
@@ -351,7 +488,7 @@ export function ConfigureSessionDialog({
           <ScrollArea className="h-[300px] w-full pr-4">
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pl-1">
               {searchedTopics.map((t: any) => (
-                <div key={t.id} className="flex items-start space-x-3 bg-background p-3 rounded-md border shadow-sm hover:border-blue-400 transition-colors">
+                <div key={t.id} className="flex items-start space-x-3 bg-background p-3.5 rounded-lg border shadow-sm hover:border-blue-400 transition-colors">
                   <Checkbox 
                     id={t.id} 
                     checked={selectedTopics.includes(t.id)}
@@ -361,18 +498,50 @@ export function ConfigureSessionDialog({
                       else setSelectedTopics(selectedTopics.filter((id: any) => id !== t.id))
                     }}
                   />
-                  <div className="flex-1">
-                    <label htmlFor={t.id} className="text-sm font-medium leading-tight cursor-pointer block">
-                      {t.title}
-                    </label>
-                    <span className="text-xs text-muted-foreground block mt-1">
-                      {t.course?.code} • {formatDisplayName(t.week)} {t.className ? `• ${formatDisplayName(t.className)}` : ''}
+                  <div className="flex-1 space-y-1.5 min-w-0">
+                    <div className="flex justify-between items-start gap-2">
+                      <label htmlFor={t.id} className="text-sm font-semibold leading-tight cursor-pointer block truncate">
+                        {t.title}
+                      </label>
+                      
+                      {/* ACCURACY BADGE (Micro visualizer indicator) */}
+                      {t.accuracy !== null && t.accuracy !== undefined ? (
+                        <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded-sm shrink-0 uppercase tracking-wide border ${
+                          t.accuracy >= 70 
+                            ? 'bg-green-50 border-green-200 text-green-700' 
+                            : t.accuracy >= 50 
+                              ? 'bg-amber-50 border-amber-200 text-amber-700' 
+                              : 'bg-red-50 border-red-200 text-red-700'
+                        }`}>
+                          {t.accuracy}% acc
+                        </span>
+                      ) : (
+                        <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-sm shrink-0 uppercase tracking-wide border bg-muted/40 text-muted-foreground">Unseen</span>
+                      )}
+                    </div>
+
+                    <span className="text-[10px] text-muted-foreground block truncate">
+                      {t.courseCode || t.course?.code} • {formatDisplayName(t.week)} {t.className ? `• ${formatDisplayName(t.className)}` : ''}
                     </span>
+
+                    {/* COVERAGE PROGRESS BAR (Macro to micro coverage visualization) */}
+                    <div className="space-y-1 pt-1">
+                      <div className="flex justify-between text-[9px] text-muted-foreground font-semibold">
+                        <span>Progress Coverage</span>
+                        <span>{t.uniquelyCompleted || 0}/{t.totalExercises || 0} ({t.coverage || 0}%)</span>
+                      </div>
+                      <div className="w-full bg-muted rounded-full h-1.5 overflow-hidden">
+                        <div 
+                          className="bg-fountain-ink h-full rounded-full transition-all duration-300"
+                          style={{ width: `${t.coverage || 0}%` }}
+                        />
+                      </div>
+                    </div>
                   </div>
                 </div>
               ))}
               {searchedTopics.length === 0 && (
-                <div className="col-span-full py-8 text-center text-muted-foreground">
+                <div className="col-span-full py-8 text-center text-muted-foreground font-sans">
                   {topicSearchText.trim() ? 'No topics match your search.' : 'No topics found for the selected filters.'}
                 </div>
               )}
@@ -380,12 +549,60 @@ export function ConfigureSessionDialog({
           </ScrollArea>
         </div>
 
+        {selectedTopics.length > 0 && (
+          <div className="border rounded-md p-3.5 bg-fountain-ink/5 border-fountain-ink/15">
+            <div className="flex items-center justify-between mb-2">
+              <Label className="text-xs font-semibold text-fountain-ink uppercase tracking-wider">
+                Selected Topics ({selectedTopics.length})
+              </Label>
+              <button 
+                onClick={(e) => {
+                  e.preventDefault();
+                  setSelectedTopics([]);
+                }} 
+                className="text-[10px] text-muted-foreground hover:text-fountain-ink font-semibold"
+              >
+                Deselect All
+              </button>
+            </div>
+            <div className="flex flex-wrap gap-1.5 max-h-24 overflow-y-auto pr-2">
+              {selectedTopics.map(id => {
+                const topic = topics.find(t => t.id === id);
+                if (!topic) return null;
+                return (
+                  <div key={id} className="flex items-center gap-1.5 bg-background border px-2 py-1 rounded text-xs font-medium max-w-xs">
+                    <span className="truncate" title={topic.title}>{topic.title}</span>
+                    <button 
+                      onClick={(e) => {
+                        e.preventDefault();
+                        setSelectedTopics(selectedTopics.filter(x => x !== id));
+                      }}
+                      className="text-muted-foreground hover:text-lecture-red font-bold text-xs"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
         <div className="pt-4 border-t space-y-3">
-          <Button onClick={onStartSession} disabled={isLoading} className="w-full text-lg h-12 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold">
+          <Button 
+            onClick={() => {
+              const limit = sessionMode === 'exam' 
+                ? (examDuration === 0 ? null : examDuration * 60)
+                : sessionDuration; // Let study mode use standard practice duration
+              onStartSession(sessionMode, limit, sourcingMix, weakPct, unstudiedPct, expertPct);
+            }} 
+            disabled={isLoading} 
+            className="w-full text-lg h-12 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold animate-sketch-draw"
+          >
             {isLoading ? (
               <><FeynmanLogo variant="thinking" size={20} className="mr-2" /> Generating Exercises...</>
             ) : (
-              selectedTopics.length === 0 ? 'Start Random Session' : 'Start Focused Session'
+              sessionMode === 'exam' ? '📋 Start Timed Exam' : (selectedTopics.length === 0 ? 'Start Random Session' : 'Start Focused Session')
             )}
           </Button>
           {isLoading && (

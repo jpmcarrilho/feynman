@@ -1,8 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { checkIsAuthenticated } from '@/app/auth-actions';
 import fs from 'fs';
 import path from 'path';
 
 export async function GET(request: NextRequest) {
+  // Guard: Only allow authenticated sessions to view files
+  const isAuthenticated = await checkIsAuthenticated()
+  if (!isAuthenticated) {
+    return new NextResponse('Unauthorized', { status: 401 });
+  }
+
   const searchParams = request.nextUrl.searchParams;
   const filePath = searchParams.get('path');
 

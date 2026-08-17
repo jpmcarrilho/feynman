@@ -100,8 +100,14 @@ export function parseExerciseMarkdown(rawText: string): ParsedExercise[] {
     let exerciseType = 'single_choice';
     let correctAnswer = '';
     
-    if (correctAnswersList.length > 1) {
+    // Auto-promote to multiple_choice if the question text clearly requests selecting all that apply
+    const isMultiSelectText = questionText.toLowerCase().includes('select all that apply') || 
+                             questionText.toLowerCase().includes('choose all that apply') ||
+                             questionText.toLowerCase().includes('select all correct');
+
+    if (correctAnswersList.length > 1 || isMultiSelectText) {
       exerciseType = 'multiple_choice';
+      // Ensure correctAnswer is a stringified JSON array
       correctAnswer = JSON.stringify(correctAnswersList);
     } else if (correctAnswersList.length === 1) {
       correctAnswer = correctAnswersList[0];

@@ -1,4 +1,5 @@
 import { useState, useRef, useCallback } from 'react'
+import { getGeminiApiKey } from '@/app/auth-actions'
 
 export type ChatMessage = {
   id: string
@@ -203,8 +204,8 @@ export function useLiveAPI(systemInstructionText: string) {
         }
 
         // 2. Init WebSocket
-        const key = process.env.NEXT_PUBLIC_GEMINI_API_KEY
-        if (!key) throw new Error("Missing NEXT_PUBLIC_GEMINI_API_KEY")
+        const key = await getGeminiApiKey()
+        if (!key) throw new Error("Missing Gemini API Key on server")
 
         const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${key}`
         const ws = new WebSocket(wsUrl)

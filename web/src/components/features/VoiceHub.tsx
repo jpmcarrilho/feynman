@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { Mic, MicOff, Volume2, AlertCircle, Send, Loader2 } from 'lucide-react'
+import { Mic, MicOff, Volume2, AlertCircle, Send, Loader2, Sparkles, PanelRightClose } from 'lucide-react'
 import { FeynmanLogo } from './FeynmanLogo'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -21,9 +21,12 @@ const preprocessLaTeX = (text: string | null | undefined) => {
 interface VoiceHubProps {
   liveAPI: any;
   onViewFile?: (filePath: string) => void;
+  onGeneratePlan?: () => void;
+  isGeneratingPlan?: boolean;
+  onToggleClose?: () => void;
 }
 
-export function VoiceHub({ liveAPI, onViewFile }: VoiceHubProps) {
+export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose }: VoiceHubProps) {
   const { isConnected, isConnecting, error, messages, connect, disconnect, sendText, isMuted, setMuted } = liveAPI
   
   const [inputText, setInputText] = useState('')
@@ -56,10 +59,36 @@ export function VoiceHub({ liveAPI, onViewFile }: VoiceHubProps) {
   return (
     <Card className="w-full h-full flex flex-col shadow-none border-0 rounded-none bg-card text-charcoal-graphite">
       <CardHeader className="pb-3 shrink-0 border-b border-charcoal-graphite/10">
-        <div className="flex items-center justify-between">
-          <CardTitle className="text-xl font-display italic text-fountain-ink select-none">
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-base sm:text-lg font-display italic text-fountain-ink select-none truncate">
             Talk to the Professor
           </CardTitle>
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onToggleClose && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                onClick={onToggleClose}
+                title="Hide Professor Sidebar"
+                className="h-8 w-8 text-charcoal-graphite/70 hover:bg-muted rounded-md transition-all duration-200"
+              >
+                <PanelRightClose className="w-4 h-4" />
+              </Button>
+            )}
+            <Button
+              variant="ghost"
+                onClick={() => {
+                  if (typeof window !== 'undefined' && window.confirm("Clear all conversation history and start fresh with the professor?")) {
+                    liveAPI.setMessages([]);
+                  }
+                }}
+                className="text-[10px] h-8 px-2 rounded-md hover:bg-muted text-muted-foreground font-semibold"
+                title="Clear all conversation messages"
+              >
+                Clear
+              </Button>
+              </div>
         </div>
       </CardHeader>
       

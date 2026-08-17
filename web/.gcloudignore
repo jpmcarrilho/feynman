@@ -1,0 +1,12 @@
+# This .gcloudignore tells Google Cloud Build which files to ignore during deployment upload.
+# We ignore standard build folder clutter to speed up uploads.
+node_modules/
+.next/
+.git/
+.gitignore
+README.md
+vitest.config.ts
+vitest.setup.ts
+
+# BUT DO NOT IGNORE THE DATABASE (Override .gitignore default)
+!dev.db

@@ -27,13 +27,23 @@ interface FlashcardProps {
   explanation?: string | null
   initialSelectedChoice?: string | null
   hasBeenAnswered?: boolean
+  isExamMode?: boolean
   onAnswer: (isCorrect: boolean, userAnswer: string) => void
   onRequestExplanation?: (userAnswer: string) => void
 }
 
-export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, onAnswer, onRequestExplanation }: FlashcardProps) {
+export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, onRequestExplanation }: FlashcardProps) {
   const hasDropdownChoices = choices.some(c => /^\[Dropdown \d+\]/.test(c));
-  const effectiveExerciseType = hasDropdownChoices ? 'dropdown' : exerciseType;
+  
+  // Dynamic override to multiple_choice if question text clearly requests selecting all that apply
+  const isMultiSelectText = questionText.toLowerCase().includes('select all that apply') || 
+                           questionText.toLowerCase().includes('choose all that apply') ||
+                           questionText.toLowerCase().includes('select all correct') ||
+                           exerciseType === 'multiple_choice';
+
+  const effectiveExerciseType = hasDropdownChoices 
+    ? 'dropdown' 
+    : (isMultiSelectText ? 'multiple_choice' : exerciseType);
 
   let adjustedQuestionText = questionText;
   if (effectiveExerciseType === 'dropdown') {
@@ -68,12 +78,17 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
     }
   })
   
-  const [showResult, setShowResult] = useState(!!initialSelectedChoice || !!hasBeenAnswered)
+  const [showResult, setShowResult] = useState(() => {
+    if (isExamMode) return false;
+    return !!initialSelectedChoice || !!hasBeenAnswered;
+  })
   const [hasRequestedHelp, setHasRequestedHelp] = useState(false)
 
   const handleSubmit = () => {
     if (showResult) return
-    setShowResult(true)
+    if (!isExamMode) {
+      setShowResult(true)
+    }
 
     let isCorrect = false;
     let answerStr = '';
@@ -84,26 +99,55 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
     } else if (effectiveExerciseType === 'multiple_choice') {
       try {
         const correctArr = JSON.parse(correctAnswer);
-        // Simple strict match for now
         isCorrect = multiSelected.length === correctArr.length && multiSelected.every(v => correctArr.includes(v));
       } catch (e) {
-        // Fallback if not JSON
-        isCorrect = multiSelected.join(',') === correctAnswer;
+        const cleanCorrectAnswer = correctAnswer.trim().toLowerCase();
+        const cleanUserAnswer = multiSelected.join(',').trim().toLowerCase();
+        isCorrect = cleanUserAnswer === cleanCorrectAnswer || 
+          (multiSelected.length === 1 && multiSelected[0].trim().toLowerCase() === cleanCorrectAnswer);
       }
       answerStr = JSON.stringify(multiSelected);
     } else if (effectiveExerciseType === 'numeric') {
-      // Allow slight floating point variations
       isCorrect = Math.abs(parseFloat(numericValue) - parseFloat(correctAnswer)) < 0.01;
       answerStr = numericValue;
     } else if (effectiveExerciseType === 'dropdown') {
-      const expectedAnswers = correctAnswer.split('|').map(s => s.trim());
-      const selectedAnswers = Object.entries(dropdownValues).map(([k, v]) => k === '[BLANK]' ? v : `${k} ${v}`).map(s => s.trim());
-      
-      if (expectedAnswers.length === 1 && Object.keys(dropdownValues).length <= 1) {
-        isCorrect = Object.values(dropdownValues)[0]?.trim().toLowerCase() === correctAnswer.trim().toLowerCase();
-      } else {
-        isCorrect = expectedAnswers.length > 0 && expectedAnswers.every(ans => selectedAnswers.some(sel => sel.toLowerCase() === ans.toLowerCase()));
+      // 1. Parse expected answers (handles JSON array strings, pipe-separated strings, or single values)
+      let expectedAnswers: string[] = [];
+      try {
+        const parsed = JSON.parse(correctAnswer);
+        if (Array.isArray(parsed)) {
+          expectedAnswers = parsed.map(s => s.toString());
+        } else {
+          expectedAnswers = [parsed.toString()];
+        }
+      } catch (e) {
+        expectedAnswers = correctAnswer.split('|');
       }
+
+      // 2. Get user's selected answers mapped with keys
+      const selectedAnswers = Object.entries(dropdownValues).map(([k, v]) => {
+        return k === '[BLANK]' ? v : `${k} ${v}`;
+      });
+
+      // 3. Clean helper to strip prefixes, spaces, and lowercase for precise comparison
+      const clean = (s: string) => {
+        if (!s) return '';
+        return s
+          .trim()
+          .replace(/^\[Dropdown \d+\]\s*/i, '')
+          .replace(/^\[Blank \d+\]\s*/i, '')
+          .trim()
+          .toLowerCase();
+      };
+
+      const cleanExpected = expectedAnswers.map(clean).filter(Boolean);
+      const cleanSelected = selectedAnswers.map(clean).filter(Boolean);
+
+      // 4. Compare expected vs selected sets
+      isCorrect = cleanExpected.length > 0 && 
+                  cleanExpected.length === cleanSelected.length &&
+                  cleanExpected.every(exp => cleanSelected.includes(exp));
+
       answerStr = JSON.stringify(dropdownValues);
     }
 
@@ -111,11 +155,16 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
   }
 
   const handleSelectSingle = (choice: string) => {
-    if (showResult) return
-    setSelected(choice)
-    const isCorrect = choice === correctAnswer
-    setShowResult(true)
-    onAnswer(isCorrect, choice)
+    if (isExamMode) {
+      setSelected(choice)
+      onAnswer(choice.trim().toLowerCase() === correctAnswer.trim().toLowerCase(), choice)
+    } else {
+      if (showResult) return
+      setSelected(choice)
+      const isCorrect = choice === correctAnswer
+      setShowResult(true)
+      onAnswer(isCorrect, choice)
+    }
   }
 
   const handleExplainMistake = () => {
@@ -264,7 +313,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
             })}
             {!showResult && (
               <Button className="mt-4 w-full bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={multiSelected.length === 0}>
-                Submit Answer
+                {isExamMode ? 'Save Answer' : 'Submit Answer'}
               </Button>
             )}
           </div>
@@ -276,7 +325,14 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
               type="number" 
               placeholder="Enter a number" 
               value={numericValue}
-              onChange={(e) => setNumericValue(e.target.value)}
+              onChange={(e) => {
+                setNumericValue(e.target.value);
+                if (isExamMode) {
+                  // For numeric, we can also auto-save on change so they don't absolutely have to click the button, but still provide the button
+                  const isCorrect = Math.abs(parseFloat(e.target.value) - parseFloat(correctAnswer)) < 0.01;
+                  onAnswer(isCorrect, e.target.value);
+                }
+              }}
               disabled={showResult}
               className={`transition-all duration-200 focus-visible:ring-fountain-ink ${
                 showResult 
@@ -288,7 +344,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
             />
             {!showResult && (
               <Button className="bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={!numericValue}>
-                Submit Answer
+                {isExamMode ? 'Save Answer' : 'Submit Answer'}
               </Button>
             )}
             {showResult && (
@@ -303,7 +359,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           <div className="flex flex-col gap-4">
             {!showResult && (
               <Button className="bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={Object.values(dropdownValues).filter(Boolean).length === 0}>
-                Submit Answer
+                {isExamMode ? 'Save Answer' : 'Submit Answer'}
               </Button>
             )}
             {showResult && (
@@ -311,6 +367,12 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
                 Correct Answer: <span className="text-green-600 font-semibold">{correctAnswer}</span>
               </div>
             )}
+          </div>
+        )}
+
+        {isExamMode && (selected || multiSelected.length > 0 || numericValue || Object.values(dropdownValues).filter(Boolean).length > 0) && (
+          <div className="text-xs text-fountain-ink bg-fountain-ink/10 px-3 py-1.5 rounded-md border border-fountain-ink/20 font-medium flex items-center gap-1.5 w-fit">
+            <span>✓ Answer saved as draft. You can change this anytime before submitting.</span>
           </div>
         )}
 

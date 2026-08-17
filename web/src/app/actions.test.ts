@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { explainMistake, generateNextExercise, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
@@ -55,8 +55,15 @@ vi.mock('fs', () => ({
   }
 }))
 
+let randomSpy: any;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.9); // stable random
+})
+
+afterEach(() => {
+  randomSpy.mockRestore();
 })
 
 describe('explainMistake action', () => {
@@ -74,11 +81,11 @@ describe('explainMistake action', () => {
     })
 
     expect(generateText).toHaveBeenCalledTimes(1)
-    
+
     const callArgs = vi.mocked(generateText).mock.calls[0][0]
     expect(callArgs.prompt).toContain('What is 2+2?')
     expect(callArgs.prompt).toContain('Student\'s Answer: 5')
-    
+
     expect(result).toBe(mockExplanation)
   })
 
@@ -138,6 +145,7 @@ describe('generateNextExercise action', () => {
     // Verify prisma.exercise.create was called with targetTopicId
     expect(prisma.exercise.create).toHaveBeenCalledWith({
       data: {
+        id: expect.stringMatching(/^gen-/),
         topicId: 'topic-1',
         questionText: 'Test generated question?',
         exerciseType: 'single_choice',
@@ -204,7 +212,7 @@ describe('enrichExerciseWithContext action', () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValueOnce([
       { id: 't-prev', title: 'Prev Video Title', content: 'Here is the transcript for context.' }
     ] as any)
-    
+
     const mockEnrichedText = 'Which step is missing in the data entry double entry verification process?'
     vi.mocked(generateObject).mockResolvedValueOnce({
       object: { enrichedQuestionText: mockEnrichedText }

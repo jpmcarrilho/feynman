@@ -93,19 +93,18 @@ export function FeynmanLogo({ className = '', variant = 'default', size }: Feynm
     return (
       <svg 
         key={animationKey}
-        viewBox="85 105 160 160" 
+        viewBox="60 110 220 220" 
         style={{ width: actualSize, height: actualSize }}
         className={`animate-sketch-draw select-none cursor-pointer ${className}`}
         xmlns="http://www.w3.org/2000/svg"
         onMouseEnter={handleMouseEnter}
       >
-        <g stroke="var(--charcoal-graphite, #2C2E33)" strokeWidth="2.5" fill="none" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M 120 170 Q 140 150 175 165 L 175 220 Q 145 235 120 218 Z"/>
-          <ellipse cx="147" cy="165" rx="27" ry="12"/>
-          <path d="M 175 178 Q 205 160 240 178 L 240 230 Q 205 245 175 225 Z"/>
-          <ellipse cx="207" cy="178" rx="28" ry="12"/>
-          <path d="M 90 130 Q 105 155 115 175" strokeWidth="2"/>
-          <path d="M 100 120 Q 118 148 128 170" strokeWidth="2"/>
+        <g stroke="var(--charcoal-graphite, #2C2E33)" fill="none" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="100" y1="120" x2="170" y2="180" strokeWidth="3.2"/>
+          <line x1="240" y1="120" x2="170" y2="180" strokeWidth="3.2"/>
+          <path d="M 170 180 Q 195 205 185 240 Q 178 265 200 285" strokeWidth="2.4"/>
+          <line x1="200" y1="285" x2="140" y2="270" strokeWidth="3.2"/>
+          <line x1="200" y1="285" x2="140" y2="320" strokeWidth="3.2"/>
         </g>
       </svg>
     )
@@ -119,22 +118,20 @@ export function FeynmanLogo({ className = '', variant = 'default', size }: Feynm
       onMouseEnter={handleMouseEnter}
     >
       <svg 
-        viewBox="65 105 210 210" 
+        viewBox="40 112 260 260" 
         className="w-full h-full animate-sketch-draw"
         xmlns="http://www.w3.org/2000/svg"
       >
-        {/* Transparent background so it fits any notebook page context */}
-        <g stroke="var(--charcoal-graphite, #2C2E33)" strokeWidth="2.2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-          <path d="M 120 170 Q 140 150 175 165 L 175 220 Q 145 235 120 218 Z"/>
-          <ellipse cx="147" cy="165" rx="27" ry="12"/>
-          <path d="M 175 178 Q 205 160 240 178 L 240 230 Q 205 245 175 225 Z"/>
-          <ellipse cx="207" cy="178" rx="28" ry="12"/>
-          <path d="M 90 130 Q 105 155 115 175" strokeWidth="1.6"/>
-          <path d="M 100 120 Q 118 148 128 170" strokeWidth="1.6"/>
+        <g stroke="var(--charcoal-graphite, #2C2E33)" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
+          <line x1="100" y1="120" x2="170" y2="180" strokeWidth="3"/>
+          <line x1="240" y1="120" x2="170" y2="180" strokeWidth="3"/>
+          <path d="M 170 180 Q 195 205 185 240 Q 178 265 200 285" strokeWidth="2.2" strokeDasharray="0.1 8"/>
+          <line x1="200" y1="285" x2="140" y2="270" strokeWidth="3"/>
+          <line x1="200" y1="285" x2="140" y2="320" strokeWidth="3"/>
         </g>
         <text 
           x="200" 
-          y="290" 
+          y="360" 
           fontFamily="var(--font-display, Georgia, serif)" 
           fontSize="24" 
           fontStyle="italic"

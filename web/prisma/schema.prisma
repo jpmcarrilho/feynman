@@ -46,14 +46,32 @@ model Exercise {
 }
 
 model StudySession {
-  id          String        @id @default(uuid())
-  title       String?       // e.g., "JPAL102x - Week 4"
-  startTime   DateTime      @default(now())
-  endTime     DateTime?
-  status      String        // e.g., "active", "completed"
-  chatLog     String?       // JSON string of chat messages
-  exerciseIds String?       // JSON array of exercise IDs selected for this session
-  logs        ExerciseLog[]
+  id           String        @id @default(uuid())
+  title        String?       // e.g., "JPAL102x - Week 4"
+  startTime    DateTime      @default(now())
+  endTime      DateTime?
+  status       String        // e.g., "active", "completed"
+  mode         String        @default("study") // "study" or "exam"
+  timeLimit    Int?          // Time limit in seconds (e.g., 4500 for 1h15m)
+  draftAnswers String?       // JSON string mapping exerciseId -> user's draft answer
+  flaggedIds   String?       // JSON array of exercise IDs flagged for review
+  sourcingMix  Int           @default(50) // % of AI generated questions (0 to 100)
+  diagnosis    String?       // Markdown of the analytical diagnosis report
+  chatLog      String?       // JSON string of chat messages
+  exerciseIds  String?       // JSON array of exercise IDs selected for this session
+  studyPlanId  String?       // Link to the parent curriculum study plan
+  studyPlan    StudyPlan?    @relation(fields: [studyPlanId], references: [id], onDelete: Cascade)
+  logs         ExerciseLog[]
+}
+
+model StudyPlan {
+  id               String         @id @default(uuid())
+  title            String         // e.g., "DEDP 5-Day Exam Sprint"
+  executiveSummary String         // Analytical summary compiled by Gemini
+  status           String         @default("active") // "active", "completed", "archived"
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+  sessions         StudySession[] // Pre-created timeline of sessions
 }
 
 model ExerciseLog {

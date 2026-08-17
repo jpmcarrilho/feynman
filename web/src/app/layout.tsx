@@ -18,7 +18,7 @@ const firaCode = Fira_Code({
 });
 
 export const metadata: Metadata = {
-  title: "Feynman Study Hub",
+  title: "Feynman",
   description: "Understand Everything. Simplify Anything.",
 };
 

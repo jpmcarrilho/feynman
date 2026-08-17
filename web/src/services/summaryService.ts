@@ -84,8 +84,12 @@ export async function createSessionSummary(sessionId: string) {
 
     let materialContext = ''
     classTopics.forEach(t => {
+      let topicContent = t.content || 'No outline transcription available.'
+      if (topicContent.length > 15000) {
+        topicContent = topicContent.substring(0, 15000) + '\n\n[...Content truncated for context efficiency...]'
+      }
       materialContext += `--- Lesson Name: ${t.className || 'Unknown'} | Topic Unit: ${t.title} ---\n`
-      materialContext += `Content/Transcription Outline:\n${t.content || 'No outline transcription available.'}\n`
+      materialContext += `Content/Transcription Outline:\n${topicContent}\n`
       materialContext += `Local Slides/Reading Path: ${t.localPath || 'None'}\n\n`
     })
 
