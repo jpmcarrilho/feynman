@@ -1,6 +1,30 @@
 # 🎓 Feynman DEDP Study Platform
 ### *Personal Socratic AI Tutor & Adaptive Workspace for MIT DEDP MicroMasters*
 
+<p align="center">
+  <svg viewBox="40 112 260 260" width="180" height="180" xmlns="http://www.w3.org/2000/svg">
+    <g stroke="#2C2E33" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+      <line x1="100" y1="120" x2="170" y2="180" stroke-width="3"/>
+      <line x1="240" y1="120" x2="170" y2="180" stroke-width="3"/>
+      <path d="M 170 180 Q 195 205 185 240 Q 178 265 200 285" stroke-width="2.2" stroke-dasharray="0.1 8"/>
+      <line x1="200" y1="285" x2="140" y2="270" stroke-width="3"/>
+      <line x1="200" y1="285" x2="140" y2="320" stroke-width="3"/>
+    </g>
+    <text 
+      x="200" 
+      y="360" 
+      font-family="Georgia, serif" 
+      font-size="24" 
+      font-style="italic"
+      font-weight="bold"
+      fill="#2C2E33" 
+      text-anchor="middle"
+    >
+      Feynman
+    </text>
+  </svg>
+</p>
+
 The **Feynman DEDP Study Platform** is a highly personalized, adaptive, and visually rich educational workspace designed to help students master **MIT’s Data, Economics, and Development Policy (DEDP) MicroMasters** curriculum. 
 
 Instead of passive, cookie-cutter cramming, the platform transforms static textbooks, lecture slide decks, and transcripts into an interactive, **hands-free Socratic learning environment**. It utilizes sophisticated AI reasoning, real-time bidirectional voice tutoring, performance-based adaptive question mixes, and detailed econometric diagnostics to identify and bridge your critical conceptual gaps.
