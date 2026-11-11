@@ -53,7 +53,7 @@ describe('AddFilesPanel', () => {
     expect(screen.getByTestId('dropzone')).toBeInTheDocument()
     expect(dropzone.props).toMatchObject({ bundle: 'later', courseId: 'c1' })
     expect(screen.getByRole('region', { name: 'Add files' })).toHaveTextContent(/not changed/)
-    expect(screen.getByRole('region', { name: 'Add files' })).toHaveTextContent(/Open questions with a written model answer are not imported/)
+    expect(screen.getByRole('region', { name: 'Add files' })).toHaveTextContent(/open questions with a written model answer \(your written answers are then checked against it\)/)
   })
 
   it('lists the ready files in a collapsed "Files in this studyspace" list; Remove asks twice, shows the refusal as is, and refreshes the resources after a removal', async () => {

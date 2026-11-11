@@ -155,6 +155,9 @@ export function OpenAnswer({
     const pending = shown?.gradedBy === 'pending'
     const score = shown?.score ?? 0
     const fullyCorrect = !!shown && !pending && score >= 1
+    // Nothing to add when the explanation is empty or only repeats the model answer (rows stored that way by older imports)
+    const norm = (t: string) => t.replace(/[*_`]/g, '').replace(/\s+/g, ' ').trim().toLowerCase()
+    const showExplanation = !!explanation && norm(explanation) !== '' && norm(explanation) !== norm(modelAnswer)
     const partial = !!shown && !pending && score > 0 && score < 1
     const label = !answered ? 'Not answered' : openResultLabel({ score, gradedBy: shown?.gradedBy })
     const colour = pending
@@ -210,7 +213,7 @@ export function OpenAnswer({
           <div className="text-xs font-semibold uppercase tracking-wide text-charcoal-graphite/60">Model answer</div>
           <Md text={modelAnswer} className={`mt-1 ${MD_BLOCK}`} />
         </div>
-        {explanation && (
+        {showExplanation && (
           <div className="text-sm w-full">
             <strong className="text-charcoal-graphite font-display italic text-base block mb-2">Professor&apos;s Explanation:</strong>
             <Md text={explanation} className={MD_BLOCK} />

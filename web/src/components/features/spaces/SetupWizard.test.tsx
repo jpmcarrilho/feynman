@@ -13,7 +13,7 @@ vi.mock('./PersonaCard', () => ({
 describe('SetupWizard', () => {
   it('says which questions of a file are imported (those with a stated answer) on the upload step', () => {
     render(<SetupWizard courseId="c1" title="Chem" initialStep="upload" />)
-    expect(screen.getByText(/Open questions with a written model answer are not imported/)).toBeInTheDocument()
+    expect(screen.getByText(/open questions with a written model answer \(your written answers are then checked against it\)/)).toBeInTheDocument()
     expect(screen.getByText(/imported when the file also states their answer/)).toBeInTheDocument()
   })
 

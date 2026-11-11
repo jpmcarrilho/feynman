@@ -1,4 +1,5 @@
 // Prompts of the ingestion pipeline: OCR (T21), segmentation and question import (T22). Pure string builders.
+import { MODEL_ANSWER_MAX_CHARS } from '@/lib/openAnswer'
 
 /** Transcription of a page range of an attached PDF (Gemini fallback for scans and image-heavy decks). */
 export function ocrPagesPrompt(start: number, end: number, total: number): string {
@@ -14,7 +15,7 @@ Rules:
 // --- Segmentation (T22) -------------------------------------------------------------------------------------------
 
 /** Bump whenever the segmentation or import prompts change (stored on the marker rows and reported by the measurements). */
-export const INGEST_PROMPT_VERSION = 'ingest-v2'
+export const INGEST_PROMPT_VERSION = 'ingest-v3'
 
 const TOPIC_FIELD_RULES = `For every topic give:
 - "title": at most 80 characters, specific (name the concept, method or example, not "Introduction" or "Slide 12"), written in the language of the document text.
@@ -105,12 +106,14 @@ Extract only questions that are present in the topic text AND whose correct answ
 
 For every question return:
 - "questionText": the question as written, complete enough to be answered on its own (include the setup the text gives for it). Keep the language of the text. Remove numbering such as "Question 3", points ("1/1 point (graded)") and instructions such as "Submit" or "Show answer".
-- "exerciseType": one of
+- "exerciseType": one of "single_choice", "multiple_choice", "numeric", "dropdown" or "open":
   - "single_choice": 3 to 6 options, exactly one correct. "choices" lists the options in the order of the text; "correctChoiceIndexes" is a list with the one 0-based position in "choices" of the correct option (the first option is 0); "correctAnswer" is "". (A true/false question with only two options is not importable: leave it out.)
   - "multiple_choice": 3 to 6 options, "select all that apply". "correctChoiceIndexes" lists the 0-based positions in "choices" of all the correct options, each once, e.g. [0, 2]; "correctAnswer" is "". Never copy or JSON-encode option texts into "correctAnswer". Not every option may be correct.
   - "numeric": the answer is a number. "choices" is [] and "correctChoiceIndexes" is []. "correctAnswer" is a plain number such as "0.8" or "-12" (no units, no percent sign, no thousands separators, no words).
   - "dropdown": a fill-in-the-blank sentence with 3 to 5 options: "questionText" contains exactly one "[Dropdown 1]" placeholder, "choices" the options, "correctChoiceIndexes" a list with the one 0-based position of the correct option, "correctAnswer" "".
-  - Questions that need a free-text answer or a long derivation cannot be imported: leave them out.
+  - "open": a question answered in writing (explain, describe, why, compare, justify, define, ...) for which the text states a WRITTEN answer. Use it only when the topic text${key ? ' or the ANSWER KEY TEXT' : ''} actually contains that written answer for that very question (a "Model answer", "Answer", "Solution" or "Marking scheme" passage, or an answer key entry that is a written answer). "choices" is [] and "correctChoiceIndexes" is []. "correctAnswer" is the written answer COPIED VERBATIM from the text: the same words, in the same order, not paraphrased, not shortened, not joined from separate passages, without a label such as "Answer:" or "1." in front, at most ${MODEL_ANSWER_MAX_CHARS} characters. "keyPoints" are short claims (a phrase or one short sentence, at most 150 characters; never the whole answer pasted again) condensed from that written answer, using its own terms and no fact that is not in it. Give 2 to 4 points whenever the answer states more than one idea, also when it is a single sentence with a cause and an effect ("X, so Y", "because"); give exactly 1 point only when the answer states one single idea. A question with no written answer in the text, or whose written answer is longer than ${MODEL_ANSWER_MAX_CHARS} characters, is left out: never invent, shorten or cut an answer. For an open question "answerQuote" is the first sentence of the written answer, copied exactly.
+  - Calculations whose answer is a long derivation, and any other question that does not fit these types or has no stated answer, are left out.
+- "keyPoints": [] for every type except "open" (see above).
 - "choices": the options as plain strings without letters or bullets ("A)", "i."), copied from the text.
 - "explanation": the explanation or solution the text gives for the answer, copied or lightly condensed. If the text gives none, write a one-sentence statement of the correct answer as the text gives it. Never add reasoning of your own.
 - "answerQuote": the passage of the text that states the answer, copied exactly (one line or a short passage, at most 300 characters).

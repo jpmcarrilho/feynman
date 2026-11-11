@@ -52,14 +52,16 @@ export type ModuleGrouping = z.infer<typeof ModuleGroupingSchema>
  */
 export const ImportedQuestionSchema = z.object({
   questionText: z.string(),
-  exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
+  exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown', 'open']),
   choices: z.array(z.string()),
   /** 0-based indexes into `choices` of the correct options (one for single choice and dropdown, one or more for multiple choice, none for numeric). Code derives the stored answer from them. */
   correctChoiceIndexes: z.array(z.number().int()),
-  /** The number for numeric questions; "" for every choice type. */
+  /** The number for numeric questions; the model answer copied verbatim from the text for open questions; "" for every choice type. */
   correctAnswer: z.string(),
   explanation: z.string(),
   answerQuote: z.string(),
+  /** Open questions only: 1 to 4 short points condensed from the written model answer in `correctAnswer`; [] for every other type. */
+  keyPoints: z.array(z.string()),
 })
 export type ImportedQuestion = z.infer<typeof ImportedQuestionSchema>
 export const ImportedQuestionsSchema = z.object({ questions: z.array(ImportedQuestionSchema) })

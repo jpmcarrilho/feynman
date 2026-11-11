@@ -8,6 +8,9 @@
 // A question is imported only when its answer is stated in the source: the edX parser needs a marked option, the model
 // must quote the passage that states the answer and code checks that the quote occurs in the topic text. Every question
 // must pass `validateExerciseStructure` and be graded as correct by its own key (`gradeAnswer`). Nothing is invented.
+// An open question (written answer) is imported only with a written model answer copied verbatim from the file (code
+// checks it occurs in the topic or key text) and key points condensed from it (code checks they use its words); it has
+// no self-grading step, a model checks the student's answer later.
 // Enrichment of the imported questions is off by default (see `isImportEnrichmentEnabled`).
 import crypto from 'crypto'
 import { prisma } from '@/lib/db'
@@ -15,6 +18,7 @@ import { extensionOf } from '@/lib/ingestLimits'
 import { gradeAnswer } from '@/lib/grading'
 import { validateExerciseStructure, deriveChoiceAnswer, INVALID_CHOICE_INDEXES, dropdownAnswerFor, dropdownOption, summarizeIssues } from '@/lib/exerciseValidation'
 import { importQuestionsPrompt, INGEST_PROMPT_VERSION } from '@/lib/prompts/ingest'
+import { MODEL_ANSWER_MAX_CHARS } from '@/lib/openAnswer'
 import { parseExerciseMarkdown } from '@/services/ingest'
 import { enrichExercisesByIds, type EnrichmentOutcome } from '@/services/enrichment'
 import { NOT_STUDY_MATERIAL_PREFIX } from '@/services/exerciseGenerator'
@@ -29,6 +33,50 @@ export const QUESTION_HEURISTIC_MIN_MATCHES = 3
 const QUESTION_HEURISTIC = /\b(question|exercise|problem)\s*\d|\?\s*$|^\s*\(?[a-d]\)\s/gim
 
 /**
+ * Words that open a written-answer item, in English, Portuguese, Spanish, French and German. The list is for the
+ * pre-filter only (it never decides that something is a question: the answer cue is still required, and the model and the
+ * acceptance checks decide the rest). Matched case-insensitively at the start of the item text; the end of the word is
+ * checked with a lookahead on letters because `\b` does not see accented letters.
+ */
+const OPEN_ITEM_WORDS = [
+  // English
+  'explain', 'describe', 'derive', 'discuss', 'why', 'compare', 'contrast', 'justify', 'show that', 'prove', 'define', 'what', 'how',
+  'outline', 'summari[sz]e', 'evaluate', 'analy[sz]e', 'illustrate', 'distinguish',
+  // Portuguese
+  'explique', 'descreva', 'derive', 'discuta', 'por qu[eê]', 'compare', 'justifique', 'demonstre', 'prove', 'defina', 'o que', 'qual', 'quais', 'como',
+  'esboce', 'resuma', 'avalie', 'analise', 'diferencie', 'ilustre',
+  // Spanish
+  'explica', 'describe', 'deriva', 'discute', 'por qu[eé]', 'compara', 'justifica', 'demuestra', 'demostrar', 'prueba', 'define', 'qu[eé]', 'cu[aá]l', 'cu[aá]les',
+  'c[oó]mo', 'resume', 'eval[uú]a', 'analiza', 'ilustra', 'diferencia',
+  // French
+  'expliquez', 'd[eé]crivez', 'd[eé]montrez', 'discutez', 'pourquoi', 'comparez', 'justifiez', 'prouvez', 'd[eé]finissez', 'qu.est-ce', 'quel(?:le)?s?',
+  'comment', 'r[eé]sumez', '[eé]valuez', 'analysez',
+  // German
+  'erkl[aä]re?n?', 'beschreibe?n?', 'erl[aä]utere?n?', 'diskutiere?n?', 'warum', 'weshalb', 'vergleiche?n?', 'begr[uü]nde?n?', 'zeige?n? sie', 'beweise?n?',
+  'definiere?n?', 'was', 'wie', 'skizziere?n?', 'fassen sie',
+]
+/**
+ * A numbered, lettered or "Q"-style item whose text starts with an imperative or question word: "1. Explain ...",
+ * "(b) Describe ...", "Q3: Why ...", "Questão 2. Compare ...". Counts toward the question heuristics.
+ */
+export const OPEN_ITEM_PATTERN = new RegExp(
+  `^[ \\t]*(?:[*_]{1,2})?(?:q(?:uestion|uest[aã]o)?|pregunta|ejercicio|exercise|problem|aufgabe|exercice)?[ \\t]*\\.?[ \\t]*\\(?(?:\\d+|[a-z])[.):][ \\t]*(?:[*_]{1,2})?[ \\t]*(?:${OPEN_ITEM_WORDS.join('|')})(?![a-zà-ÿ])`,
+  'gim',
+)
+
+/** Number of lines that look like an open item and are not already counted by `counted` (a pattern applied per line). */
+function extraOpenItems(text: string, counted: RegExp): number {
+  let extra = 0
+  const lineTest = new RegExp(counted.source, counted.flags.replace('g', ''))
+  for (const m of text.matchAll(OPEN_ITEM_PATTERN)) {
+    const start = m.index ?? 0
+    const end = text.indexOf('\n', start)
+    if (!lineTest.test(text.slice(start, end === -1 ? undefined : end))) extra++
+  }
+  return extra
+}
+
+/**
  * Evidence that answers are present in the text, the second half of the pre-filter. A question is only importable when
  * its answer is stated, so a topic with question marks but none of these cues (a lecture transcript, a slide deck) is not
  * sent to the model. Case-insensitive, multiline; the one place to extend. Cues were chosen from the real inputs:
@@ -38,17 +86,34 @@ const QUESTION_HEURISTIC = /\b(question|exercise|problem)\s*\d|\?\s*$|^\s*\(?[a-
  *    French réponse/corrigé/solution, German Antwort/Lösung);
  *  - a bare heading line "Answer key", "Solutions", "Gabarito", ... (also behind Markdown heading marks: "## Answer key");
  *  - answer-key lines: "1. B", "2) c", "Question 3: A, B", "Q4 - D";
- *  - the phrase "the correct answer/option/choice is".
+ *  - the phrase "the correct answer/option/choice is";
+ *  - a written-answer heading: "Model answer(s)", "Sample/Suggested/Expected answer", "Marking scheme" and the pt/es/fr/de
+ *    equivalents ("Resposta modelo", "Respuesta esperada", "Réponse type", "Corrigé type", "Musterlösung"), with or without
+ *    a colon behind Markdown `#` marks.
  * Only these languages are supported; a document in another language never matches the headings and is skipped unless it
  * contains `[x]` marks or letter-key lines, which are language-free.
  */
-export const ANSWER_CUES: RegExp[] = [
-  /\[x\]/i,
+export const ANSWER_HEADING_CUES: RegExp[] = [
+  // Answer headings: "Model answer:", "## Sample answers", "Marking scheme", "Answer key", "Gabarito", "Solution 2:" ...
+  /^\s*(?:#{1,6}[ \t]*)?(?:(?:model|sample|suggested|expected) answers?|marking scheme|respostas? modelo|respostas? esperadas?|respuestas? modelo|respuestas? esperadas?|r[ée]ponses? types?|corrig[ée]s? types?|musterl[öo]sung(?:en)?|erwartete antworten?)\s*(?:\d+\s*)?[:.]/im,
+  /^\s*(?:#{1,6}[ \t]*)?(?:(?:model|sample|suggested|expected) answers?|marking scheme|respostas? modelo|respostas? esperadas?|respuestas? modelo|respuestas? esperadas?|r[ée]ponses? types?|corrig[ée]s? types?|musterl[öo]sung(?:en)?|erwartete antworten?|respostas|solu[cç][oõ]es|soluciones|r[ée]ponses|antworten)\s*$/im,
   /^\s*(?:#{1,6}[ \t]*)?(answer key|answers?|solutions?|correct answers?|explanations?|resposta|respostas|gabarito|solu[cç][aã]o|solu[cç][oõ]es|respuestas?|soluci[oó]n|soluciones|r[ée]ponses?|corrig[ée]|antworten?|l[öo]sung(en)?)\s*(\d+\s*)?[:.]/im,
   /^\s*(?:#{1,6}[ \t]*)?(answer key|solutions?|answers|gabarito|respuestas|corrig[ée]|l[öo]sungen)\s*$/im,
+]
+
+/** Weak evidence: a marked option, a letter-only key line, a phrase. Not enough to send a one- or two-question topic to the model. */
+const WEAK_ANSWER_CUES: RegExp[] = [
+  /\[x\]/i,
   /^\s*(question|problem|exercise|q|quest[aã]o|pregunta|ejercicio)?\s*\d+\s*[:.)\-]\s*\(?[a-h]\)?(\s*[,&]\s*\(?[a-h]\)?)*\s*$/im,
   /\bthe correct (answer|option|choice)s? (is|are)\b/i,
 ]
+
+export const ANSWER_CUES: RegExp[] = [...ANSWER_HEADING_CUES, ...WEAK_ANSWER_CUES]
+
+/** True when the text has an answer HEADING (an answer-key, solutions or model-answers style line), the strong half of the cues. */
+export function hasAnswerHeading(text: string): boolean {
+  return ANSWER_HEADING_CUES.some((cue) => cue.test(text))
+}
 
 /** True when the text carries at least one answer cue. */
 export function hasAnswerCue(text: string): boolean {
@@ -59,25 +124,29 @@ export function hasAnswerCue(text: string): boolean {
 export const ANSWER_KEY_MAX_CHARS = 30_000
 
 /** The question-pattern half of the pre-filter alone (at least three question-like marks). */
-export function hasQuestionPattern(text: string): boolean {
+export function hasQuestionPattern(text: string, minMatches = QUESTION_HEURISTIC_MIN_MATCHES): boolean {
   const matches = text.match(QUESTION_HEURISTIC)
-  return (matches?.length ?? 0) >= QUESTION_HEURISTIC_MIN_MATCHES
+  return (matches?.length ?? 0) + extraOpenItems(text, QUESTION_HEURISTIC) >= minMatches
 }
 
 /** Stricter question marks for a topic whose answers are in another topic: numbered questions and lettered options, not any line ending in "?". */
 const QUIZ_PATTERN = /\b(question|exercise|problem|q)\s*\.?\s*\d+|^\s*\d+[.)]\s+\S.*\?\s*$|^\s*\(?[a-d]\)\s/gim
 
-/** True when the text looks like a quiz: at least three numbered questions or lettered options. */
-export function hasQuizPattern(text: string): boolean {
-  return (text.match(QUIZ_PATTERN)?.length ?? 0) >= QUESTION_HEURISTIC_MIN_MATCHES
+/** True when the text looks like a quiz: at least three numbered questions, numbered imperative items or lettered options. */
+export function hasQuizPattern(text: string, minMatches = QUESTION_HEURISTIC_MIN_MATCHES): boolean {
+  return (text.match(QUIZ_PATTERN)?.length ?? 0) + extraOpenItems(text, QUIZ_PATTERN) >= minMatches
 }
 
 /**
  * Cheap pre-filter of plan 4.6 plus answer evidence: a topic is worth one model call when it has at least three
  * question-like marks ("Question 3", a line ending in "?", a line starting with "a)") AND an answer cue (`ANSWER_CUES`).
+ * When the topic (or the paired key text, `keyText`) has an answer HEADING ("## Model answers", "Answer key", "Gabarito"),
+ * the answers are surely there and one question-like mark is enough, so a file with one or two questions is not skipped.
+ * Weak cues alone (a lone "[x]", "the correct answer is") keep the threshold of three.
  */
-export function looksLikeQuestions(text: string): boolean {
-  return hasQuestionPattern(text) && hasAnswerCue(text)
+export function looksLikeQuestions(text: string, keyText = ''): boolean {
+  const min = hasAnswerHeading(text) || hasAnswerHeading(keyText) ? 1 : QUESTION_HEURISTIC_MIN_MATCHES
+  return hasQuestionPattern(text, min) && (hasAnswerCue(text) || hasAnswerCue(keyText))
 }
 
 /**
@@ -100,6 +169,8 @@ export type Candidate = {
   explanation: string
   /** Passage of the source that states the answer (model path only; the edX parser reads a marked option instead). */
   answerQuote?: string
+  /** Open questions only: the key points condensed from the written model answer in `correctAnswer`. */
+  keyPoints?: string[]
 }
 
 export type AcceptedQuestion = {
@@ -109,10 +180,48 @@ export type AcceptedQuestion = {
   correctAnswer: string
   explanation: string
   explanationFallback: boolean
+  /** Open questions only; [] for the other types. */
+  keyPoints: string[]
 }
 
 function haystack(text: string): string {
   return collapseSpace(text.normalize('NFKC')).toLowerCase()
+}
+
+/** Lower case, accents and Markdown emphasis marks removed, whitespace collapsed: for comparing wording, not for storing. */
+function looseText(text: string): string {
+  return collapseSpace(text.normalize('NFD').replace(/\p{M}/gu, '').normalize('NFKC').replace(/[*_`]/g, '')).toLowerCase()
+}
+
+const ANSWER_LABEL = /^\s*(?:(?:(?:model|sample|suggested|expected) )?(?:answer|solution)|resposta(?: modelo| esperada)?|respuesta(?: modelo| esperada)?|solu[cç][aã]o|soluci[oó]n|r[ée]ponse(?: type)?|corrig[ée](?: type)?|antwort|l[öo]sung|musterl[öo]sung|gabarito)\s*\d*\s*[:.\-–—]\s*|^\s*\(?\d+[.)]\s+/i
+
+/** A model answer without its leading label ("Answer:", "Model answer 2 -", "Resposta:", "3.") and the Markdown bold around it. */
+export function stripAnswerLabel(text: string): string {
+  let t = text.trim()
+  for (let i = 0; i < 3; i++) {
+    const next = t.replace(/^\*{1,2}|\*{1,2}$/g, '').replace(ANSWER_LABEL, '').replace(/^\*{1,2}/, '').trim()
+    if (next === t) break
+    t = next
+  }
+  return t
+}
+
+/** Words of 4 or more letters, without accents and lower case. */
+function contentWords(text: string): string[] {
+  return looseText(text).match(/\p{L}{4,}/gu) ?? []
+}
+
+/**
+ * True when a key point is made of the model answer's own wording: at least half of its content words (4+ letters) occur
+ * in the model answer. A word counts when the answer has a word with the same first five letters, so "reduces" matches
+ * "reduce". A key point with no content word (a number, a symbol) must occur in the answer as written.
+ */
+export function keyPointInAnswer(point: string, answer: string): boolean {
+  const words = [...new Set(contentWords(point))]
+  if (words.length === 0) return looseText(answer).includes(looseText(point))
+  const stems = new Set(contentWords(answer).map((w) => w.slice(0, 5)))
+  const found = words.filter((w) => stems.has(w.slice(0, 5))).length
+  return found * 2 >= words.length
 }
 
 /** The answer string a student would send for the stored key, per type. */
@@ -137,11 +246,12 @@ function displayAnswer(c: { exerciseType: string; correctAnswer: string }): stri
  * A model question as a candidate: the stored key is derived from `correctChoiceIndexes` (see `deriveChoiceAnswer`), so
  * the model never retypes option text. A bad index list is rejected with the code `invalid_correct_choice_indexes`.
  */
-export function candidateFromImported(q: ImportedQuestion): { ok: true; candidate: Candidate } | { ok: false; reason: string } {
+export function candidateFromImported(q: Omit<ImportedQuestion, 'keyPoints'> & { keyPoints?: string[] }): { ok: true; candidate: Candidate } | { ok: false; reason: string } {
   const choices = (q.choices ?? []).map((x) => String(x).trim())
   const derived = deriveChoiceAnswer(q.exerciseType, choices, q.correctChoiceIndexes, q.correctAnswer ?? '')
   if (!derived.ok) return { ok: false, reason: INVALID_CHOICE_INDEXES }
-  return { ok: true, candidate: { ...q, choices, correctAnswer: derived.correctAnswer } }
+  const keyPoints = (q.keyPoints ?? []).map((k) => String(k).trim()).filter(Boolean)
+  return { ok: true, candidate: { ...q, choices, correctAnswer: derived.correctAnswer, keyPoints } }
 }
 
 /**
@@ -154,6 +264,7 @@ export function acceptCandidate(c: Candidate, sourceText: string | null): { ok: 
   const correctAnswer = (c.correctAnswer ?? '').trim()
   if (!questionText) return { ok: false, reason: 'empty_question' }
   if (!correctAnswer || correctAnswer === '[]') return { ok: false, reason: 'no_answer_in_source' }
+  if (c.exerciseType === 'open') return acceptOpenCandidate(c, questionText, choices, correctAnswer, sourceText)
 
   if (sourceText !== null) {
     const quote = haystack(c.answerQuote ?? '')
@@ -173,7 +284,33 @@ export function acceptCandidate(c: Candidate, sourceText: string | null): { ok: 
   // Graded as correct by its own key
   const graded = gradeAnswer({ ...candidate }, selfAnswerFor(candidate))
   if (!graded.isCorrect) return { ok: false, reason: 'key_does_not_grade_as_correct' }
-  return { ok: true, question: { ...candidate, explanationFallback } }
+  return { ok: true, question: { ...candidate, explanationFallback, keyPoints: [] } }
+}
+
+/**
+ * The open branch of `acceptCandidate`. The written model answer must occur in the topic text plus the paired key text
+ * (verbatim, compared after normalization), every key point must be made of the answer's own wording, and the question
+ * passes structural validation as an imported one. There is no self-grading step: nothing can grade a written answer
+ * against itself. A model answer over the limit is a reason to leave the question out, never to cut it.
+ */
+function acceptOpenCandidate(
+  c: Candidate, questionText: string, choices: string[], rawAnswer: string, sourceText: string | null,
+): { ok: true; question: AcceptedQuestion } | { ok: false; reason: string } {
+  if (choices.length > 0) return { ok: false, reason: 'open_has_choices' }
+  const correctAnswer = stripAnswerLabel(rawAnswer)
+  if (!correctAnswer) return { ok: false, reason: 'no_answer_in_source' }
+  if (correctAnswer.length > MODEL_ANSWER_MAX_CHARS) return { ok: false, reason: 'model_answer_too_long' }
+  if (sourceText === null || !looseText(sourceText).includes(looseText(correctAnswer))) return { ok: false, reason: 'model_answer_not_in_source' }
+  const keyPoints = (c.keyPoints ?? []).map((k) => String(k).trim()).filter(Boolean)
+  if (keyPoints.some((k) => !keyPointInAnswer(k, correctAnswer))) return { ok: false, reason: 'key_point_not_in_answer' }
+
+  // The card shows the model answer already: no filler, and never an explanation that only repeats it
+  let explanation = (c.explanation ?? '').trim()
+  if (looseText(stripAnswerLabel(explanation)) === looseText(correctAnswer)) explanation = ''
+  const candidate = { questionText, exerciseType: 'open', choices: [] as string[], correctAnswer, explanation, keyPoints }
+  const issues = validateExerciseStructure(candidate, { origin: 'imported' })
+  if (issues.length > 0) return { ok: false, reason: `invalid:${summarizeIssues(issues)}` }
+  return { ok: true, question: { ...candidate, explanationFallback: false } }
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -323,7 +460,11 @@ export async function importQuestionsForSource(
       // no question pattern is a key, and its text is an extra answer source for the question topics of this source.
       const keyTopics = study.filter((t) => hasAnswerCue(t.content ?? '') && !hasQuestionPattern(t.content ?? ''))
       stats.answerKeyTopics = keyTopics.length
-      const candidates = study.filter((t) => looksLikeQuestions(t.content ?? '') || (keyTopics.length > 0 && hasQuizPattern(t.content ?? '')))
+      // A key topic with an answer heading makes one question-like mark enough in the topics it is paired with
+      const keyIds = new Set(keyTopics.map((k) => k.id))
+      const keyHeading = keyTopics.some((k) => hasAnswerHeading(k.content ?? ''))
+      const quizMin = keyHeading ? 1 : QUESTION_HEURISTIC_MIN_MATCHES
+      const candidates = study.filter((t) => looksLikeQuestions(t.content ?? '') || (!keyIds.has(t.id) && keyTopics.length > 0 && hasQuizPattern(t.content ?? '', quizMin)))
       stats.topicsPassingHeuristic = candidates.length
       stats.path = candidates.length > 0 ? 'model' : 'none'
       const keyTextFor = (topicId: string): string =>
@@ -349,6 +490,7 @@ export async function importQuestionsForSource(
 
     // Write: replace the unanswered imported questions of this source in one transaction
     const exerciseIds: string[] = []
+    const openIds = new Set<string>()
     const items: ImportedItem[] = []
     await prisma.$transaction(async (tx) => {
       await tx.exercise.deleteMany({ where: { id: { startsWith: 'imp-' }, topic: { sourceId }, logs: { none: {} } } })
@@ -361,11 +503,13 @@ export async function importQuestionsForSource(
           data: {
             id, topicId, questionText: q.questionText, exerciseType: q.exerciseType, choices: JSON.stringify(q.choices),
             correctAnswer: q.correctAnswer, explanation: q.explanation, isGraded: true, origin: 'imported', status: 'active',
+            keyPoints: q.exerciseType === 'open' ? JSON.stringify(q.keyPoints) : null,
             promptVersion: fromModel ? INGEST_PROMPT_VERSION : null,
           },
         })
         if (q.explanationFallback) stats.explanationFallbacks++
         exerciseIds.push(id)
+        if (q.exerciseType === 'open') openIds.add(id)
         items.push({ exerciseId: id, topicId, answerQuote: quote })
       }
     }, { timeout: 60_000, maxWait: 30_000 })
@@ -373,9 +517,11 @@ export async function importQuestionsForSource(
 
     const enrich = deps.enrich ?? isImportEnrichmentEnabled()
     stats.enrichment.enabled = enrich
-    if (enrich && exerciseIds.length > 0) {
-      stats.enrichment.outcomes = await enrichExercisesByIds(exerciseIds, {
-        forUploadedContent: true, limit: exerciseIds.length, maxCalls: exerciseIds.length * 3,
+    // Enrichment rewrites and blind-solves choice questions; a written answer has neither
+    const enrichable = exerciseIds.filter((id) => !openIds.has(id))
+    if (enrich && enrichable.length > 0) {
+      stats.enrichment.outcomes = await enrichExercisesByIds(enrichable, {
+        forUploadedContent: true, limit: enrichable.length, maxCalls: enrichable.length * 3,
       })
     }
     stats.ms = Date.now() - started

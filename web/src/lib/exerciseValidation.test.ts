@@ -229,6 +229,31 @@ describe('open questions', () => {
     expect(validateExerciseStructure(q).map((i) => i.code)).toEqual(expect.arrayContaining(['open_instructs_coverage', 'open_multiple_tasks']))
   })
 
+  describe('imported open questions (the file author wrote the answer)', () => {
+    const imp = (over: Partial<ValidatableExercise>) => validateExerciseStructure({ ...open, ...over }, { origin: 'imported' }).map((i) => i.code)
+    it('accepts a short single-sentence model answer with one key point, from 15 characters', () => {
+      expect(imp({ correctAnswer: 'Because prices adjust.', keyPoints: ['Prices adjust'] })).toEqual([])
+      expect(imp({ correctAnswer: 'x'.repeat(15), keyPoints: ['Short point'] })).toEqual([])
+    })
+    it('still refuses an answer under 15 characters or over the limit', () => {
+      expect(imp({ correctAnswer: 'Prices adjust', keyPoints: ['Prices adjust'] })).toContain('model_answer_length')
+      expect(imp({ correctAnswer: 'x'.repeat(1501) })).toContain('model_answer_length')
+    })
+    it('needs 2 to 4 key points once the answer has more than one sentence or line', () => {
+      const two = 'Prices adjust to clear the market. Quantity follows the price.'
+      expect(imp({ correctAnswer: two, keyPoints: ['Prices adjust'] })).toContain('key_point_count')
+      expect(imp({ correctAnswer: 'Prices adjust:\n- the market clears', keyPoints: ['Prices adjust'] })).toContain('key_point_count')
+      expect(imp({ correctAnswer: two, keyPoints: ['Prices adjust', 'Quantity follows price'] })).toEqual([])
+    })
+    it('never accepts zero or five key points', () => {
+      expect(imp({ correctAnswer: 'Because prices adjust.', keyPoints: [] })).toContain('key_point_count')
+      expect(imp({ keyPoints: ['point one', 'point two', 'point three', 'point four', 'point five'] })).toContain('key_point_count')
+    })
+    it('leaves generated questions with the strict limits', () => {
+      expect(codes({ correctAnswer: 'Because prices adjust.', keyPoints: ['Prices adjust'] })).toEqual(expect.arrayContaining(['model_answer_length', 'key_point_count']))
+    })
+  })
+
   it.each([
     ['choices', { choices: ['a', 'b', 'c'] }, 'open_has_choices'],
     ['a dropdown placeholder', { questionText: 'Explain [Dropdown 1] in two sentences.' }, 'open_has_placeholder'],

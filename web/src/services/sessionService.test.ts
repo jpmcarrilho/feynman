@@ -830,7 +830,7 @@ describe('openAnswerPreconditions', () => {
       ok: true,
       existing: null,
       exercise: { questionText: 'Q?', modelAnswer: 'Model.', keyPoints: ['one', 'two'] },
-      language: 'en',
+      language: null,
     })
   })
 
@@ -841,7 +841,7 @@ describe('openAnswerPreconditions', () => {
       ok: true,
       existing: { score: 0.5, isCorrect: false, gradedBy: 'model', feedback },
       exercise: null,
-      language: 'en',
+      language: null,
     })
   })
 

@@ -51,6 +51,18 @@ export const IMPORTED_SINGLE_CHOICE_MIN = 2
 
 /** Length limits of the stored parts of an open question (the model answer's upper limit is MODEL_ANSWER_MAX_CHARS). */
 export const OPEN_ANSWER_LIMITS = { modelAnswerMin: 40, keyPointMin: 5, keyPointMax: 300 } as const
+/**
+ * Imported open questions: the file's author wrote the answer, so a short one is accepted (15 characters), and a model
+ * answer that is a single sentence needs only one key point (a longer one still needs 2 to 4).
+ */
+export const IMPORTED_OPEN_MODEL_ANSWER_MIN = 15
+export const IMPORTED_OPEN_SINGLE_SENTENCE_KEY_POINTS_MIN = 1
+
+/** True when the text is one sentence on one line: no sentence end followed by more text, and no line break. */
+export function isSingleSentence(text: string): boolean {
+  const t = text.trim()
+  return t !== '' && !/\n/.test(t) && !/[.!?。]["')\]]?\s+\S/.test(t)
+}
 
 const TASK_VERB = '(?:explain|describe|discuss|compare|justify|analy[sz]e|identify|define|outline|evaluate)'
 /** "In your response, address ..." and the like. */
@@ -153,7 +165,8 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
 
   const questionText = ex.questionText ?? ''
   if (!questionText.trim()) add('empty_question', 'The question text is empty.')
-  if (!(ex.explanation ?? '').trim()) add('empty_explanation', 'The explanation is empty.')
+  // An imported open question may have none: the model answer is its explanation
+  if (!(ex.explanation ?? '').trim() && !(type === 'open' && opts.origin === 'imported')) add('empty_explanation', 'The explanation is empty.')
 
   const choices = parseChoiceList(ex.choices)
   if (!choices) {
@@ -231,11 +244,14 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
         if (OPEN_TWO_TASKS.some((re) => re.test(questionText))) add('open_multiple_tasks', 'An open question must have exactly one task, not two instructions joined together.')
       }
       const len = answer.trim().length
-      if (len < OPEN_ANSWER_LIMITS.modelAnswerMin || len > MODEL_ANSWER_MAX_CHARS) {
-        add('model_answer_length', `The model answer needs ${OPEN_ANSWER_LIMITS.modelAnswerMin}-${MODEL_ANSWER_MAX_CHARS} characters, has ${len}.`)
+      const imported = opts.origin === 'imported'
+      const answerMin = imported ? IMPORTED_OPEN_MODEL_ANSWER_MIN : OPEN_ANSWER_LIMITS.modelAnswerMin
+      if (len < answerMin || len > MODEL_ANSWER_MAX_CHARS) {
+        add('model_answer_length', `The model answer needs ${answerMin}-${MODEL_ANSWER_MAX_CHARS} characters, has ${len}.`)
       }
-      if (keyPoints.length < OPEN_KEY_POINTS.min || keyPoints.length > OPEN_KEY_POINTS.max) {
-        add('key_point_count', `An open question needs ${OPEN_KEY_POINTS.min}-${OPEN_KEY_POINTS.max} key points, has ${keyPoints.length}.`)
+      const pointsMin = imported && isSingleSentence(answer) ? IMPORTED_OPEN_SINGLE_SENTENCE_KEY_POINTS_MIN : OPEN_KEY_POINTS.min
+      if (keyPoints.length < pointsMin || keyPoints.length > OPEN_KEY_POINTS.max) {
+        add('key_point_count', `An open question needs ${pointsMin}-${OPEN_KEY_POINTS.max} key points, has ${keyPoints.length}.`)
       }
       if (hasDuplicates(keyPoints)) add('duplicate_key_points', 'Two key points are the same.')
       if (keyPoints.some((k) => k.length < OPEN_ANSWER_LIMITS.keyPointMin || k.length > OPEN_ANSWER_LIMITS.keyPointMax)) {

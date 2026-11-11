@@ -762,7 +762,7 @@ export type OpenAnswerPreconditions =
       existing: OpenAnswerResult | null
       /** What the grader needs; read only for a question that is still to be answered. */
       exercise: { questionText: string; modelAnswer: string; keyPoints: string[] } | null
-      language: string
+      language: string | null
     }
 
 /**
@@ -782,7 +782,7 @@ export async function openAnswerPreconditions(sessionId: string, exerciseId: str
   })
   if (!item) return { ok: false, reason: 'not_item' }
   if (item.exercise.exerciseType !== 'open') return { ok: false, reason: 'not_open' }
-  const language = parseProfile(item.exercise.topic.course?.profile)?.contentLanguage ?? 'en'
+  const language = parseProfile(item.exercise.topic.course?.profile)?.contentLanguage ?? null
   const log = await prisma.exerciseLog.findUnique({
     where: { sessionId_exerciseId: { sessionId, exerciseId } },
     select: { score: true, isCorrect: true, gradedBy: true, feedback: true },

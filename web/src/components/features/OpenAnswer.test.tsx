@@ -20,6 +20,28 @@ beforeEach(() => {
   localStorage.clear()
 })
 
+describe('OpenAnswer: explanation', () => {
+  const stored = { status: 'stored', score: 1, isCorrect: true, gradedBy: 'model', feedback: { v: 1, keyPoints: [], misconceptions: [], text: 'Good.' } } satisfies OpenCheckOutcome
+  const check = async (explanation: string | null) => {
+    render(<OpenAnswer {...base} onCheck={vi.fn().mockResolvedValue(stored)} explanation={explanation} />)
+    type(LONG)
+    fireEvent.click(screen.getByRole('button', { name: 'Check answer' }))
+    await waitFor(() => expect(screen.getByTestId('answer-result')).toBeInTheDocument())
+  }
+  it('skips the explanation block when it is empty', async () => {
+    await check('')
+    expect(screen.queryByText(/Professor/)).not.toBeInTheDocument()
+  })
+  it('skips it when it equals the model answer after normalization', async () => {
+    await check('  The MODEL answer   has $x^2$ in it. ')
+    expect(screen.queryByText(/Professor/)).not.toBeInTheDocument()
+  })
+  it('still shows a different explanation', async () => {
+    await check('Common slip.')
+    expect(screen.getByText(/Professor/)).toBeInTheDocument()
+  })
+})
+
 describe('OpenAnswer: writing', () => {
   it('has an accessible label, a counter, and Check is enabled from 15 non-space characters', () => {
     render(<OpenAnswer {...base} onCheck={vi.fn()} />)

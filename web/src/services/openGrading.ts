@@ -22,8 +22,8 @@ export interface GradeOpenInput {
   modelAnswer: string
   keyPoints: string[]
   studentAnswer: string
-  /** BCP-47 code of the feedback language (profile.contentLanguage); defaults to "en". */
-  language?: string
+  /** BCP-47 code of the feedback language (profile.contentLanguage); null or missing when the studyspace has no profile (the grader then uses the language of the question). */
+  language?: string | null
 }
 
 export interface GradeOpenOptions {
@@ -60,7 +60,7 @@ export async function gradeOpenAnswer(input: GradeOpenInput, opts: GradeOpenOpti
     modelAnswer: input.modelAnswer,
     keyPoints,
     studentAnswer: input.studentAnswer,
-    language: input.language || 'en',
+    language: input.language || null,
   })
 
   for (let attempt = 1; attempt <= attempts; attempt++) {
@@ -99,9 +99,9 @@ export async function gradeOpenAnswer(input: GradeOpenInput, opts: GradeOpenOpti
   return null
 }
 
-/** The feedback language of an exercise's studyspace (profile.contentLanguage), "en" when there is no profile. */
-export function contentLanguageOf(courseProfileJson: string | null | undefined): string {
-  return parseProfile(courseProfileJson)?.contentLanguage ?? 'en'
+/** The feedback language of an exercise's studyspace (profile.contentLanguage), null when there is no profile. */
+export function contentLanguageOf(courseProfileJson: string | null | undefined): string | null {
+  return parseProfile(courseProfileJson)?.contentLanguage ?? null
 }
 
 export interface GradePendingResult {
