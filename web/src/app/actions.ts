@@ -11,6 +11,8 @@ import { buildVoiceContext } from '@/services/voiceContext'
 import { getCourseWithProfile, getProfileForTopic, getProfileForCourses } from '@/services/studyspaceService'
 import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
 import { generateExerciseForTopic } from '@/services/exerciseGenerator'
+import { submitExamForSession, type ExamSubmission } from '@/services/sessionService'
+import { gradeAnswer, logScore } from '@/lib/grading'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import {
   explainMistakePrompt,
@@ -20,6 +22,8 @@ import {
   plannerChatPrompt,
   studyPlanPrompt,
 } from '@/lib/prompts'
+
+const round2 = (n: number) => Math.round(n * 100) / 100
 
 // Fields the session list, results dialog and plan view read. No chatLog, diagnosis, draftAnswers or flaggedIds.
 // exerciseIds is selected only so the server can turn it into exerciseCount (see withExerciseCount).
@@ -40,6 +44,7 @@ const SESSION_LIST_SELECT = {
       id: true,
       exerciseId: true,
       isCorrect: true,
+      score: true,
       userAnswer: true,
       timestamp: true,
       exercise: {
@@ -467,22 +472,64 @@ export async function createStudySession(
   return { session, exercises: clientExercises, missingCount }
 }
 
-export async function logAnswer(sessionId: string, exerciseId: string, isCorrect: boolean, duration: number, userAnswer?: string) {
+/**
+ * Grades the answer on the server (gradeAnswer on the stored exercise) and logs it. The client no longer sends
+ * correctness. First attempt wins: a repeat for the same (sessionId, exerciseId) returns the stored result.
+ */
+export async function logAnswer(
+  sessionId: string,
+  exerciseId: string,
+  userAnswer: string,
+  opts?: { duration?: number; assisted?: boolean }
+): Promise<{ score: number; isCorrect: boolean } | null> {
   await requireAuth()
+  // A stale browser tab running the old client would pass a boolean here
+  if (typeof userAnswer !== 'string') return null
   try {
+    const exercise = await prisma.exercise.findUnique({
+      where: { id: exerciseId },
+      select: { exerciseType: true, choices: true, correctAnswer: true, questionText: true },
+    })
+    if (!exercise) return null
+    const graded = gradeAnswer(exercise, userAnswer)
+    const duration = Math.max(0, Math.min(3600, Math.round(opts?.duration ?? 30)))
     await prisma.exerciseLog.create({
       data: {
         sessionId,
         exerciseId,
-        isCorrect,
+        isCorrect: graded.isCorrect,
+        score: graded.score,
+        assisted: opts?.assisted ?? false,
         userAnswer,
-        duration
-      }
+        duration,
+      },
     })
+    return graded
   } catch (error: any) {
     // First attempt wins: a second log for the same (sessionId, exerciseId) violates the unique index
-    if (error?.code === 'P2002') return
+    if (error?.code === 'P2002') {
+      const existing = await prisma.exerciseLog.findUnique({
+        where: { sessionId_exerciseId: { sessionId, exerciseId } },
+        select: { score: true, isCorrect: true },
+      })
+      return existing ? { score: logScore(existing), isCorrect: existing.isCorrect } : null
+    }
     console.error("Failed to log answer (likely stale session):", error.message)
+    return null
+  }
+}
+
+/**
+ * Submits a timed exam: grades every exercise of the session on the server (unanswered ones score 0), creates the
+ * logs and completes the session in one transaction. Repeating the call changes nothing and returns the same totals.
+ */
+export async function submitExam(sessionId: string, answers: Record<string, string>): Promise<ExamSubmission | null> {
+  await requireAuth()
+  try {
+    return await submitExamForSession(sessionId, answers)
+  } catch (error) {
+    console.error("Failed to submit exam:", error instanceof Error ? error.message : error)
+    return null
   }
 }
 
@@ -630,8 +677,10 @@ export async function getAnalyticsData() {
     session.logs.forEach(log => {
       if (log.userAnswer === null || log.userAnswer === undefined || log.userAnswer === '') return;
 
+      // Partial credit: every aggregate below sums per-question scores (legacy logs count as 1 or 0)
+      const pts = logScore(log);
       totalExercises++;
-      if (log.isCorrect) totalCorrect++;
+      totalCorrect += pts;
 
       const courseCode = log.exercise?.topic?.course?.code || 'Unknown';
       const week = log.exercise?.topic?.week || 'Unknown';
@@ -643,7 +692,7 @@ export async function getAnalyticsData() {
         courseStats[courseCode] = { total: 0, correct: 0 };
       }
       courseStats[courseCode].total++;
-      if (log.isCorrect) courseStats[courseCode].correct++;
+      courseStats[courseCode].correct += pts;
 
       if (!heatmapStats[courseCode]) {
         heatmapStats[courseCode] = {};
@@ -652,7 +701,7 @@ export async function getAnalyticsData() {
         heatmapStats[courseCode][week] = { total: 0, correct: 0, classes: {} };
       }
       heatmapStats[courseCode][week].total++;
-      if (log.isCorrect) heatmapStats[courseCode][week].correct++;
+      heatmapStats[courseCode][week].correct += pts;
 
       // Nest class/subtopic details
       const classKey = className;
@@ -665,7 +714,7 @@ export async function getAnalyticsData() {
         };
       }
       heatmapStats[courseCode][week].classes[classKey].total++;
-      if (log.isCorrect) heatmapStats[courseCode][week].classes[classKey].correct++;
+      heatmapStats[courseCode][week].classes[classKey].correct += pts;
 
       const subtopicKey = `${unit ? `Unit ${unit}: ` : ''}${subtopicTitle}`;
       if (!heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey]) {
@@ -677,7 +726,7 @@ export async function getAnalyticsData() {
         };
       }
       heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].total++;
-      if (log.isCorrect) heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].correct++;
+      heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].correct += pts;
     });
   });
 
@@ -700,14 +749,14 @@ export async function getAnalyticsData() {
           title: sub.title,
           accuracy: sub.total > 0 ? Math.round((sub.correct / sub.total) * 100) : 0,
           total: sub.total,
-          correct: sub.correct
+          correct: round2(sub.correct)
         }));
         
         return {
           className: cl.className,
           accuracy: cl.total > 0 ? Math.round((cl.correct / cl.total) * 100) : 0,
           total: cl.total,
-          correct: cl.correct,
+          correct: round2(cl.correct),
           subtopics
         };
       });
@@ -726,15 +775,17 @@ export async function getAnalyticsData() {
     .filter(s => s.mode === 'exam' && s.status === 'completed')
     .map(s => {
       const totalQs = s.logs.length;
-      const correctQs = s.logs.filter(l => l.isCorrect).length;
+      const fullyCorrect = s.logs.filter(l => l.isCorrect).length;
+      const scoreSum = s.logs.reduce((sum, l) => sum + logScore(l), 0);
       return {
         id: s.id,
         title: s.title || "Timed Exam",
         startTime: s.startTime,
         endTime: s.endTime,
         totalQuestions: totalQs,
-        correctQuestions: correctQs,
-        accuracy: totalQs > 0 ? Math.round((correctQs / totalQs) * 100) : 0,
+        correctQuestions: fullyCorrect,
+        scoreSum: round2(scoreSum),
+        accuracy: totalQs > 0 ? Math.round((scoreSum / totalQs) * 100) : 0,
         diagnosis: s.diagnosis
       };
     })
@@ -843,7 +894,7 @@ export async function generateExamDiagnosis(sessionId: string) {
 
     if (!session || session.logs.length === 0) return null;
 
-    // 2. Compute metrics (with proportional partial credit & negative marking rule)
+    // 2. Compute metrics from the stored per-question scores (partial credit)
     const totalCount = session.logs.length;
     let examScoreSum = 0;
 
@@ -857,85 +908,8 @@ export async function generateExamDiagnosis(sessionId: string) {
       const topicId = topic?.id || "";
       const week = topic?.week || "";
 
-      let partialScore = 0;
-      const draftAns = log.userAnswer || "";
-
-      if (draftAns) {
-        const isUserAnsArray = draftAns.startsWith('[') && draftAns.endsWith(']');
-        const isCorrAnsArray = ex.correctAnswer.startsWith('[') && ex.correctAnswer.endsWith(']');
-
-        if (isUserAnsArray) {
-          try {
-            const userAnsList = JSON.parse(draftAns);
-            const correctAnsList = isCorrAnsArray ? JSON.parse(ex.correctAnswer) : [ex.correctAnswer];
-            const choicesList = ex.choices ? JSON.parse(ex.choices) : [];
-
-            const rightOptions = correctAnsList;
-            const wrongOptions = choicesList.filter((c: string) => !correctAnsList.includes(c));
-
-            const rightSelected = userAnsList.filter((c: string) => rightOptions.includes(c)).length;
-            const wrongSelected = userAnsList.filter((c: string) => wrongOptions.includes(c)).length;
-
-            const totalRight = rightOptions.length;
-            if (totalRight > 0) {
-              const netScore = (rightSelected - wrongSelected) / totalRight;
-              partialScore = Math.max(0, netScore);
-            }
-          } catch {
-            partialScore = 0;
-          }
-        } else if (ex.exerciseType === 'numeric') {
-          const isCorrect = Math.abs(parseFloat(draftAns) - parseFloat(ex.correctAnswer)) < 0.01;
-          partialScore = isCorrect ? 1.0 : 0.0;
-        } else if (ex.exerciseType === 'dropdown') {
-          let isCorrect = false;
-          try {
-            if (draftAns.startsWith('{') && draftAns.endsWith('}')) {
-              const parsedUserAns = JSON.parse(draftAns);
-              const isCorrAnsArray = ex.correctAnswer.startsWith('[') && ex.correctAnswer.endsWith(']');
-              const correctAnsList = isCorrAnsArray ? JSON.parse(ex.correctAnswer) : [ex.correctAnswer];
-              
-              let matchedCount = 0;
-              const totalDropdowns = Object.keys(parsedUserAns).length;
-              
-              for (const [key, userVal] of Object.entries(parsedUserAns)) {
-                const cleanUserVal = String(userVal).trim().toLowerCase();
-                const cleanKey = String(key).trim().toLowerCase();
-                
-                const isMatch = correctAnsList.some((corr: string) => {
-                  const cleanCorr = String(corr).trim().toLowerCase();
-                  if (cleanCorr.includes(cleanKey)) {
-                    const cleanCorrVal = cleanCorr.replace(cleanKey, "").trim();
-                    return cleanCorrVal === cleanUserVal || 
-                           cleanCorrVal.replace(/\\+/g, "") === cleanUserVal.replace(/\\+/g, "");
-                  }
-                  return cleanCorr === cleanUserVal || 
-                         cleanCorr.replace(/\\+/g, "") === cleanUserVal.replace(/\\+/g, "");
-                });
-                
-                if (isMatch) matchedCount++;
-              }
-              
-              if (totalDropdowns === 1) {
-                const userVal = Object.values(parsedUserAns)[0];
-                const cleanUserVal = String(userVal).trim().toLowerCase().replace(/\\+/g, "");
-                const cleanCorr = String(correctAnsList[0]).trim().toLowerCase().replace(/\\+/g, "");
-                isCorrect = cleanUserVal === cleanCorr;
-              } else {
-                isCorrect = matchedCount === totalDropdowns && totalDropdowns === correctAnsList.length;
-              }
-            } else {
-              isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-            }
-          } catch {
-            isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-          }
-          partialScore = isCorrect ? 1.0 : 0.0;
-        } else {
-          const isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-          partialScore = isCorrect ? 1.0 : 0.0;
-        }
-      }
+      // The stored score is the source of truth; logs written before scores existed are graded now
+      const partialScore = typeof log.score === 'number' ? log.score : gradeAnswer(ex, log.userAnswer).score;
 
       examScoreSum += partialScore;
 
@@ -1043,9 +1017,7 @@ export async function generateGlobalDiagnosis() {
         };
       }
       topicStats[tId].total += 1;
-      if (log.isCorrect) {
-        topicStats[tId].correct += 1;
-      }
+      topicStats[tId].correct += logScore(log);
     }
 
     // Sort topics by accuracy ascending
@@ -1079,13 +1051,13 @@ export async function generateGlobalDiagnosis() {
 
     // Format stats and content summaries for prompt
     const allTopicsSummary = topicList.map(t => {
-      return `- **${t.title}** (${t.course} - ${t.week}): ${t.correct}/${t.total} Correct (${t.accuracy}%). Topic ID: ${t.id}`;
+      return `- **${t.title}** (${t.course} - ${t.week}): ${round2(t.correct)}/${t.total} Correct (${t.accuracy}%). Topic ID: ${t.id}`;
     }).join('\n');
 
     const weakTopicsContext = weakTopicsWithContent.map((wt, idx) => {
       return `### Weak Area ${idx + 1}: ${wt.title}
 Course: ${wt.courseCode} (${wt.week})
-Your Accuracy Score: ${wt.correct}/${wt.total} (${wt.accuracy}%)
+Your Accuracy Score: ${round2(wt.correct)}/${wt.total} (${wt.accuracy}%)
 Topic ID: ${wt.id}
 Lecture Material Content Summary:
 ${wt.content}`;
@@ -1310,7 +1282,7 @@ export async function getTopicsWithPerformance() {
     });
 
     const logs = await prisma.exerciseLog.findMany({
-      select: { exerciseId: true, isCorrect: true }
+      select: { exerciseId: true, isCorrect: true, score: true }
     });
 
     // Compute metrics per topicId
@@ -1322,7 +1294,7 @@ export async function getTopicsWithPerformance() {
       const topicLogs = logs.filter(l => exerciseIds.includes(l.exerciseId));
       
       const totalLogged = topicLogs.length;
-      const correctCount = topicLogs.filter(l => l.isCorrect).length;
+      const correctCount = topicLogs.reduce((sum, l) => sum + logScore(l), 0);
 
       // Uniquely completed exercises
       const uniquelyCompleted = new Set(topicLogs.map(l => l.exerciseId)).size;
@@ -1444,19 +1416,19 @@ export async function getTopicEvolutionData() {
       if (!courseGroup[d][cCode]) courseGroup[d][cCode] = { correct: 0, total: 0, exerciseIds: new Set() };
       courseGroup[d][cCode].total += 1;
       courseGroup[d][cCode].exerciseIds.add(exId);
-      if (l.isCorrect) courseGroup[d][cCode].correct += 1;
+      courseGroup[d][cCode].correct += logScore(l);
 
       // Week Level (Meso)
       if (!weekGroup[d][wTitle]) weekGroup[d][wTitle] = { correct: 0, total: 0, exerciseIds: new Set() };
       weekGroup[d][wTitle].total += 1;
       weekGroup[d][wTitle].exerciseIds.add(exId);
-      if (l.isCorrect) weekGroup[d][wTitle].correct += 1;
+      weekGroup[d][wTitle].correct += logScore(l);
 
       // Topic Level (Micro)
       if (!topicGroup[d][tTitle]) topicGroup[d][tTitle] = { correct: 0, total: 0, exerciseIds: new Set() };
       topicGroup[d][tTitle].total += 1;
       topicGroup[d][tTitle].exerciseIds.add(exId);
-      if (l.isCorrect) topicGroup[d][tTitle].correct += 1;
+      topicGroup[d][tTitle].correct += logScore(l);
     }
 
     // Compile into flat timelines with running cumulative averages and coverages

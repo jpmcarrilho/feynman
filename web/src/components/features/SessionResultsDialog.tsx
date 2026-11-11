@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label'
 import { PlayCircle, Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { getSessionDetail } from '@/app/actions'
+import { sessionScore, formatScore } from '@/lib/grading'
 
 interface ChatMessage {
   role: string;
@@ -58,7 +59,7 @@ export function SessionResultsDialog({
   const visibleMessages = (chatLog || []).filter(m => !String(m.text ?? '').startsWith('[SYSTEM'));
 
   const answeredLogs = selectedHistory.logs.filter((l: any) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '');
-  const correctCount = selectedHistory.logs.filter((l: any) => l.isCorrect).length;
+  const { scoreSum, correctCount } = sessionScore(selectedHistory.logs);
   const totalCount = selectedHistory.mode === 'exam' && selectedHistory.exerciseCount
     ? selectedHistory.exerciseCount
     : answeredLogs.length;
@@ -71,7 +72,7 @@ export function SessionResultsDialog({
       <div className="py-4 space-y-6">
         <div className="space-y-2 border-b pb-4">
           <p className="text-sm"><strong>Date:</strong> {new Date(selectedHistory.startTime).toLocaleString()}</p>
-          <p className="text-sm"><strong>Score:</strong> {correctCount} / {totalCount} correct</p>
+          <p className="text-sm"><strong>Score:</strong> {formatScore(scoreSum)} / {totalCount} ({correctCount} fully correct)</p>
           {selectedHistory.logs.length > 0 && (
             <ScrollArea className="h-[250px] border rounded-md p-3 mt-2 bg-muted/30">
               {selectedHistory.logs.map((log: any, idx: number) => (
@@ -79,6 +80,9 @@ export function SessionResultsDialog({
                   <div className="flex items-start gap-2 font-medium">
                     <span className="mt-0.5">{log.isCorrect ? '✅' : '❌'}</span>
                     <span className="line-clamp-2">Q{idx + 1}: {log.exercise?.questionText}</span>
+                    {typeof log.score === 'number' && log.score > 0 && log.score < 1 && (
+                      <span className="ml-auto shrink-0 text-xs text-muted-foreground">{formatScore(log.score)} pt</span>
+                    )}
                   </div>
                   <div className="pl-6 space-y-0.5 text-xs">
                     <p className="text-muted-foreground"><span className="font-semibold text-foreground/70">Your Answer:</span> {log.userAnswer || 'Skipped'}</p>

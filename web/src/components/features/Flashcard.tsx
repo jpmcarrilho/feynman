@@ -11,6 +11,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
+import { gradeAnswer, resolveExerciseType } from '@/lib/grading'
 
 const preprocessLaTeX = (text: string | null | undefined) => {
   if (!text) return '';
@@ -33,17 +34,10 @@ interface FlashcardProps {
 }
 
 export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, onRequestExplanation }: FlashcardProps) {
-  const hasDropdownChoices = choices.some(c => /^\[Dropdown \d+\]/.test(c));
-  
-  // Dynamic override to multiple_choice if question text clearly requests selecting all that apply
-  const isMultiSelectText = questionText.toLowerCase().includes('select all that apply') || 
-                           questionText.toLowerCase().includes('choose all that apply') ||
-                           questionText.toLowerCase().includes('select all correct') ||
-                           exerciseType === 'multiple_choice';
-
-  const effectiveExerciseType = hasDropdownChoices 
-    ? 'dropdown' 
-    : (isMultiSelectText ? 'multiple_choice' : exerciseType);
+  // The same type resolution and grading the server uses (src/lib/grading.ts)
+  const effectiveExerciseType = resolveExerciseType({ exerciseType, choices, questionText })
+  const grade = (userAnswer: string) =>
+    gradeAnswer({ exerciseType, choices, correctAnswer, questionText }, userAnswer)
 
   let adjustedQuestionText = questionText;
   if (effectiveExerciseType === 'dropdown') {
@@ -90,80 +84,30 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
       setShowResult(true)
     }
 
-    let isCorrect = false;
     let answerStr = '';
 
     if (effectiveExerciseType === 'single_choice') {
-      isCorrect = selected === correctAnswer;
       answerStr = selected || '';
     } else if (effectiveExerciseType === 'multiple_choice') {
-      try {
-        const correctArr = JSON.parse(correctAnswer);
-        isCorrect = multiSelected.length === correctArr.length && multiSelected.every(v => correctArr.includes(v));
-      } catch (e) {
-        const cleanCorrectAnswer = correctAnswer.trim().toLowerCase();
-        const cleanUserAnswer = multiSelected.join(',').trim().toLowerCase();
-        isCorrect = cleanUserAnswer === cleanCorrectAnswer || 
-          (multiSelected.length === 1 && multiSelected[0].trim().toLowerCase() === cleanCorrectAnswer);
-      }
       answerStr = JSON.stringify(multiSelected);
     } else if (effectiveExerciseType === 'numeric') {
-      isCorrect = Math.abs(parseFloat(numericValue) - parseFloat(correctAnswer)) < 0.01;
       answerStr = numericValue;
     } else if (effectiveExerciseType === 'dropdown') {
-      // 1. Parse expected answers (handles JSON array strings, pipe-separated strings, or single values)
-      let expectedAnswers: string[] = [];
-      try {
-        const parsed = JSON.parse(correctAnswer);
-        if (Array.isArray(parsed)) {
-          expectedAnswers = parsed.map(s => s.toString());
-        } else {
-          expectedAnswers = [parsed.toString()];
-        }
-      } catch (e) {
-        expectedAnswers = correctAnswer.split('|');
-      }
-
-      // 2. Get user's selected answers mapped with keys
-      const selectedAnswers = Object.entries(dropdownValues).map(([k, v]) => {
-        return k === '[BLANK]' ? v : `${k} ${v}`;
-      });
-
-      // 3. Clean helper to strip prefixes, spaces, and lowercase for precise comparison
-      const clean = (s: string) => {
-        if (!s) return '';
-        return s
-          .trim()
-          .replace(/^\[Dropdown \d+\]\s*/i, '')
-          .replace(/^\[Blank \d+\]\s*/i, '')
-          .trim()
-          .toLowerCase();
-      };
-
-      const cleanExpected = expectedAnswers.map(clean).filter(Boolean);
-      const cleanSelected = selectedAnswers.map(clean).filter(Boolean);
-
-      // 4. Compare expected vs selected sets
-      isCorrect = cleanExpected.length > 0 && 
-                  cleanExpected.length === cleanSelected.length &&
-                  cleanExpected.every(exp => cleanSelected.includes(exp));
-
       answerStr = JSON.stringify(dropdownValues);
     }
 
-    onAnswer(isCorrect, answerStr)
+    onAnswer(grade(answerStr).isCorrect, answerStr)
   }
 
   const handleSelectSingle = (choice: string) => {
     if (isExamMode) {
       setSelected(choice)
-      onAnswer(choice.trim().toLowerCase() === correctAnswer.trim().toLowerCase(), choice)
+      onAnswer(grade(choice).isCorrect, choice)
     } else {
       if (showResult) return
       setSelected(choice)
-      const isCorrect = choice === correctAnswer
       setShowResult(true)
-      onAnswer(isCorrect, choice)
+      onAnswer(grade(choice).isCorrect, choice)
     }
   }
 
@@ -329,14 +273,13 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
                 setNumericValue(e.target.value);
                 if (isExamMode) {
                   // For numeric, we can also auto-save on change so they don't absolutely have to click the button, but still provide the button
-                  const isCorrect = Math.abs(parseFloat(e.target.value) - parseFloat(correctAnswer)) < 0.01;
-                  onAnswer(isCorrect, e.target.value);
+                  onAnswer(grade(e.target.value).isCorrect, e.target.value);
                 }
               }}
               disabled={showResult}
               className={`transition-all duration-200 focus-visible:ring-fountain-ink ${
                 showResult 
-                  ? Math.abs(parseFloat(numericValue) - parseFloat(correctAnswer)) < 0.01 
+                  ? grade(numericValue).isCorrect
                     ? 'border-green-400 bg-green-100/30 text-green-900 font-semibold' 
                     : 'border-lecture-red bg-lecture-red/10 text-lecture-red'
                   : 'border-charcoal-graphite/20 bg-transparent'

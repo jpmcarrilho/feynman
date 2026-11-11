@@ -8,6 +8,7 @@ import { CourseAccuracyChart } from './analytics/CourseAccuracyChart'
 import { AccuracyHeatmap } from './analytics/AccuracyHeatmap'
 import { TopicEvolutionChart } from './analytics/TopicEvolutionChart'
 import { Button } from '@/components/ui/button'
+import { formatScore } from '@/lib/grading'
 import { Loader2, Sparkles, AlertCircle } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
@@ -76,7 +77,7 @@ function ExamItem({ exam, onViewFile }: { exam: any; onViewFile?: ViewFile }) {
 
         <div className="flex items-center gap-3">
           <div className="px-3 py-1 bg-fountain-ink/10 rounded-md border border-fountain-ink/20">
-            <span className="text-xs sm:text-sm font-bold text-fountain-ink">{exam.correctQuestions}/{exam.totalQuestions} ({exam.accuracy}%)</span>
+            <span className="text-xs sm:text-sm font-bold text-fountain-ink">{formatScore(exam.scoreSum ?? exam.correctQuestions)}/{exam.totalQuestions} ({exam.accuracy}%)</span>
           </div>
 
           {examDiagnosis ? (

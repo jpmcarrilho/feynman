@@ -12,6 +12,7 @@ import {
   getTopicsWithPerformance,
   getSessionHistory,
   logAnswer,
+  submitExam,
   saveChatLog,
   finishStudySession,
   getSessionWithExercises,
@@ -56,6 +57,7 @@ import {
   voiceDashboardContextMessage,
 } from '@/lib/prompts'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
+import { formatScore } from '@/lib/grading'
 import type { TutorChatMode } from '@/lib/studyspace/profile'
 import { getChatMode, setChatMode, subscribeChatMode } from '@/lib/studyspace/chatMode'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
@@ -691,117 +693,21 @@ export function StudyInterface() {
     if (!session || isDiagnosisLoading) return;
     setIsDiagnosisLoading(true);
     try {
-      const totalCount = exercises.length;
-      let examScoreSum = 0;
-
-      for (const ex of exercises) {
-        const draftAns = draftAnswers[ex.id] || "";
-        
-        // Evaluate correctness (with proportional partial credit & negative marking rule)
-        let isCorrect = false;
-        let partialScore = 0;
-
-        if (draftAns) {
-          const isUserAnsArray = draftAns.startsWith('[') && draftAns.endsWith(']');
-          const isCorrAnsArray = ex.correctAnswer.startsWith('[') && ex.correctAnswer.endsWith(']');
-
-          if (isUserAnsArray) {
-            try {
-              const userAnsList = JSON.parse(draftAns);
-              const correctAnsList = isCorrAnsArray ? JSON.parse(ex.correctAnswer) : [ex.correctAnswer];
-              const choicesList = ex.choices ? JSON.parse(ex.choices) : [];
-
-              const rightOptions = correctAnsList;
-              const wrongOptions = choicesList.filter((c: string) => !correctAnsList.includes(c));
-
-              const rightSelected = userAnsList.filter((c: string) => rightOptions.includes(c)).length;
-              const wrongSelected = userAnsList.filter((c: string) => wrongOptions.includes(c)).length;
-
-              const totalRight = rightOptions.length;
-              const isDiscussionOrSurvey = totalRight > 0 && totalRight === choicesList.length;
-
-              if (isDiscussionOrSurvey) {
-                partialScore = 1.0;
-                isCorrect = true;
-              } else if (totalRight > 0) {
-                // One wrong cancels one right, normalized to totalRight count
-                const netScore = (rightSelected - wrongSelected) / totalRight;
-                partialScore = Math.max(0, netScore);
-                // Mark as correct if they got at least 50% of the choices right (proportional credit)
-                isCorrect = partialScore >= 0.5;
-              }
-            } catch {
-              isCorrect = false;
-              partialScore = 0;
-            }
-          } else if (ex.exerciseType === 'numeric') {
-            isCorrect = Math.abs(parseFloat(draftAns) - parseFloat(ex.correctAnswer)) < 0.01;
-            partialScore = isCorrect ? 1.0 : 0.0;
-          } else if (ex.exerciseType === 'dropdown') {
-            try {
-              if (draftAns.startsWith('{') && draftAns.endsWith('}')) {
-                const parsedUserAns = JSON.parse(draftAns);
-                const isCorrAnsArray = ex.correctAnswer.startsWith('[') && ex.correctAnswer.endsWith(']');
-                const correctAnsList = isCorrAnsArray ? JSON.parse(ex.correctAnswer) : [ex.correctAnswer];
-                
-                let matchedCount = 0;
-                const totalDropdowns = Object.keys(parsedUserAns).length;
-                
-                for (const [key, userVal] of Object.entries(parsedUserAns)) {
-                  const cleanUserVal = String(userVal).trim().toLowerCase();
-                  const cleanKey = String(key).trim().toLowerCase();
-                  
-                  const isMatch = correctAnsList.some((corr: string) => {
-                    const cleanCorr = String(corr).trim().toLowerCase();
-                    if (cleanCorr.includes(cleanKey)) {
-                      const cleanCorrVal = cleanCorr.replace(cleanKey, "").trim();
-                      return cleanCorrVal === cleanUserVal || 
-                             cleanCorrVal.replace(/\\+/g, "") === cleanUserVal.replace(/\\+/g, "");
-                    }
-                    return cleanCorr === cleanUserVal || 
-                           cleanCorr.replace(/\\+/g, "") === cleanUserVal.replace(/\\+/g, "");
-                  });
-                  
-                  if (isMatch) matchedCount++;
-                }
-                
-                if (totalDropdowns === 1) {
-                  const userVal = Object.values(parsedUserAns)[0];
-                  const cleanUserVal = String(userVal).trim().toLowerCase().replace(/\\+/g, "");
-                  const cleanCorr = String(correctAnsList[0]).trim().toLowerCase().replace(/\\+/g, "");
-                  isCorrect = cleanUserVal === cleanCorr;
-                } else {
-                  isCorrect = matchedCount === totalDropdowns && totalDropdowns === correctAnsList.length;
-                }
-              } else {
-                isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-              }
-            } catch {
-              isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-            }
-            partialScore = isCorrect ? 1.0 : 0.0;
-          } else {
-            isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-            partialScore = isCorrect ? 1.0 : 0.0;
-          }
-        }
-
-        examScoreSum += partialScore;
-
-        // Log to DB (dummy duration 30s)
-        await logAnswer(session.id, ex.id, isCorrect, 30, draftAns);
+      // The server grades every exercise (unanswered ones score 0), writes the logs and completes the session in one
+      // transaction. Submitting twice is harmless.
+      const submission = await submitExam(session.id, draftAnswers);
+      if (!submission) {
+        console.error("Exam could not be submitted (unknown, cancelled or non-exam session)");
+        return;
       }
+      const examScoreSum = submission.scoreSum;
+      const totalCount = submission.total;
 
-      // Mark session as completed
-      const updatedSession = await finishStudySession(session.id);
-      
       // Update local session state
-      if (updatedSession) {
-        const finalSession = await getSessionWithExercises(session.id);
-        if (finalSession) {
-          setSession(finalSession.session);
-          setExercises(finalSession.exercises);
-        }
+      const finalSession = await getSessionWithExercises(session.id);
+      if (finalSession) {
+        setSession(finalSession.session);
+        setExercises(finalSession.exercises);
       }
 
       // Trigger generateExamDiagnosis action
@@ -819,8 +725,8 @@ export function StudyInterface() {
         
         // Trigger voice tutor summary if connected
         if (liveAPI.isConnected) {
-          const scoreDisplay = `${examScoreSum.toFixed(2)}/${totalCount}`;
-          const speechMsg = `[SYSTEM MESSAGE: The student has submitted their timed exam. They scored ${scoreDisplay} (${Math.round((examScoreSum/totalCount)*100)}%). Speak a supportive, Socratic, brief 2-3 sentence overview of their diagnostic results. Keep it warm, and mention you've pushed their full studies guide directly to their Side Visualizer.]`;
+          const scoreDisplay = `${formatScore(examScoreSum)}/${totalCount}`;
+          const speechMsg = `[SYSTEM MESSAGE: The student has submitted their timed exam. They scored ${scoreDisplay} (${totalCount > 0 ? Math.round((examScoreSum/totalCount)*100) : 0}%). Speak a supportive, Socratic, brief 2-3 sentence overview of their diagnostic results. Keep it warm, and mention you've pushed their full studies guide directly to their Side Visualizer.]`;
           liveAPI.sendContext(speechMsg, { interrupt: true });
         }
       }
@@ -956,11 +862,17 @@ export function StudyInterface() {
           [currentExercise.id]: userAnswer
         }));
       } else {
-        await logAnswer(session.id, currentExercise.id, isCorrect, 30, userAnswer) // dummy duration
+        // The server grades with the same gradeAnswer the flashcard just used; its result is what is stored
+        const graded = await logAnswer(session.id, currentExercise.id, userAnswer, { duration: 30 }) // dummy duration until T18
 
         setSession((prev: any) => ({
           ...prev,
-          logs: [...(prev.logs || []), { exerciseId: currentExercise.id, isCorrect, userAnswer }]
+          logs: [...(prev.logs || []), {
+            exerciseId: currentExercise.id,
+            isCorrect: graded ? graded.isCorrect : isCorrect,
+            score: graded ? graded.score : (isCorrect ? 1 : 0),
+            userAnswer
+          }]
         }))
       }
     }

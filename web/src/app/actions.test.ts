@@ -32,6 +32,7 @@ vi.mock('@/lib/db', () => ({
     },
     exercise: {
       findMany: vi.fn(),
+      findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
     },
@@ -53,6 +54,7 @@ vi.mock('@/lib/db', () => ({
     },
     exerciseLog: {
       create: vi.fn(),
+      findUnique: vi.fn(),
       findMany: vi.fn(),
       deleteMany: vi.fn(),
     },
@@ -482,18 +484,49 @@ describe('createStudySession graded filter', () => {
 })
 
 describe('logAnswer', () => {
-  it('swallows a unique violation (P2002) so the first attempt wins', async () => {
+  const exercise = { exerciseType: 'single_choice', choices: '["A","B"]', correctAnswer: 'A', questionText: 'Q?' }
+
+  it('grades on the server and stores isCorrect and score (the client sends no correctness)', async () => {
+    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
+    const r = await logAnswer('s1', 'e1', 'A', { duration: 12 })
+    expect(r).toEqual({ score: 1, isCorrect: true })
+    const data = (vi.mocked(prisma.exerciseLog.create).mock.calls[0][0] as { data: Record<string, unknown> }).data
+    expect(data).toMatchObject({ sessionId: 's1', exerciseId: 'e1', isCorrect: true, score: 1, userAnswer: 'A', duration: 12, assisted: false })
+  })
+
+  it('stores a wrong answer as score 0 whatever the caller believes', async () => {
+    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
+    const r = await logAnswer('s1', 'e1', 'B')
+    expect(r).toEqual({ score: 0, isCorrect: false })
+    expect((vi.mocked(prisma.exerciseLog.create).mock.calls[0][0] as { data: Record<string, unknown> }).data).toMatchObject({ isCorrect: false, score: 0, duration: 30 })
+  })
+
+  it('ignores a non-string answer (stale client passing the old boolean argument)', async () => {
+    await expect(logAnswer('s1', 'e1', true as unknown as string)).resolves.toBeNull()
+    expect(prisma.exerciseLog.create).not.toHaveBeenCalled()
+  })
+
+  it('returns null for an unknown exercise without logging', async () => {
+    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(null as never)
+    await expect(logAnswer('s1', 'nope', 'A')).resolves.toBeNull()
+    expect(prisma.exerciseLog.create).not.toHaveBeenCalled()
+  })
+
+  it('swallows a unique violation (P2002) so the first attempt wins, and returns the stored result', async () => {
+    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
     vi.mocked(prisma.exerciseLog.create).mockRejectedValueOnce(Object.assign(new Error('Unique constraint'), { code: 'P2002' }))
+    vi.mocked(prisma.exerciseLog.findUnique).mockResolvedValueOnce({ score: 0, isCorrect: false } as never)
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await expect(logAnswer('s1', 'e1', true, 30, 'A')).resolves.toBeUndefined()
+    await expect(logAnswer('s1', 'e1', 'A')).resolves.toEqual({ score: 0, isCorrect: false })
     expect(err).not.toHaveBeenCalled()
     err.mockRestore()
   })
 
   it('still reports other errors (logged, not thrown)', async () => {
+    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
     vi.mocked(prisma.exerciseLog.create).mockRejectedValueOnce(Object.assign(new Error('FK failed'), { code: 'P2003' }))
     const err = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await logAnswer('s1', 'e1', true, 30, 'A')
+    await expect(logAnswer('s1', 'e1', 'A')).resolves.toBeNull()
     expect(err).toHaveBeenCalled()
     err.mockRestore()
   })

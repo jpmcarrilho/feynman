@@ -2,6 +2,7 @@
 
 import { Button } from '@/components/ui/button'
 import { History, Trash2 } from 'lucide-react'
+import { sessionScore, formatScore } from '@/lib/grading'
 
 interface SessionHistoryListProps {
   histories: any[];
@@ -21,7 +22,8 @@ export function SessionHistoryList({
       {histories.map(h => {
         const logs = h.logs || [];
         const answeredLogs = logs.filter((l: any) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '');
-        const correct = logs.filter((l: any) => l.isCorrect).length;
+        // Same definition as the results dialog, the exam diagnosis and analytics: sum of per-question scores
+        const { scoreSum } = sessionScore(logs);
         const total = h.mode === 'exam' && h.exerciseCount
           ? h.exerciseCount
           : answeredLogs.length;
@@ -45,7 +47,7 @@ export function SessionHistoryList({
               </div>
             )}
             <div className="mt-1 flex justify-between text-charcoal-graphite/60">
-              <span>{h.status === 'cancelled' ? 'No score' : `Score: ${correct}/${total}`}</span>
+              <span>{h.status === 'cancelled' ? 'No score' : `Score: ${formatScore(scoreSum)}/${total}`}</span>
               <span className={h.status === 'active' ? 'text-lecture-red font-semibold' : h.status === 'cancelled' ? 'text-charcoal-graphite/50' : isActiveSession ? 'text-fountain-ink' : 'text-fountain-ink/80'}>
                 {h.status === 'cancelled' ? 'Cancelled' : h.status}
               </span>

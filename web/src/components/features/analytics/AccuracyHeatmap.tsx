@@ -129,7 +129,7 @@ export function AccuracyHeatmap({ heatmapData }: AccuracyHeatmapProps) {
                                 cl.accuracy >= 80 ? 'bg-green-50 text-green-800 border-green-300' :
                                 cl.accuracy >= 50 ? 'bg-yellow-50 text-yellow-800 border-yellow-300' :
                                 'bg-red-50 text-red-800 border-lecture-red/30'
-                              }`}>{cl.accuracy}% ({cl.correct}/{cl.total} correct)</span>
+                              }`}>{cl.accuracy}% ({cl.correct}/{cl.total} score)</span>
                             </div>
                             
                             <div className="pl-4 border-l-2 border-charcoal-graphite/10 space-y-1.5 pt-1">
