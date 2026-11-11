@@ -1139,6 +1139,13 @@ Assumptions:
 7. On the phone open the `https://…ts.net` URL (or scan the QR on `/spaces`), log in, add to home screen, run a short session and the voice tutor; confirm the toggle is disabled on the phone. Then tell the implementer to run T30.
 8. To stop the service: `scripts/launchd/uninstall.sh`.
 
+Status 2026-11-11: T01 to T29 are committed on `feature/studyspaces`; T30 waits for step 7. Changes to the steps above as built:
+- Before step 6, and before starting the app against `web/dev.db` at all: the 13 stray test studyspaces (`c1` to `c13`, written by a test on 2026-11-10, see the INCIDENT note) must be removed from `web/dev.db` after a backup. Nine of their sources are unfinished and would be resumed (model calls and writes) at the first start. This needs the owner's go-ahead and has not been done.
+- Step 5: `PHONE_ACCESS_HOST` is optional. Try without it; set it only if actions from the phone fail with "Invalid Server Actions request" in `~/Library/Logs/feynman-studyhub/err.log`, then re-run `install.sh`.
+- Step 6: to update an installed service run `uninstall.sh`, then `install.sh` (the install refuses while the port is in use). `install.sh --dry-run` shows what it would do.
+- Not tested by the implementers and left for step 7: everything that needs a running Tailscale (toggle on/off, consent, QR address), add-to-home-screen on a real phone, the voice tutor with a real microphone (including the "assisted" detection from T18), the bottom-sheet tutor on a real phone (T20), and login in Safari on `http://localhost:3000` with the production cookie.
+- Data decisions still open (each needs a backup first): blank the content of the two "Slides PDF Error" topics (about 80 MB of unusable text; the viewer now shows a short message for them); mark the 10 exercises with broken keys as reported; correct or leave the 15 answers the unified grader scores differently; restore module names truncated at 38 characters.
+
 ---
 
 ## Backlog (not in this plan)
@@ -1193,6 +1200,9 @@ Assumptions:
 - Found in T26 testing (2026-11-11): after cleaning a saved web page, navigation text ("Home | About") stays in the first topic; the answer-key section stays inside the quiz topic's content; the "not study material" marker is a rejected `Exercise` row and may be counted by screens that count exercises without filtering on status.
 - Found in T26 testing (2026-11-11): an older pending tutor-update suggestion is replaced by a newer one, so the older file's suggested changes are lost if the owner had not acted on them.
 - Seen once (2026-11-11): one test failed in 1 of 16 full `vitest` runs on the T26 working tree and could not be reproduced (15 clean runs after it); the failing test was not captured. Probably a timer-based polling test under load. If it shows again, capture the name with `npx vitest run 2>&1 | grep -E "FAIL|AssertionError"`.
+- T28 (2026-11-11), not verifiable on the development Mac because Tailscale is not installed; to check on the first real use: (1) `tailscale status --json` has `BackendState` and `Self.DNSName` as assumed (the official docs call the JSON "subject to change" and do not list fields); (2) `tailscale serve status --json` contains the proxy target string the parser searches for; (3) whether `--yes` gets past the one-time HTTPS consent or the card shows the Terminal command; (4) which `Host` Serve forwards: if server actions from the phone fail with "Invalid Server Actions request" in the log, set `PHONE_ACCESS_HOST` (README, Phone access); it is unconfirmed whether `next start` reads that setting at build or at start, so set it before both; (5) `/opt/homebrew/bin/tailscale` as a binary location.
+- T28 lesson (2026-11-11): Next adds `x-forwarded-host/port/proto/for` to every request before a route handler sees it (`base-server.js`, each with `??=`), so "no forwarding headers" is never true. The local-request check uses them instead: forwarded host and forwarded address must be loopback. Unit tests that build header sets by hand must start from what Next really produces. Residual gaps are written at the top of `src/server/requestOrigin.ts`.
+- To check with the installed service (2026-11-11): the session cookie is set with `secure: true` in production builds. On `http://localhost:3000` Chrome and Firefox accept Secure cookies; if login on the Mac loops in Safari, that is the cause (use the `https://…ts.net` address or another browser, or set the flag from the request protocol instead of `NODE_ENV`).
 
 ---
 
