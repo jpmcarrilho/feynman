@@ -40,6 +40,8 @@ interface VoiceHubProps {
   chatMode?: TutorChatMode;
   onChatModeChange?: (mode: TutorChatMode) => void;
   chatModeProfile?: TutorProfile;
+  /** The hidden messages to send for a switch, in order (the parent adds the answer key when it is needed). Default: the switch message alone. */
+  buildSwitchMessages?: (mode: TutorChatMode, previous: TutorChatMode) => string[];
   sessionMode?: string | null;
   /**
    * Owned by the parent. When given, a message typed while disconnected is parked here before connecting
@@ -51,7 +53,7 @@ interface VoiceHubProps {
   onHelpRequested?: () => void;
 }
 
-export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose, onClose, draft, onDraftChange, chatMode, onChatModeChange, chatModeProfile, sessionMode, pendingMessageRef, onHelpRequested }: VoiceHubProps) {
+export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose, onClose, draft, onDraftChange, chatMode, onChatModeChange, chatModeProfile, buildSwitchMessages, sessionMode, pendingMessageRef, onHelpRequested }: VoiceHubProps) {
   const { isConnected, isConnecting, error, messages, connect, disconnect, sendText, isMuted, setMuted } = liveAPI
   
   const [localText, setLocalText] = useState('')
@@ -97,7 +99,8 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
     onHelpRequested?.()
     // One hidden message tells the connected tutor about the switch; the exercise context is not re-sent
     if (isConnected && typeof liveAPI.sendContext === 'function') {
-      liveAPI.sendContext(chatModeSwitchMessage(chatModeProfile, mode, sessionMode), { interrupt: false })
+      const messages = buildSwitchMessages ? buildSwitchMessages(mode, chatMode) : [chatModeSwitchMessage(chatModeProfile, mode, sessionMode)]
+      messages.forEach((m) => liveAPI.sendContext(m, { interrupt: false, respond: false })) // silent: the selector already shows the mode
     }
   }
 
@@ -194,7 +197,7 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
               )}
             </div>
           ) : (
-            messages.filter((msg: any) => !msg.text.startsWith('[SYSTEM MESSAGE')).map((msg: any) => (
+            messages.filter((msg: any) => !msg.text.startsWith('[SYSTEM MESSAGE') && !(msg.role === 'model' && msg.text.trim() === '')).map((msg: any) => (
               <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                 <div 
                   className={`max-w-[85%] min-w-0 break-words rounded-xl px-4 py-2 text-sm shadow-sm border ${

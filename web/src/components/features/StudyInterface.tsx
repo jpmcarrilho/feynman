@@ -65,10 +65,14 @@ import { useLiveAPI } from '@/hooks/useLiveAPI'
 import {
   voiceSystemInstruction,
   voiceExerciseContextMessage,
+  voiceAnswerCheckedMessage,
+  chatModeSwitchMessages,
   voicePlannerContextMessage,
   voiceDashboardContextMessage,
 } from '@/lib/prompts'
+import type { CheckedAnswer, ExerciseAnswerState } from '@/lib/prompts'
 import { formatScore, sessionScore, logScore, answerDisplayLines } from '@/lib/grading'
+import { tutorSpeaksOnContext } from '@/lib/tutorText'
 import { topicSourceLabel } from '@/lib/topicLabel'
 import { plannerSuggestions, moduleLabelsOf } from '@/lib/plannerSuggestions'
 import type { ProfileSuggestion, TutorChatMode, TutorProfile } from '@/lib/studyspace/profile'
@@ -295,6 +299,22 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
     }
   }, [currentExercise?.choices]);
 
+  type AnswerExercise = { exerciseType?: string | null; questionText: string; correctAnswer: string; explanation?: string | null }
+  /** The stored key as a person reads it (answers of the current exercise: its choices are parsedChoices). */
+  function answerKeyOf(ex: AnswerExercise) {
+    const shape = { exerciseType: ex.exerciseType || 'single_choice', choices: parsedChoices, questionText: ex.questionText }
+    return { correctAnswer: answerDisplayLines(shape, ex.correctAnswer).join('; ') || ex.correctAnswer, explanation: ex.explanation }
+  }
+  /** What the tutor is told about an answer of the current exercise once it is checked: the answer as a person reads it, the score, the key and the explanation. */
+  function checkedAnswerState(ex: AnswerExercise, userAnswer: string, score: number): CheckedAnswer {
+    const shape = { exerciseType: ex.exerciseType || 'single_choice', choices: parsedChoices, questionText: ex.questionText }
+    return { checked: true, chosen: answerDisplayLines(shape, userAnswer).join('; ') || userAnswer, score, ...answerKeyOf(ex) }
+  }
+  /** Checked (with the result) when the session has a log for the exercise, otherwise unchecked with the private key (the prompt uses it in Explain mode only). */
+  function answerStateOf(ex: AnswerExercise, log: { userAnswer: string } & Parameters<typeof logScore>[0] | undefined): ExerciseAnswerState {
+    return log ? checkedAnswerState(ex, log.userAnswer, logScore(log)) : { checked: false, key: answerKeyOf(ex) }
+  }
+
   // The tutor is the studyspace's persona. Speech heard from the student is forwarded to markAssisted (a ref, because that function is defined further down)
   const speechHeardRef = useRef<(source: SpeechSource) => void>(() => {})
   const voiceInstruction = useMemo(() => voiceSystemInstruction(profile), [profile])
@@ -312,6 +332,12 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
     () => profile.defaultChatMode
   )
   const handleChatModeChange = (mode: TutorChatMode) => setChatMode(courseId, mode)
+  // Switch messages for the connected tutor: the answer key joins when switching to Explain before the check, a reminder when leaving it
+  const buildSwitchMessages = (mode: TutorChatMode, previous: TutorChatMode) => {
+    const log = session?.logs?.find((l: { exerciseId: string }) => l.exerciseId === currentExercise?.id)
+    const answer = session && currentExercise && session.mode !== 'exam' ? answerStateOf(currentExercise, log) : undefined
+    return chatModeSwitchMessages(profile, mode, previous, session?.mode, answer)
+  }
   const refreshHistories = () => getSessionHistory(courseId).then(setHistories)
 
   // ---------------------------------------------------------------------------------------------------------------
@@ -1278,6 +1304,10 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         }
         // null: the server did not record it (the session ended elsewhere or the question is not part of it)
         if (!graded) void refreshFromServer(sid, { force: true }).catch(() => {})
+        // The tutor learns the result and the key (it does not answer this message by itself)
+        if (graded && liveAPI.isConnected) {
+          liveAPI.sendContext(voiceAnswerCheckedMessage(checkedAnswerState(currentExercise, userAnswer, graded.score)), { interrupt: false, respond: false })
+        }
 
         setSession((prev: any) => (prev && prev.id === sid ? {
           ...prev,
@@ -1293,6 +1323,8 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
   }
 
   const lastContextKeyRef = useRef<string | null>(null)
+  // Whether this connection already received an exercise context; only the first one may ask the tutor to welcome the student
+  const contextSentOnCallRef = useRef(false)
 
   // Prefetch the exercise context whether or not the voice tutor is connected,
   // so it is already cached when the connection comes up.
@@ -1327,10 +1359,12 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
     if (!liveAPI.isConnected) {
       // A new connection must receive the context again
       lastContextKeyRef.current = null
+      contextSentOnCallRef.current = false
       return
     }
     // With a typed message pending the context only joins the conversation (respond:false); the message triggers the answer
-    const respond = pendingMessageRef.current === null
+    // The tutor speaks by itself only in a live voice call (microphone on); with a muted or text-only connection it waits
+    const respond = tutorSpeaksOnContext({ isMuted: liveAPI.isMuted, pendingTypedMessage: pendingMessageRef.current !== null })
 
     if (session && currentExercise) {
       const key = currentContextKey
@@ -1341,6 +1375,9 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
       // Not loaded yet: this effect runs again when the prefetch arrives (the timer below covers a failed prefetch)
       if (!cachedContext || cachedContext.key !== key) return
       lastContextKeyRef.current = key
+      const log = session.logs?.find((l: { exerciseId: string }) => l.exerciseId === currentExercise.id)
+      const opening = respond && !contextSentOnCallRef.current
+      contextSentOnCallRef.current = true
       liveAPI.sendContext(
         voiceExerciseContextMessage(profile, {
           topicTitle: currentExercise.topic?.title,
@@ -1350,6 +1387,10 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
           unitsText: cachedContext.unitsText,
           // The mode in effect right now, read here (not a dependency) so a mode change never re-runs this effect
           chatMode: getChatMode(courseId, profile.defaultChatMode),
+          // A question already checked (revisited, or the call started after the check) is sent with its result
+          // Exams never carry an answer (the prompt drops it too)
+          answer: session.mode === 'exam' ? { checked: false } : answerStateOf(currentExercise, log),
+          opening,
         }),
         { interrupt: true, respond }
       )
@@ -2265,6 +2306,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
             chatMode={chatMode}
             onChatModeChange={handleChatModeChange}
             chatModeProfile={profile}
+            buildSwitchMessages={buildSwitchMessages}
             sessionMode={session?.mode}
             pendingMessageRef={pendingMessageRef}
             onHelpRequested={markAssisted}
@@ -2309,6 +2351,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
           chatMode={chatMode}
           onChatModeChange={handleChatModeChange}
           chatModeProfile={profile}
+          buildSwitchMessages={buildSwitchMessages}
           sessionMode={session?.mode}
           pendingMessageRef={pendingMessageRef}
           onHelpRequested={markAssisted}

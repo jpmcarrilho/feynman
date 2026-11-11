@@ -1,11 +1,14 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
 import { createLiveToken } from '@/app/auth-actions'
+import { stripDirectiveEcho } from '@/lib/tutorText'
 import { SpeechDetector, type SpeechSource } from '@/lib/speechDetector'
 
 export type ChatMessage = {
   id: string
   role: 'user' | 'model' | 'system'
   text: string
+  /** Model messages only: the text as received; `text` is what is shown (a leaked directive echo removed). */
+  raw?: string
 }
 
 export function useLiveAPI(systemInstructionText: string, onUserSpeech?: (source: SpeechSource) => void) {
@@ -139,6 +142,13 @@ export function useLiveAPI(systemInstructionText: string, onUserSpeech?: (source
     setMessages(prev => {
       // Append text if it's the same role in the last message (streaming accumulation)
       const last = prev[prev.length - 1]
+      if (role === 'model') {
+        // The model's text is kept as received and shown without a leaked directive echo
+        const raw = (last && last.role === role ? (last.raw ?? last.text) : '') + text
+        const shown = { role, raw, text: stripDirectiveEcho(raw) }
+        if (last && last.role === role) return [...prev.slice(0, -1), { ...last, ...shown }]
+        return [...prev, { id: Date.now().toString() + Math.random(), ...shown }]
+      }
       if (last && last.role === role) {
         const newMsg = { ...last, text: last.text + text }
         return [...prev.slice(0, -1), newMsg]
@@ -410,6 +420,7 @@ export function useLiveAPI(systemInstructionText: string, onUserSpeech?: (source
     isConnected,
     isConnecting,
     error,
+    // The state array itself (ChatBuffer compares its identity); a model message that is empty after the strip is skipped when shown and saved
     messages,
     setMessages,
     connect,

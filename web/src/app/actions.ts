@@ -1,5 +1,6 @@
 'use server'
 
+import { transcriptForSave } from '@/lib/tutorText'
 import { buildSessionTitle } from '@/lib/sessionTitle';
 import { generateText, generateObject } from 'ai'
 import { textModel } from '@/lib/ai'
@@ -506,10 +507,8 @@ export async function submitExam(sessionId: string, answers?: Record<string, str
 export async function saveChatLog(sessionId: string, messages: any[]) {
   await requireAuth()
   try {
-    // Injected voice context is never part of the transcript (also cleans logs from older clients)
-    const transcript = (messages || []).filter(
-      (m) => !(m && m.role === 'user' && typeof m.text === 'string' && m.text.startsWith('[SYSTEM MESSAGE'))
-    )
+    // Injected voice context and directive echoes are never part of the transcript (also cleans logs from older clients)
+    const transcript = transcriptForSave(messages || [])
     await prisma.studySession.update({
       where: { id: sessionId },
       data: { chatLog: JSON.stringify(transcript) }

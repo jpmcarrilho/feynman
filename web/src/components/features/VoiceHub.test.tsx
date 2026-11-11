@@ -111,6 +111,15 @@ describe('VoiceHub Component', () => {
       expect(screen.queryByTestId('chat-mode-selector')).not.toBeInTheDocument()
     })
 
+    it('sends every switch message silently, in order, when the parent builds several', () => {
+      const build = vi.fn(() => ['[SYSTEM MESSAGE: key]', '[SYSTEM MESSAGE: switch]'])
+      render(<VoiceHub liveAPI={liveAPI} {...props} chatMode="probe" onChatModeChange={vi.fn()} buildSwitchMessages={build} />)
+      fireEvent.click(screen.getByRole('radio', { name: 'Explain' }))
+      expect(build).toHaveBeenCalledWith('explain', 'probe')
+      expect(sendContext.mock.calls.map((c) => c[0])).toEqual(['[SYSTEM MESSAGE: key]', '[SYSTEM MESSAGE: switch]'])
+      for (const c of sendContext.mock.calls) expect(c[1]).toEqual({ interrupt: false, respond: false })
+    })
+
     it('is hidden in exam sessions', () => {
       render(<VoiceHub liveAPI={liveAPI} {...props} sessionMode="exam" chatMode="probe" onChatModeChange={vi.fn()} />)
       expect(screen.queryByTestId('chat-mode-selector')).not.toBeInTheDocument()
@@ -126,7 +135,7 @@ describe('VoiceHub Component', () => {
       expect(sendContext).toHaveBeenCalledTimes(1)
       const [text, opts] = sendContext.mock.calls[0]
       expect(text).toContain('The student switched the tutor to guide mode.')
-      expect(opts).toEqual({ interrupt: false })
+      expect(opts).toEqual({ interrupt: false, respond: false }) // silent: the selector already shows the mode
 
       // Clicking the active mode does nothing
       fireEvent.click(screen.getByRole('radio', { name: 'Probe' }))

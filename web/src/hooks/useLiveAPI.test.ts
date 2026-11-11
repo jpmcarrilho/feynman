@@ -6,6 +6,8 @@ vi.mock('@/app/auth-actions', () => ({
 }))
 
 import { useLiveAPI } from './useLiveAPI'
+import { ChatBuffer } from '@/lib/chatBuffer'
+import { transcriptForSave } from '@/lib/tutorText'
 
 class FakeWebSocket {
   static OPEN = 1
@@ -84,6 +86,36 @@ describe('useLiveAPI context vs text', () => {
     const { hook } = await connected()
     act(() => hook.result.current.sendText('hello'))
     expect(hook.result.current.messages.map((m) => m.text)).toEqual(['hello'])
+  })
+
+  it('a typed exchange reaches the chat buffer and the saved transcript, with the tutor text stripped of an echo', async () => {
+    const { hook, ws } = await connected()
+    const chat = new ChatBuffer<(typeof hook.result.current.messages)[number]>()
+    // the session starts: the buffer hands its empty list to the hook, as StudyInterface does
+    act(() => hook.result.current.setMessages(chat.replace('s1', [])))
+    chat.observe(hook.result.current.messages)
+
+    act(() => hook.result.current.sendText('Why is the median robust?'))
+    const chunk = (text: string) => ws.onmessage?.({ data: JSON.stringify({ serverContent: { modelTurn: { parts: [{ text }] } } }) })
+    await act(async () => {
+      await chunk('Mode: Guide. Follow the Guide rules from your instructions. ')
+      await chunk('The median ignores how far the extremes are.')
+    })
+    // a reply that is only an echo leaves nothing to show or save
+    act(() => hook.result.current.sendText('ok'))
+    await act(async () => { await chunk('Mode: Guide.') })
+    chat.observe(hook.result.current.messages)
+
+    // the buffer follows the hook's list (identity preserved), so the snapshot is not stuck on the empty list
+    expect(chat.snapshot('s1')).toBe(hook.result.current.messages)
+    const saved = transcriptForSave(chat.snapshot('s1')!) as { role: string; text: string }[]
+    expect(saved.map((m) => [m.role, m.text])).toEqual([
+      ['user', 'Why is the median robust?'],
+      ['model', 'The median ignores how far the extremes are.'],
+      ['user', 'ok'],
+    ])
+    expect(JSON.stringify(saved)).not.toContain('Follow the Guide rules')
+    expect(JSON.stringify(saved)).not.toContain('raw')
   })
 
   it('a server "interrupted" event (caused by the app\'s own context or typed message) is not student speech', async () => {
