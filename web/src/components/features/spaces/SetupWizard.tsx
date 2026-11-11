@@ -8,9 +8,11 @@ import { SETUP_STEPS, SETUP_STEP_LABELS, type SetupStep } from '@/lib/setupSteps
 import { SourceDropzone } from './SourceDropzone'
 import { ProcessingView } from './ProcessingView'
 import { OutlineEditor } from './OutlineEditor'
+import type { PersonaStep } from '@/server/ingest/persona'
+import { PersonaCard } from './PersonaCard'
 
 /** The setup steps of one studyspace. The first step comes from the server (resolveSetupStep); moving on updates the address without a reload. */
-export function SetupWizard({ courseId, title, initialStep }: { courseId: string; title: string; initialStep: SetupStep }) {
+export function SetupWizard({ courseId, title, initialStep, initialPersona }: { courseId: string; title: string; initialStep: SetupStep; initialPersona?: PersonaStep | null }) {
   const router = useRouter()
   const [step, setStepState] = useState<SetupStep>(initialStep)
   const [uploading, setUploading] = useState(false)
@@ -57,7 +59,9 @@ export function SetupWizard({ courseId, title, initialStep }: { courseId: string
 
       {step === 'processing' && <ProcessingView courseId={courseId} onReview={() => go('outline')} />}
 
-      {step === 'outline' && <OutlineEditor courseId={courseId} onBack={() => go('processing')} onContinue={() => router.push(`/spaces/${courseId}`)} />}
+      {step === 'outline' && <OutlineEditor courseId={courseId} continueLabel="Continue" onBack={() => go('processing')} onContinue={() => go('persona')} />}
+
+      {step === 'persona' && <PersonaCard courseId={courseId} initial={step === initialStep ? initialPersona ?? undefined : undefined} onBack={() => go('outline')} onStudy={() => router.push(`/spaces/${courseId}`)} />}
     </div>
   )
 }

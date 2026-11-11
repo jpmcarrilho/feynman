@@ -125,3 +125,63 @@ export async function moveTopicToModuleAction(courseId: string, topicId: string,
   await requireAuth()
   return outline.moveTopicToModule(courseId, topicId, module)
 }
+
+// --- Persona (T25) ---------------------------------------------------------------------------------------------------
+// Refusals come back as { ok: false, reason }. The proposal takes 10 to 30 seconds; the caller shows a waiting state.
+
+type PersonaStepResult = import('@/server/ingest/persona').PersonaStep | import('@/server/ingest/persona').PersonaFailure
+
+/**
+ * What the persona step shows: for a studyspace without an accepted tutor, the initial proposal (made now, once, unless a stored one
+ * still matches the ready files); for one with an accepted tutor, that profile for editing, plus the progress of the starter questions.
+ */
+export async function getPersonaStepAction(courseId: string): Promise<PersonaStepResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
+  const { getPersonaStep } = await import('@/server/ingest/persona')
+  return getPersonaStep(courseId)
+}
+
+/** Makes a new proposal and replaces the stored one (only while no tutor is accepted yet). */
+export async function regenerateProfileAction(courseId: string): Promise<PersonaStepResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
+  const { getPersonaStep } = await import('@/server/ingest/persona')
+  return getPersonaStep(courseId, {}, { force: true })
+}
+
+/**
+ * Validates the profile on the server, stores it as the studyspace's tutor, clears the suggestion and asks for the starter questions
+ * (once; editing an accepted tutor later starts nothing unless the last run failed).
+ */
+export async function acceptProfileAction(courseId: string, profile: TutorProfile): Promise<import('@/server/ingest/persona').AcceptResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
+  const { acceptProfile } = await import('@/server/ingest/persona')
+  const { requestStarters } = await import('@/server/ingest/runner')
+  return acceptProfile(courseId, profile, { requestStarters })
+}
+
+/** Throws away the stored suggestion (an update the owner ignores). The accepted tutor stays as it is. */
+export async function dismissProfileSuggestionAction(courseId: string): Promise<AdminResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
+  const { dismissSuggestion } = await import('@/server/ingest/persona')
+  return dismissSuggestion(courseId)
+}
+
+/** "Keep together": removes the split offer from the stored proposal, nothing else. */
+export async function dismissSplitNoticeAction(courseId: string): Promise<AdminResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
+  const { dismissSplitNotice } = await import('@/server/ingest/persona')
+  return dismissSplitNotice(courseId)
+}
+
+/** Splits a studyspace: the first group stays, each other group becomes a new studyspace with its files, topics and questions. */
+export async function splitStudyspaceAction(courseId: string, groups: { label: string; sourceIds: string[] }[]): Promise<import('@/server/ingest/split').SplitResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
+  const { splitStudyspace } = await import('@/server/ingest/split')
+  return splitStudyspace(courseId, groups)
+}

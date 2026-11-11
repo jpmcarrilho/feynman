@@ -2167,7 +2167,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
         </TabsContent>
 
         <TabsContent value="resources" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">
-          <ResourcesDashboard courseId={courseId} onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} startingSession={isLoading} />
+          <ResourcesDashboard courseId={courseId} onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} startingSession={isLoading} subject={profile.subject} />
         </TabsContent>
 
         <TabsContent value="analytics" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">

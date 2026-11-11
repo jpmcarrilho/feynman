@@ -1,5 +1,5 @@
 import type { TutorProfile } from '@/lib/studyspace/profile'
-import { persona } from './persona'
+import { languageName, persona } from './persona'
 import { subjectGuidance } from './legacySubjectGuidance'
 
 export function explainMistakePrompt(
@@ -103,7 +103,7 @@ JSON Schema:
 }
 
 /** Bump whenever the text of generateExercisePrompt changes (stored on generated exercises from T14 on). */
-export const GENERATE_EXERCISE_PROMPT_VERSION = 'gen-v4'
+export const GENERATE_EXERCISE_PROMPT_VERSION = 'gen-v5'
 
 export function generateExercisePrompt(
   profile: TutorProfile,
@@ -133,6 +133,8 @@ However, do NOT copy their topic. Your generated question MUST test concepts fro
 
   return `${persona(profile)}
 Your goal is to generate EXACTLY 1 NEW exercise for a course on ${profile.subject}. The question MUST test concepts and terminology specifically from the Target Topic: "${topic.title}" in "${topic.week}".
+
+WRITE THE QUESTION AS A NEUTRAL EXAM ITEM: the persona above shapes how a tutor talks in chat and in the explanation, NOT the question itself. The question text ("questionText"), the choices and the correct answer must read like an item in a written exam, in ${languageName(profile.contentLanguage)}, pitched at ${profile.level} level. No greetings, no role-play, no address to the student ("Greetings, class!", "Dear student", "Let us explore"), no persona voice, jokes or encouragement in the question or in the choices. State the problem and ask it. The "explanation" may use the tone lightly.
 
 Here is the primary target content:
 ${input.bucketContext}

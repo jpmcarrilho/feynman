@@ -19,6 +19,8 @@ import {
   Award
 } from 'lucide-react'
 
+import { studyGuideBlurb } from '@/lib/studyspace/studyGuide'
+
 // Simple helper to prettify/format week and titles
 const formatDisplayName = (name: string | null | undefined): string => {
   if (!name) return '';
@@ -34,9 +36,11 @@ interface ResourcesDashboardProps {
   onStartWeekSession: (topicIds: string[], weekName: string) => void;
   /** True while a session is being created: the practice buttons are disabled so a second click cannot start another. */
   startingSession?: boolean;
+  /** Subject of the studyspace's tutor profile, named in the study guide blurb. */
+  subject?: string | null;
 }
 
-export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, startingSession = false }: ResourcesDashboardProps) {
+export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, startingSession = false, subject = null }: ResourcesDashboardProps) {
   const [courses, setCourses] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [activeCourseCode, setActiveCourseCode] = useState<string>('')
@@ -228,7 +232,7 @@ export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, s
                       <h4 className="font-bold text-sm tracking-tight text-charcoal-graphite">Feynman Study Guide</h4>
                     </div>
                     <p className="text-xs text-charcoal-graphite/65 leading-relaxed flex-1">
-                      A structured, concept-demystifying lecture summary compiling the core intuitive economics and policy models, analogies, common pitfalls, and formulas using the Feynman style.
+                      {studyGuideBlurb(subject)}
                     </p>
                     
                     {week.summaryExists ? (

@@ -44,9 +44,18 @@ export const ProfileProposalSchema = z.object({
   subjectGroups: z.array(z.object({ label: z.string(), sourceIds: z.array(z.string()) })), // only meaningful when !subjectsCoherent
 })
 
+// The same shape for the model call, without `.default(...)` (structured output schemas stay free of defaults, plan 5.2).
+export const ProfileProposalModelSchema = z.object({
+  profile: ProfileProposalSchema.shape.profile.extend({ toneNotes: z.string().max(300) }),
+  subjectsCoherent: z.boolean(),
+  subjectGroups: z.array(z.object({ label: z.string(), sourceIds: z.array(z.string()) })),
+})
+
 export const ProfileSuggestionSchema = z.object({
   kind: z.enum(['initial', 'update']),
   createdAt: z.string(),
+  // Ids of the ready files an initial proposal was made from; a different set later means the proposal is stale.
+  basedOnSourceIds: z.array(z.string()).default([]),
   profile: TutorProfileSchema,
   rationale: z.string().max(600),
   excludedSources: z.array(z.object({ id: z.string(), name: z.string(), reason: z.string() })),
@@ -76,6 +85,28 @@ export function parseProfile(json: string | null | undefined): TutorProfile | nu
   } catch {
     return null
   }
+}
+
+const MIX_KEYS: QuestionType[] = ['single_choice', 'multiple_choice', 'numeric', 'dropdown']
+export type QuestionTypeMix = z.infer<typeof QuestionTypeMixSchema>
+
+/**
+ * Scales a question-type mix to sum to 1. Negative and non-finite weights count as 0; `noNumeric` zeroes the numeric weight
+ * first. When nothing is left, `fallback` (normalized the same way) is returned. Pure.
+ */
+export function normalizeMix(mix: Partial<Record<QuestionType, number>>, opts: { noNumeric?: boolean; fallback?: QuestionTypeMix } = {}): QuestionTypeMix {
+  const weight = (t: QuestionType) => {
+    const v = mix[t]
+    return typeof v === 'number' && Number.isFinite(v) && v > 0 && !(opts.noNumeric && t === 'numeric') ? v : 0
+  }
+  const total = MIX_KEYS.reduce((a, t) => a + weight(t), 0)
+  if (total <= 0) {
+    if (opts.fallback) return normalizeMix(opts.fallback, { noNumeric: opts.noNumeric })
+    return opts.noNumeric ? { single_choice: 0.5, multiple_choice: 0.25, numeric: 0, dropdown: 0.25 } : { single_choice: 0.25, multiple_choice: 0.25, numeric: 0.25, dropdown: 0.25 }
+  }
+  const out = { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0 }
+  for (const t of MIX_KEYS) out[t] = weight(t) / total
+  return out
 }
 
 export function defaultProfile(course: { title: string; goal?: string | null }): TutorProfile {

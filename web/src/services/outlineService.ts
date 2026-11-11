@@ -8,6 +8,7 @@
 import { prisma } from '@/lib/db'
 import { MAX_TOPIC_CHARS } from '@/lib/ingestLimits'
 import { NOT_STUDY_MATERIAL_PREFIX } from '@/services/exerciseGenerator'
+import { parseProfile } from '@/lib/studyspace/profile'
 
 export const MAX_TOPIC_TITLE_LENGTH = 200
 export const MAX_MODULE_TITLE_LENGTH = 120
@@ -74,18 +75,34 @@ export function groupByModule<T extends { week: string | null }>(rows: T[]): { n
   return groups
 }
 
-type Tx = Pick<typeof prisma, 'topic'>
+type Tx = Pick<typeof prisma, 'topic' | 'course'>
+
+/**
+ * The profile names a module by its stored label (`calibrationModule`; `examPreset` and `questionTypeCycles` hold no module name).
+ * When labels change (rename, renumbering, a module that disappears) the profile follows: `mapping` is old label -> new label;
+ * a label missing from it keeps its value, or becomes null when `dropUnmapped` (the module no longer exists).
+ */
+export async function followModuleLabels(tx: Tx, courseId: string, mapping: Map<string, string>, dropUnmapped: boolean): Promise<void> {
+  const course = await tx.course.findUnique({ where: { id: courseId }, select: { profile: true } })
+  const profile = parseProfile(course?.profile)
+  const current = profile?.calibrationModule
+  if (!profile || !current) return
+  const next = mapping.has(current) ? mapping.get(current)! : dropUnmapped ? null : current
+  if (next !== current) await tx.course.update({ where: { id: courseId }, data: { profile: JSON.stringify({ ...profile, calibrationModule: next }) } })
+}
 
 /**
  * Writes a layout: modules in the given order, each with its topics in the given order. Module labels with a "NN · " prefix are
  * renumbered to their new position (labels without one are left alone); `order` becomes 0..n-1 and `unit` the 1-based position
  * inside the module. Only rows that change are written.
  */
-async function writeLayout(tx: Tx, layout: { name: string; ids: string[] }[], current: Map<string, { week: string | null; order: number; unit: string | null }>) {
+export async function writeLayout(tx: Tx, courseId: string, layout: { name: string; ids: string[] }[], current: Map<string, { week: string | null; order: number; unit: string | null }>) {
   let order = 0
+  const labels = new Map<string, string>()
   for (const [mi, mod] of layout.entries()) {
     const { prefix, title } = splitModuleName(mod.name)
     const week = prefix !== null ? moduleName(mi, title) : mod.name
+    labels.set(mod.name, week)
     for (const [ti, id] of mod.ids.entries()) {
       const before = current.get(id)
       const unit = String(ti + 1)
@@ -95,6 +112,7 @@ async function writeLayout(tx: Tx, layout: { name: string; ids: string[] }[], cu
       order++
     }
   }
+  await followModuleLabels(tx, courseId, labels, true)
 }
 
 /** Imported studyspaces (topics without a file) keep real unit numbers and orders that the rewrite would destroy. */
@@ -110,6 +128,12 @@ export async function isImportedStudyspace(courseId: string): Promise<boolean> {
 async function loadCurrent(tx: Tx, courseId: string) {
   const rows = await tx.topic.findMany({ where: { courseId }, orderBy: [{ order: 'asc' }, { id: 'asc' }], select: { id: true, week: true, order: true, unit: true } })
   return { rows, current: new Map(rows.map((r) => [r.id, r])) }
+}
+
+/** Rewrites `order`, `unit` and the "NN · " numbers of a studyspace so they are contiguous again (after topics moved in or out). */
+export async function renumberOutline(tx: Tx, courseId: string): Promise<void> {
+  const { rows, current } = await loadCurrent(tx, courseId)
+  await writeLayout(tx, courseId, groupByModule(rows).map((g) => ({ name: g.name, ids: g.rows.map((r) => r.id) })), current)
 }
 
 /** The outline of a studyspace: modules in order, each with its topics in order. */
@@ -166,6 +190,7 @@ export async function renameModule(courseId: string, from: string, to: unknown):
     if (next === from) return { ok: true } as const
     if (rows.some((r) => (r.week ?? '') === next)) return { ok: false, reason: 'Another module already has that title. Choose a different one.' } as const
     await tx.topic.updateMany({ where: { courseId, week: from }, data: { week: next } })
+    await followModuleLabels(tx, courseId, new Map([[from, next]]), false)
     return { ok: true } as const
   })
 }
@@ -187,7 +212,7 @@ export async function reorderTopics(courseId: string, orderedTopicIds: unknown):
       return { ok: false, reason: 'The outline changed since you opened it. Reload and try again.' } as const
     }
     const sorted = ids.map((id) => ({ id, week: current.get(id)!.week }))
-    await writeLayout(tx, groupByModule(sorted).map((g) => ({ name: g.name, ids: g.rows.map((r) => r.id) })), current)
+    await writeLayout(tx, courseId, groupByModule(sorted).map((g) => ({ name: g.name, ids: g.rows.map((r) => r.id) })), current)
     return { ok: true } as const
   })
 }
@@ -208,7 +233,7 @@ export async function moveTopicToModule(courseId: string, topicId: string, targe
       .map((g) => ({ name: g.name, ids: g.rows.map((r) => r.id).filter((id) => id !== topicId) }))
       .map((g) => (g.name === targetModule ? { ...g, ids: [...g.ids, topicId] } : g))
       .filter((g) => g.ids.length > 0) // a module left empty disappears and the others are renumbered
-    await writeLayout(tx, layout, current)
+    await writeLayout(tx, courseId, layout, current)
     return { ok: true } as const
   })
 }
@@ -312,7 +337,7 @@ export async function mergeTopics(courseId: string, topicIds: unknown): Promise<
 
     // Close the gaps: order 0..n-1 and unit by position
     const { rows, current } = await loadCurrent(tx, courseId)
-    await writeLayout(tx, groupByModule(rows).map((g) => ({ name: g.name, ids: g.rows.map((r) => r.id) })), current)
+    await writeLayout(tx, courseId, groupByModule(rows).map((g) => ({ name: g.name, ids: g.rows.map((r) => r.id) })), current)
     return { ok: true, id: kept.id } as const
   })
 }

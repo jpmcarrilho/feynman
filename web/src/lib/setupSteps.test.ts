@@ -21,7 +21,15 @@ describe('resolveSetupStep', () => {
     expect(resolveSetupStep('upload', done)).toBe('outline')
     expect(resolveSetupStep('processing', done)).toBe('processing')
   })
+  it('shows the tutor step when requested and files are ready, and by default once a tutor is accepted', () => {
+    const done = s({ initialFinished: true, readyInitialCount: 2 })
+    expect(resolveSetupStep('persona', done)).toBe('persona')
+    expect(resolveSetupStep('persona', s({}))).toBe('processing')
+    expect(resolveSetupStep(undefined, { ...done, hasProfile: true })).toBe('persona')
+    expect(resolveSetupStep('outline', { ...done, hasProfile: true })).toBe('outline')
+  })
   it('recognizes step names', () => {
+    expect(isSetupStep('persona')).toBe(true)
     expect(isSetupStep('outline')).toBe(true)
     expect(isSetupStep('x')).toBe(false)
   })

@@ -10,7 +10,7 @@ export const CHAT_MODE_LABELS: Record<TutorChatMode, string> = {
 export const CHAT_MODE_HINTS: Record<TutorChatMode, string> = {
   probe: 'Asks before telling; hints only after you try',
   guide: 'Short hints, one step at a time',
-  explain: 'Direct, brief explanations',
+  explain: 'Direct, complete explanations',
 }
 
 export type ChatModeOrExam = TutorChatMode | 'exam'
@@ -45,8 +45,8 @@ export function chatModeDirective(
 
   if (effective === 'explain') {
     return switching
-      ? `From now on, act as a clear, direct explainer. When the student asks a question or for help, answer it directly and briefly in Feynman style (simple language, one intuitive analogy) without first making them attempt it, then ask ONE short check question to confirm they understood. Do not read the choices out loud.`
-      : `Now, act as a clear, direct explainer. Welcome them briefly to the question. Do not read the choices out loud. When the student asks a question or for help, answer it directly and briefly in Feynman style (simple language, one intuitive analogy) without first making them attempt it, then ask ONE short check question to confirm they understood.`
+      ? `From now on, act as a clear, direct explainer. When the student asks a question or for help, give the explanation directly and completely in Feynman style (simple language, one intuitive analogy), without first making them attempt it. Do NOT end with a probing, quiz or check question; at most offer, in one short sentence, to go deeper or give an example. Do not read the choices out loud.`
+      : `Now, act as a clear, direct explainer. Welcome them briefly to the question. Do not read the choices out loud. When the student asks a question or for help, give the explanation directly and completely in Feynman style (simple language, one intuitive analogy), without first making them attempt it. Do NOT end with a probing, quiz or check question; at most offer, in one short sentence, to go deeper or give an example.`
   }
 
   return switching

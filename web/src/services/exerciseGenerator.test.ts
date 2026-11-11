@@ -258,7 +258,7 @@ describe('generateExerciseForTopic validation', () => {
     expect(promptOf()).toContain('FIRST, JUDGE THE TARGET CONTENT')
     expect(promptOf()).toMatch(/honor code/)
     expect(generatedExerciseSchema.safeParse({ newExercise: { contentKind: 'logistics', logisticsReason: 'x', questionText: '', exerciseType: 'single_choice', choices: [], correctAnswer: '', explanation: '' } }).success).toBe(true)
-    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v4')
+    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v5')
   })
 
   it('lets a solver error propagate and stores nothing for that attempt', async () => {

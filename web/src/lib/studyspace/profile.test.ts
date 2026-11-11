@@ -55,3 +55,19 @@ describe('pickQuestionType', () => {
     expect(pickQuestionType(p, false, 7)).toBe('single_choice')
   })
 })
+
+describe('normalizeMix', () => {
+  it('scales to 1, ignores bad weights, zeroes numeric on request and falls back when nothing is left', async () => {
+    const { normalizeMix } = await import('./profile')
+    const sum = (m: Record<string, number>) => Object.values(m).reduce((a, b) => a + b, 0)
+    const m = normalizeMix({ single_choice: 3, multiple_choice: 1, numeric: -2, dropdown: Number.NaN })
+    expect(m).toEqual({ single_choice: 0.75, multiple_choice: 0.25, numeric: 0, dropdown: 0 })
+    const q = normalizeMix({ single_choice: 1, multiple_choice: 1, numeric: 2, dropdown: 0 }, { noNumeric: true })
+    expect(q.numeric).toBe(0)
+    expect(sum(q)).toBeCloseTo(1, 10)
+    const fb = normalizeMix({}, { noNumeric: true })
+    expect(fb.numeric).toBe(0)
+    expect(sum(fb)).toBeCloseTo(1, 10)
+    expect(normalizeMix({ numeric: 1 }, { noNumeric: true, fallback: { single_choice: 1, multiple_choice: 1, numeric: 0, dropdown: 0 } })).toEqual({ single_choice: 0.5, multiple_choice: 0.5, numeric: 0, dropdown: 0 })
+  })
+})

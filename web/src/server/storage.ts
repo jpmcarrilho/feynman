@@ -136,6 +136,23 @@ export async function removeSourceFiles(courseId: string, sourceId: string): Pro
 }
 
 /**
+ * Copies the folder of one source from one studyspace to another (used by a split, which deletes the old folder only after the
+ * database rows point at the new one). A missing source folder is fine. Leftovers of an earlier attempt are replaced.
+ */
+export async function copySourceFiles(fromCourseId: string, toCourseId: string, sourceId: string): Promise<void> {
+  const from = sourceDir(fromCourseId, sourceId)
+  const to = sourceDir(toCourseId, sourceId)
+  try {
+    await fs.promises.access(/* turbopackIgnore: true */ from)
+  } catch {
+    return
+  }
+  await fs.promises.rm(/* turbopackIgnore: true */ to, { recursive: true, force: true })
+  await fs.promises.mkdir(/* turbopackIgnore: true */ path.dirname(to), { recursive: true })
+  await fs.promises.cp(/* turbopackIgnore: true */ from, /* turbopackIgnore: true */ to, { recursive: true })
+}
+
+/**
  * Deletes everything a studyspace keeps under STORAGE_DIR: its source files, its summaries and the session index files of
  * `sessionIds`. The tracked legacy folder `summaries/` of the repository is never touched.
  */

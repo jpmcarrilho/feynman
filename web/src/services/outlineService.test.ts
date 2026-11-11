@@ -260,3 +260,41 @@ describe('imported studyspaces (topics without a file)', () => {
     expect(await svc.isImportedStudyspace(courseId)).toBe(false)
   })
 })
+
+describe('the profile follows module labels', () => {
+  const calibration = async (courseId: string) => JSON.parse((await prisma.course.findUnique({ where: { id: courseId } }))!.profile!).calibrationModule as string | null
+  async function withProfile(label: string | null) {
+    const { defaultProfile } = await import('@/lib/studyspace/profile')
+    const s = await makeSpace()
+    await prisma.course.update({ where: { id: s.courseId }, data: { profile: JSON.stringify({ ...defaultProfile({ title: 'S' }), calibrationModule: label }) } })
+    return s
+  }
+
+  it('follows a module rename', async () => {
+    const { courseId } = await withProfile('02 · Two')
+    expect((await svc.renameModule(courseId, '02 · Two', 'Final review')).ok).toBe(true)
+    expect(await calibration(courseId)).toBe('02 · Final review')
+  })
+
+  it('follows renumbering when modules are reordered', async () => {
+    const { courseId, ids } = await withProfile('02 · Two')
+    // put module Two first: C1, A4 before the rest
+    const order = [ids.C1, ids.A4, ids.A1, ids.A2, ids.A3, ids.B1]
+    expect((await svc.reorderTopics(courseId, order)).ok).toBe(true)
+    expect(await calibration(courseId)).toBe('01 · Two')
+  })
+
+  it('becomes none when the module disappears, and is left alone when it stays', async () => {
+    const { courseId, ids } = await withProfile('02 · Two')
+    expect((await svc.moveTopicToModule(courseId, ids.C1, '01 · One')).ok).toBe(true)
+    expect(await calibration(courseId)).toBe('02 · Two') // A4 still in module Two
+    expect((await svc.moveTopicToModule(courseId, ids.A4, '01 · One')).ok).toBe(true)
+    expect(await calibration(courseId)).toBeNull()
+  })
+
+  it('does not touch a studyspace without a profile', async () => {
+    const { courseId } = await makeSpace()
+    expect((await svc.renameModule(courseId, '02 · Two', 'X')).ok).toBe(true)
+    expect((await prisma.course.findUnique({ where: { id: courseId } }))!.profile).toBeNull()
+  })
+})

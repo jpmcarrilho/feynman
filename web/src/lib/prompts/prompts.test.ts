@@ -221,7 +221,12 @@ describe('chatModeDirective', () => {
     expect(d[1]).toContain('step-by-step guide')
     expect(d[1]).toContain('ONE at a time')
     expect(d[2]).toContain('direct explainer')
-    expect(d[2]).toContain('ONE short check question')
+    expect(d[2]).toContain('directly and completely')
+    expect(d[2]).toContain('Do NOT end with a probing, quiz or check question')
+    expect(d[2]).not.toContain('ONE short check question')
+    expect(chatModeDirective(legacy, 'explain', 'study', { switching: true })).toContain('Do NOT end with a probing, quiz or check question')
+    expect(d[1]).toContain('brief check question') // guide unchanged
+    expect(d[0]).toContain('Ask them to explain the concepts in their own words')
   })
 
   it('exam always yields the exam directive: no hints, no answers', () => {
@@ -275,5 +280,21 @@ describe('enrichExercisePrompt rules', () => {
     expect(out).toContain('Do NOT repeat or list the answer choices')
     expect(out).toContain('Never invent values, tables or facts')
     expect(out).toContain('Never rewrite only to remove it')
+  })
+})
+
+describe('neutral exam items and explain mode in the voice instruction', () => {
+  it('the exercise prompt forbids persona voice in the question and choices', () => {
+    const prompt = generateExercisePrompt({ ...legacy, tone: 'patient_coach', contentLanguage: 'pt-BR', level: 'graduate' }, {
+      topic: { title: 'T', week: 'W' }, bucketContext: 'ctx', styleExamples: '', alreadyAsked: '', targetType: 'single_choice',
+    })
+    expect(prompt).toContain('NEUTRAL EXAM ITEM')
+    expect(prompt).toContain('No greetings, no role-play, no address to the student')
+    expect(prompt).toContain('Portuguese')
+    expect(prompt).toContain('graduate level')
+    expect(prompt).toContain('The "explanation" may use the tone lightly')
+  })
+  it('the voice instruction says explain mode does not end with a question', () => {
+    expect(voiceSystemInstruction(legacy)).toContain('do NOT end with a probing or quiz question')
   })
 })

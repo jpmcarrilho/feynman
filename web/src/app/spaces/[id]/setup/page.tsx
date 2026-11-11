@@ -3,6 +3,7 @@ import { checkIsAuthenticated } from '@/app/auth-actions'
 import { getSpaceStatus } from '@/services/spaceStatus'
 import { isImportedStudyspace } from '@/services/outlineService'
 import { resolveSetupStep } from '@/lib/setupSteps'
+import { readStoredPersonaStep } from '@/server/ingest/persona'
 import { SetupWizard } from '@/components/features/spaces/SetupWizard'
 
 export const dynamic = 'force-dynamic'
@@ -31,11 +32,15 @@ export default async function SpaceSetupPage({ params, searchParams }: { params:
     sourceCount: initial.length,
     initialFinished: status.initialBundleFinished,
     readyInitialCount: initial.filter((s) => s.status === 'ready').length,
+    hasProfile: status.hasProfile,
   })
+
+  // Only what is already stored (no model call while rendering): the card then shows at once; otherwise it shows its waiting state
+  const initialPersona = initialStep === 'persona' ? await readStoredPersonaStep(id) : null
 
   return (
     <main className="min-h-screen bg-background px-4 py-8 sm:px-8 sm:py-12">
-      <SetupWizard key={status.courseId} courseId={status.courseId} title={status.title} initialStep={initialStep} />
+      <SetupWizard key={status.courseId} courseId={status.courseId} title={status.title} initialStep={initialStep} initialPersona={initialPersona} />
     </main>
   )
 }

@@ -144,6 +144,15 @@ export function SpaceCard({ space }: { space: SpaceSummary }) {
             Open
           </Link>
         )}
+        {space.topicCount > 0 && (
+          <Link
+            href={`/spaces/${space.id}/tutor`}
+            aria-label={`Tutor settings of ${space.title}`}
+            className="flex min-h-10 w-fit items-center text-xs text-charcoal-graphite/60 hover:text-charcoal-graphite hover:underline sm:min-h-0"
+          >
+            Tutor settings
+          </Link>
+        )}
       </CardContent>
     </Card>
   )
