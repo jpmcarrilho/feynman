@@ -31,6 +31,8 @@ export type SourceStatusView = {
   starterQuestionCount: number
   canRetry: boolean
   createdAt: string
+  /** Last change of the file's row: lets the wizard see that a retry ran again. */
+  updatedAt: string
 }
 
 export type SpaceStatus = {
@@ -55,14 +57,14 @@ const num = (v: unknown): number => (typeof v === 'bigint' ? Number(v) : typeof 
 type Counts = { topics: number; modules: number; notStudy: number; imported: number; starters: number }
 
 /** Plain text for the status of a file. Pure. */
-export function progressText(s: { status: string; working: boolean; pageCount: number | null; error: string | null }, c: Pick<Counts, 'topics' | 'imported' | 'starters'>): string {
+export function progressText(s: { status: string; working: boolean; pageCount: number | null; error: string | null; isPdf?: boolean }, c: Pick<Counts, 'topics' | 'imported' | 'starters'>): string {
   switch (s.status) {
     case 'uploaded':
       return s.working ? 'Starting…' : 'Waiting in line…'
     case 'extracting':
       return s.working ? 'Reading the file…' : 'Waiting to continue reading the file…'
     case 'segmenting':
-      return s.working ? (s.pageCount ? `Splitting ${s.pageCount} pages into topics…` : 'Splitting into topics…') : 'Waiting to continue splitting into topics…'
+      return s.working ? (s.pageCount && s.isPdf !== false ? `Splitting ${s.pageCount} page${s.pageCount === 1 ? '' : 's'} into topics…` : 'Splitting into topics…') : 'Waiting to continue splitting into topics…'
     case 'importing_questions':
       return s.working ? 'Looking for questions in the file…' : 'Waiting to continue looking for questions…'
     case 'generating_exercises':
@@ -92,7 +94,7 @@ export async function getSpaceStatus(courseId: string, now: Date = new Date()): 
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
       select: {
         id: true, originalName: true, sizeBytes: true, bundle: true, status: true, failedStage: true, error: true, warning: true, pageCount: true,
-        charCount: true, usedOcrFallback: true, leaseExpiresAt: true, createdAt: true,
+        charCount: true, usedOcrFallback: true, leaseExpiresAt: true, createdAt: true, updatedAt: true,
       },
     }),
     prisma.$queryRaw<{ sourceId: string | null; topics: unknown; modules: unknown }[]>(
@@ -148,11 +150,11 @@ export async function getSpaceStatus(courseId: string, now: Date = new Date()): 
       id: s.id, originalName: s.originalName, sizeBytes: s.sizeBytes, bundle: s.bundle, status: s.status,
       stage: stageIndex >= 0 ? { index: stageIndex + 1, total: SOURCE_STAGES.length } : null,
       working,
-      progressText: progressText({ status: s.status, working, pageCount: s.pageCount, error: s.error }, c),
+      progressText: progressText({ status: s.status, working, pageCount: s.pageCount, error: s.error, isPdf: /\.pdf$/i.test(s.originalName) }, c),
       error: s.error, failedStage: s.failedStage, warning: s.warning, pageCount: s.pageCount, charCount: s.charCount,
       usedOcrFallback: s.usedOcrFallback, topicCount: c.topics, moduleCount: c.modules, notStudyTopicCount: c.notStudy,
       importedQuestionCount: c.imported, starterQuestionCount: c.starters, canRetry: s.status === 'failed' && !!s.failedStage,
-      createdAt: s.createdAt.toISOString(),
+      createdAt: s.createdAt.toISOString(), updatedAt: s.updatedAt.toISOString(),
     }
   })
 

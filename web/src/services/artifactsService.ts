@@ -8,6 +8,16 @@ import { resolveProfile } from '@/lib/studyspace/resolveProfile'
 import { summaryLink, topicFileLink } from '@/lib/fileLinks'
 import { findSummaryFile, newSummaryFilePath, summaryKey } from '@/server/storage'
 
+type UploadedTopic = { sourceId: string | null; pageStart: number | null; pageEnd: number | null; source?: { originalName: string; mimeType: string } | null }
+
+/** "engines.pdf · pages 3-4" / "engines.pdf · page 2" / "notes.md"; null for topics that did not come from an upload. */
+export function uploadedDetail(t: UploadedTopic): string | null {
+  if (!t.sourceId) return null
+  const name = t.source?.originalName ?? 'Uploaded file'
+  if (t.source?.mimeType !== 'application/pdf' || !t.pageStart) return name
+  return t.pageEnd && t.pageEnd !== t.pageStart ? `${name} · pages ${t.pageStart}-${t.pageEnd}` : `${name} · page ${t.pageStart}`
+}
+
 /**
  * Retrieves all courses and groups their resources (slides, transcriptions, exercises)
  * into a weekly structured hierarchy. With a courseId only that course is returned.
@@ -21,7 +31,7 @@ export async function getCourseArtifactsService(courseId?: string) {
   const topics = await prisma.topic.findMany({
     where: courseId ? { courseId } : undefined,
     orderBy: [{ week: 'asc' }, { order: 'asc' }], // module label first, outline order inside it
-    include: { course: true, exercises: { where: { origin: 'imported', status: 'active', isGraded: true }, select: { id: true } } }
+    include: { course: true, source: { select: { originalName: true, mimeType: true } }, exercises: { where: { origin: 'imported', status: 'active', isGraded: true }, select: { id: true } } }
   });
 
   const results = courses.map(course => {
@@ -58,7 +68,10 @@ export async function getCourseArtifactsService(courseId?: string) {
           unit: t.unit,
           className: t.className,
           resourceType: t.resourceType,
-          link: topicFileLink(t.id)
+          // Uploaded topics: the file and, for PDFs, the pages (the unit is only a position in the module). Imported ones keep unit and class name.
+          detail: uploadedDetail(t),
+          // An uploaded PDF topic opens at its first page; the two legacy studyspaces keep their plain links
+          link: topicFileLink(t.id, t.sourceId && t.pageStart ? { page: t.pageStart } : undefined)
         };
 
         const typeLower = (t.resourceType || '').toLowerCase();

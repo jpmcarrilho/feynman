@@ -1,6 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
-const { prismaMock, summaries, authed, pipeline } = vi.hoisted(() => ({
+const { prismaMock, summaries, authed, pipeline, outlineMock } = vi.hoisted(() => ({
+  outlineMock: { getOutline: vi.fn(), renameTopic: vi.fn(), renameModule: vi.fn(), mergeTopics: vi.fn(), reorderTopics: vi.fn(), moveTopicToModule: vi.fn() },
   prismaMock: { course: { findUnique: vi.fn() } },
   summaries: { listSpaceSummaries: vi.fn(), renameCourse: vi.fn() },
   authed: { value: true },
@@ -9,6 +10,7 @@ const { prismaMock, summaries, authed, pipeline } = vi.hoisted(() => ({
 vi.mock('@/lib/db', () => ({ prisma: prismaMock }))
 vi.mock('@/server/auth', () => ({ requireAuth: async () => { if (!authed.value) throw new Error('Unauthorized') } }))
 vi.mock('@/services/spaceSummaries', () => summaries)
+vi.mock('@/services/outlineService', () => outlineMock)
 vi.mock('@/services/spaceStatus', () => ({ getSpaceStatus: pipeline.getSpaceStatus }))
 vi.mock('@/services/studyspaceService', () => ({ createStudyspace: pipeline.createStudyspace }))
 vi.mock('@/server/ingest/runner', () => ({ wakeIfIdle: pipeline.wakeIfIdle }))
@@ -94,5 +96,34 @@ describe('pipeline actions', () => {
     expect(await deleteStudyspaceAction('c1', 'Title')).toEqual({ ok: true })
     expect(pipeline.deleteStudyspace).toHaveBeenCalledWith('c1', 'Title')
     expect(await deleteStudyspaceAction('', 'Title')).toEqual({ ok: false, reason: 'Studyspace not found.' })
+  })
+})
+
+describe('outline actions', () => {
+  it('forward to the outline service with the studyspace id, and need a session first', async () => {
+    const { getOutlineAction, renameTopicAction, renameModuleAction, mergeTopicsAction, reorderAction, moveTopicToModuleAction } = await import('./actions')
+    outlineMock.getOutline.mockResolvedValue({ ok: true, modules: [] })
+    outlineMock.mergeTopics.mockResolvedValue({ ok: true, id: 't1' })
+    outlineMock.renameTopic.mockResolvedValue({ ok: true })
+    expect(await getOutlineAction('c1')).toEqual({ ok: true, modules: [] })
+    expect(await getOutlineAction('')).toEqual({ ok: false, reason: 'Studyspace not found.' })
+    expect(await mergeTopicsAction('c1', ['a', 'b'])).toEqual({ ok: true, id: 't1' })
+    expect(outlineMock.mergeTopics).toHaveBeenCalledWith('c1', ['a', 'b'])
+    await renameTopicAction('c1', 't1', 'New')
+    expect(outlineMock.renameTopic).toHaveBeenCalledWith('c1', 't1', 'New')
+    await renameModuleAction('c1', '01 · A', 'B')
+    expect(outlineMock.renameModule).toHaveBeenCalledWith('c1', '01 · A', 'B')
+    await reorderAction('c1', ['a'])
+    expect(outlineMock.reorderTopics).toHaveBeenCalledWith('c1', ['a'])
+    await moveTopicToModuleAction('c1', 't1', '02 · B')
+    expect(outlineMock.moveTopicToModule).toHaveBeenCalledWith('c1', 't1', '02 · B')
+
+    authed.value = false
+    vi.clearAllMocks()
+    for (const call of [
+      () => getOutlineAction('c1'), () => renameTopicAction('c1', 't', 'x'), () => renameModuleAction('c1', 'a', 'b'),
+      () => mergeTopicsAction('c1', ['a', 'b']), () => reorderAction('c1', []), () => moveTopicToModuleAction('c1', 't', 'm'),
+    ]) await expect(call()).rejects.toThrow('Unauthorized')
+    for (const fn of Object.values(outlineMock)) expect(fn).not.toHaveBeenCalled()
   })
 })

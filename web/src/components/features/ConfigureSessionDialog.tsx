@@ -529,6 +529,7 @@ export function ConfigureSessionDialog({
                 <div key={t.id} className="flex items-start space-x-3 bg-background p-3.5 rounded-lg border shadow-sm hover:border-blue-400 transition-colors">
                   <Checkbox 
                     id={t.id} 
+                    aria-label={t.title}
                     checked={selectedTopics.includes(t.id)}
                     className="mt-1"
                     onCheckedChange={(c) => {

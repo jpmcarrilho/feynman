@@ -82,4 +82,10 @@ describe('SpaceCard', () => {
     expect(screen.getByText('14.750x Political Economy')).toBeInTheDocument()
     expect(renameStudyspaceAction).not.toHaveBeenCalled()
   })
+
+  it('links a studyspace without topics to its setup instead of Open', () => {
+    render(<SpaceCard space={{ ...space, topicCount: 0, moduleCount: 0, questionCount: 0 }} />)
+    expect(screen.getByRole('link', { name: /continue setup/i })).toHaveAttribute('href', '/spaces/space-1/setup')
+    expect(screen.queryByRole('link', { name: /^open$/i })).toBeNull()
+  })
 })

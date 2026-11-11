@@ -288,7 +288,9 @@ export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, s
                               <p className="text-xs font-semibold text-charcoal-graphite leading-tight truncate group-hover:text-lecture-red transition-colors duration-100">
                                 {slide.title}
                               </p>
-                              {slide.unit && (
+                              {slide.detail ? (
+                                <p className="text-[10px] text-muted-foreground">{slide.detail}</p>
+                              ) : slide.unit && (
                                 <p className="text-[10px] text-muted-foreground">Unit {slide.unit} {slide.className ? `• ${slide.className}` : ''}</p>
                               )}
                             </div>
@@ -322,7 +324,9 @@ export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, s
                               <p className="text-xs font-semibold text-charcoal-graphite leading-tight truncate group-hover:text-fountain-ink transition-colors duration-100">
                                 {transcript.title}
                               </p>
-                              {transcript.unit && (
+                              {transcript.detail ? (
+                                <p className="text-[10px] text-muted-foreground">{transcript.detail}</p>
+                              ) : transcript.unit && (
                                 <p className="text-[10px] text-muted-foreground">Unit {transcript.unit} {transcript.className ? `• ${transcript.className}` : ''}</p>
                               )}
                             </div>

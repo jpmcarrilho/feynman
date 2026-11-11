@@ -1,3 +1,5 @@
+import Link from 'next/link'
+import { Plus } from 'lucide-react'
 import { redirect } from 'next/navigation'
 import { checkIsAuthenticated } from '@/app/auth-actions'
 import { listStudyspacesAction } from '@/app/spaces/actions'
@@ -27,17 +29,19 @@ export default async function SpacesPage() {
           </div>
         </header>
 
-        {spaces.length === 0 ? (
-          <p className="rounded-xl border border-dashed border-charcoal-graphite/20 p-8 text-center text-sm text-charcoal-graphite/60 font-sans">
-            There are no studyspaces yet.
-          </p>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {spaces.map((space) => (
-              <SpaceCard key={space.id} space={space} />
-            ))}
-          </div>
-        )}
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          {spaces.map((space) => (
+            <SpaceCard key={space.id} space={space} />
+          ))}
+          <Link
+            href="/spaces/new"
+            className="flex min-h-40 flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-charcoal-graphite/25 p-6 text-center font-sans text-charcoal-graphite/70 transition-colors hover:border-charcoal-graphite/50 hover:bg-card hover:text-charcoal-graphite focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-fountain-ink"
+          >
+            <Plus className="size-6" aria-hidden />
+            <span className="text-base font-semibold">New studyspace</span>
+            <span className="text-xs">Upload your own notes, slides or PDFs.</span>
+          </Link>
+        </div>
 
         {overallDiagnosis && <OverallDiagnosis text={overallDiagnosis} />}
       </div>

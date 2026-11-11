@@ -85,7 +85,7 @@ export function SideVisualizer({
   return (
     <div className="w-full h-full flex flex-col relative z-40">
       <div className="p-4 border-b flex items-center justify-between bg-muted/20">
-        <div className="flex flex-col gap-0.5 min-w-0 max-w-[60%]">
+        <div className="flex flex-col gap-0.5 min-w-0 flex-1 mr-2">
           <h4 className="font-semibold text-sm truncate" title={activeFileTitle}>
             {activeFileTitle || 'Document Viewer'}
           </h4>
@@ -100,7 +100,7 @@ export function SideVisualizer({
             <Button 
               variant="ghost" 
               size="icon" 
-              className="h-8 w-8 text-muted-foreground hover:text-foreground shrink-0" 
+              className="hidden xl:inline-flex h-8 w-8 text-muted-foreground hover:text-foreground shrink-0" 
               onClick={onToggleExpand}
               title={isExpanded ? "Minimize panel width" : "Maximize panel width"}
             >
@@ -111,14 +111,14 @@ export function SideVisualizer({
             <Button 
               variant="ghost" 
               size="icon" 
-              className="h-8 w-8 text-muted-foreground hover:text-foreground shrink-0" 
+              className="hidden xl:inline-flex h-8 w-8 text-muted-foreground hover:text-foreground shrink-0" 
               onClick={onToggleFullWidth}
               title={isFullWidth ? "Exit full screen" : "View full screen"}
             >
               {isFullWidth ? <Minimize className="w-4 h-4" /> : <Maximize className="w-4 h-4" />}
             </Button>
           )}
-          <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground shrink-0" onClick={onCloseFile}>
+          <Button variant="ghost" size="icon" aria-label="Close file viewer" title="Close" className="h-10 w-10 xl:h-8 xl:w-8 text-muted-foreground hover:text-foreground shrink-0" onClick={onCloseFile}>
             <X className="w-4 h-4" />
           </Button>
         </div>

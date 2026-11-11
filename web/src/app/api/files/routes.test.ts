@@ -88,6 +88,34 @@ describe('file routes', () => {
     expect((await topicGET(req('/api/files/topic/t3'), ctx('topicId', 't3'))).status).toBe(404)
   })
 
+  it('topic route serves the topic\'s own content for a topic of an uploaded .md or .txt, not the whole file', async () => {
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce({ title: 'Sec', sourceId: 's1', localPath: null, content: '# Section\ntext' } as never)
+    vi.mocked(prisma.source.findUnique).mockResolvedValueOnce({ storageKey: 'sources/c/s1/original.md', mimeType: 'text/markdown' } as never)
+    const md = await topicGET(req('/api/files/topic/t1'), ctx('topicId', 't1'))
+    expect(md.status).toBe(200)
+    expect(md.headers.get('Content-Type')).toContain('text/markdown')
+    expect(await md.text()).toBe('# Section\ntext')
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce({ title: 'Sec', sourceId: 's2', localPath: null, content: 'plain' } as never)
+    vi.mocked(prisma.source.findUnique).mockResolvedValueOnce({ storageKey: 'sources/c/s2/original.txt', mimeType: 'text/plain' } as never)
+    const txt = await topicGET(req('/api/files/topic/t2'), ctx('topicId', 't2'))
+    expect(txt.headers.get('Content-Type')).toContain('text/plain')
+    expect(await txt.text()).toBe('plain')
+  })
+
+  it('topic route replaces huge stored content by a short message', async () => {
+    const huge = 'x'.repeat(2_000_001)
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce({ title: 'Slides PDF Error', sourceId: null, localPath: null, content: huge } as never)
+    const res = await topicGET(req('/api/files/topic/big'), ctx('topicId', 'big'))
+    expect(res.status).toBe(200)
+    expect(await res.text()).toBe('This file could not be imported, so there is nothing to show.')
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce({ title: 'Big md', sourceId: 's1', localPath: null, content: huge } as never)
+    vi.mocked(prisma.source.findUnique).mockResolvedValueOnce({ storageKey: 'k', mimeType: 'text/markdown' } as never)
+    const md = await topicGET(req('/api/files/topic/big2'), ctx('topicId', 'big2'))
+    expect((await md.text()).length).toBeLessThan(100)
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce({ title: 'ok', sourceId: null, localPath: null, content: 'x'.repeat(2_000_000) } as never)
+    expect((await (await topicGET(req('/api/files/topic/ok'), ctx('topicId', 'ok'))).text()).length).toBe(2_000_000)
+  })
+
   it('source route 404s for a missing row and for a key that escapes storage', async () => {
     vi.mocked(prisma.source.findUnique).mockResolvedValueOnce(null as never)
     expect((await sourceGET(req('/api/files/source/s1'), ctx('sourceId', 's1'))).status).toBe(404)

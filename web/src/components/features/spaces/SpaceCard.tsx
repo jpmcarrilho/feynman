@@ -3,7 +3,7 @@
 import { useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
-import { Pencil, PlayCircle } from 'lucide-react'
+import { Pencil, PlayCircle, Settings2 } from 'lucide-react'
 import { Button, buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -124,13 +124,26 @@ export function SpaceCard({ space }: { space: SpaceSummary }) {
             <dd data-testid="accuracy">{space.accuracy === null ? 'No answers yet' : `${space.accuracy}%`}</dd>
           </div>
         </dl>
-        <Link
-          href={`/spaces/${space.id}`}
-          className={buttonVariants({ className: 'h-11 w-full gap-2 bg-lecture-red text-white hover:bg-lecture-red/90 border-0 shadow-sm font-semibold text-base' })}
-        >
-          <PlayCircle className="size-5" />
-          Open
-        </Link>
+        {space.topicCount === 0 ? (
+          <>
+            <p className="text-xs text-charcoal-graphite/65">Setup is not finished: no topics yet.</p>
+            <Link
+              href={`/spaces/${space.id}/setup`}
+              className={buttonVariants({ className: 'h-11 w-full gap-2 bg-lecture-red text-white hover:bg-lecture-red/90 border-0 shadow-sm font-semibold text-base' })}
+            >
+              <Settings2 className="size-5" />
+              Continue setup
+            </Link>
+          </>
+        ) : (
+          <Link
+            href={`/spaces/${space.id}`}
+            className={buttonVariants({ className: 'h-11 w-full gap-2 bg-lecture-red text-white hover:bg-lecture-red/90 border-0 shadow-sm font-semibold text-base' })}
+          >
+            <PlayCircle className="size-5" />
+            Open
+          </Link>
+        )}
       </CardContent>
     </Card>
   )

@@ -8,6 +8,8 @@ import { listSpaceSummaries, renameCourse, type SpaceSummary } from '@/services/
 import { createStudyspace, type CreateSpaceResult } from '@/services/studyspaceService'
 import { getSpaceStatus, type SpaceStatus } from '@/services/spaceStatus'
 import type { AdminResult } from '@/server/ingest/admin'
+import * as outline from '@/services/outlineService'
+import type { OutlineReadResult, OutlineResult, MergeResult } from '@/services/outlineService'
 
 const MAX_NAME_LENGTH = 120
 
@@ -83,4 +85,43 @@ export async function removeSourceAction(sourceId: string): Promise<AdminResult>
   if (typeof sourceId !== 'string' || !sourceId) return { ok: false, reason: 'File not found.' }
   const { removeSource } = await import('@/server/ingest/admin')
   return removeSource(sourceId)
+}
+
+// --- Outline (T24) ---------------------------------------------------------------------------------------------------
+// Every id is checked against the given studyspace in the service; refusals come back as { ok: false, reason }.
+
+/** Modules with their topics in order. */
+export async function getOutlineAction(courseId: string): Promise<OutlineReadResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
+  return outline.getOutline(courseId)
+}
+
+export async function renameTopicAction(courseId: string, topicId: string, title: string): Promise<OutlineResult> {
+  await requireAuth()
+  return outline.renameTopic(courseId, topicId, title)
+}
+
+/** `from` is the stored label of the module ("02 · Title"), `to` the new title; the number prefix stays. */
+export async function renameModuleAction(courseId: string, from: string, to: string): Promise<OutlineResult> {
+  await requireAuth()
+  return outline.renameModule(courseId, from, to)
+}
+
+/** Merges adjacent topics of one file (same module) into the first; returns the kept topic. */
+export async function mergeTopicsAction(courseId: string, topicIds: string[]): Promise<MergeResult> {
+  await requireAuth()
+  return outline.mergeTopics(courseId, topicIds)
+}
+
+/** `orderedTopicIds` lists every topic of the studyspace once; modules are ordered by their first topic. */
+export async function reorderAction(courseId: string, orderedTopicIds: string[]): Promise<OutlineResult> {
+  await requireAuth()
+  return outline.reorderTopics(courseId, orderedTopicIds)
+}
+
+/** Moves a topic to the end of another module (`module` is the stored label of that module). */
+export async function moveTopicToModuleAction(courseId: string, topicId: string, module: string): Promise<OutlineResult> {
+  await requireAuth()
+  return outline.moveTopicToModule(courseId, topicId, module)
 }

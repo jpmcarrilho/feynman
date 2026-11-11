@@ -1,4 +1,5 @@
 import { prisma } from '@/lib/db'
+import { MAX_SPACE_NAME_LENGTH, MAX_SPACE_GOAL_LENGTH } from '@/lib/spaceLimits'
 import { defaultProfile, type TutorProfile } from '@/lib/studyspace/profile'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import { resolveProfile } from '@/lib/studyspace/resolveProfile'
@@ -10,6 +11,11 @@ export async function getCourseWithProfile(courseId: string): Promise<CourseWith
   const course = await prisma.course.findUnique({ where: { id: courseId } })
   if (!course) return null
   return { id: course.id, code: course.code, title: course.title, profile: resolveProfile(course) }
+}
+
+/** True when the studyspace has at least one topic (otherwise it is still being set up). */
+export async function courseHasTopics(courseId: string): Promise<boolean> {
+  return (await prisma.topic.count({ where: { courseId } })) > 0
 }
 
 /** Profile for a course; a neutral default when the course is unknown. */
@@ -40,8 +46,7 @@ export async function getProfileForCourses(
 
 // --- Creating a studyspace (T23) -------------------------------------------------------------------------------------
 
-export const MAX_SPACE_NAME_LENGTH = 80
-export const MAX_SPACE_GOAL_LENGTH = 300
+export { MAX_SPACE_NAME_LENGTH, MAX_SPACE_GOAL_LENGTH }
 
 /** Lower-case ASCII slug of a name for `Course.code` ("Organic Chem II" -> "organic-chem-ii"); "space" when nothing is left. Pure. */
 export function slugifyName(name: string): string {

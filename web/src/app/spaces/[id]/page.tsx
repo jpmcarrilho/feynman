@@ -1,6 +1,6 @@
 import { notFound, redirect } from 'next/navigation'
 import { checkIsAuthenticated } from '@/app/auth-actions'
-import { getCourseWithProfile } from '@/services/studyspaceService'
+import { getCourseWithProfile, courseHasTopics } from '@/services/studyspaceService'
 import { StudyInterface } from '@/components/features/StudyInterface'
 
 export const dynamic = 'force-dynamic'
@@ -16,6 +16,11 @@ export default async function SpacePage({ params }: { params: Promise<{ id: stri
   const course = await getCourseWithProfile(id)
   if (!course) {
     notFound()
+  }
+
+  // A studyspace without topics is still being set up
+  if (!(await courseHasTopics(course.id))) {
+    redirect(`/spaces/${course.id}/setup`)
   }
 
   // key: moving from one studyspace to another remounts the interface, so no state of the first one survives

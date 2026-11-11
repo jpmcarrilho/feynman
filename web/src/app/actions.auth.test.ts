@@ -72,7 +72,7 @@ describe('server actions require authentication', () => {
   })
 
   it('covers every exported action in spaces/actions.ts', () => {
-    expect(spaceActionNames.length).toBeGreaterThanOrEqual(8)
+    expect(spaceActionNames.length).toBeGreaterThanOrEqual(14)
   })
 
   it.each(spaceActionNames)('spaces %s rejects with Unauthorized and does not touch the database', async (name) => {

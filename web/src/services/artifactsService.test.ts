@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { getCourseArtifactsService, generateWeekSummaryService } from './artifactsService'
+import { getCourseArtifactsService, generateWeekSummaryService, uploadedDetail } from './artifactsService'
 import { generateText } from 'ai'
 import { prisma } from '@/lib/db'
 import fs from 'fs'
@@ -184,5 +184,30 @@ describe('generateWeekSummaryService', () => {
     expect(fs.readFileSync).toHaveBeenCalled()
     expect(generateText).not.toHaveBeenCalled()
     expect(result.content).toBe('# 📓 Existing Feynman Study Guide')
+  })
+})
+describe('getCourseArtifactsService topic links', () => {
+  it('opens an uploaded topic at its first page and leaves legacy topics (no source) with a plain link', async () => {
+    vi.mocked(prisma.course.findMany).mockResolvedValue([{ id: 'c1', code: 'c1', title: 'T' }] as never)
+    const topic = (id: string, over: object) => ({ id, courseId: 'c1', week: '01 · A', title: id, unit: '1', className: 'f', resourceType: 'Uploaded PDF', localPath: null, exercises: [], sourceId: null, pageStart: null, ...over })
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([
+      topic('up', { sourceId: 's1', pageStart: 7 }),
+      topic('up-text', { sourceId: 's2', pageStart: null, resourceType: 'Uploaded text' }),
+      topic('legacy', { resourceType: 'Slides', pageStart: 3 }),
+    ] as never)
+    const [course] = await getCourseArtifactsService('c1')
+    const links = Object.fromEntries([...course.weeks[0].slides, ...course.weeks[0].transcriptions].map((r: { id: string; link: string }) => [r.id, r.link]))
+    expect(links).toEqual({ up: '/api/files/topic/up#page=7', 'up-text': '/api/files/topic/up-text', legacy: '/api/files/topic/legacy' })
+  })
+})
+
+describe('uploadedDetail', () => {
+  const pdf = { originalName: 'engines.pdf', mimeType: 'application/pdf' }
+  it('shows file and pages for uploaded PDFs, the file only for text, nothing for imported topics', () => {
+    expect(uploadedDetail({ sourceId: 's', pageStart: 3, pageEnd: 4, source: pdf })).toBe('engines.pdf · pages 3-4')
+    expect(uploadedDetail({ sourceId: 's', pageStart: 2, pageEnd: 2, source: pdf })).toBe('engines.pdf · page 2')
+    expect(uploadedDetail({ sourceId: 's', pageStart: 2, pageEnd: null, source: pdf })).toBe('engines.pdf · page 2')
+    expect(uploadedDetail({ sourceId: 's', pageStart: 1, pageEnd: 2, source: { originalName: 'n.md', mimeType: 'text/markdown' } })).toBe('n.md')
+    expect(uploadedDetail({ sourceId: null, pageStart: 3, pageEnd: 4 })).toBeNull()
   })
 })

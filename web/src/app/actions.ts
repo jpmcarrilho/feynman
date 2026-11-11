@@ -1,5 +1,6 @@
 'use server'
 
+import { buildSessionTitle } from '@/lib/sessionTitle';
 import { generateText, generateObject } from 'ai'
 import { textModel } from '@/lib/ai'
 import { prisma } from '@/lib/db'
@@ -366,34 +367,14 @@ export async function startSession(input: StartSessionInput): Promise<SessionSta
     selected = [];
   }
 
-  // Determine a descriptive title based on selected courses and weeks
-  let sessionTitle = mode === 'exam' ? "Timed Exam Session" : "Random Study Session";
-  if (topicIds.length > 0) {
-    const selectedTopicsData = await prisma.topic.findMany({
-      where: { id: { in: topicIds } },
-      include: { course: true }
-    });
-    
-    const courseCodes = Array.from(new Set(selectedTopicsData.map(t => t.course?.code).filter(Boolean)));
-    const weeks = Array.from(new Set(selectedTopicsData.map(t => {
-      const w = t.week || "";
-      const match = w.match(/Week_(\d+)/i) || w.match(/Week\s*(\d+)/i);
-      if (match) {
-        return `Week ${parseInt(match[1])}`;
-      }
-      return w.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
-    }).filter(Boolean)));
-
-    const typePrefix = mode === 'exam' ? "Exam" : "Study";
-
-    if (courseCodes.length > 0 && weeks.length > 0) {
-      sessionTitle = `${courseCodes.join(', ')} - ${weeks.join(', ')} (${typePrefix})`;
-    } else if (courseCodes.length > 0) {
-      sessionTitle = `${courseCodes.join(', ')} ${typePrefix} Session`;
-    } else if (weeks.length > 0) {
-      sessionTitle = `${weeks.join(', ')} ${typePrefix} Session`;
-    }
-  }
+  // Determine a descriptive title based on selected courses and weeks (the title of the studyspace for uploaded ones)
+  const titleTopics = topicIds.length > 0
+    ? await prisma.topic.findMany({
+        where: { id: { in: topicIds } },
+        select: { week: true, sourceId: true, course: { select: { code: true, title: true } } },
+      })
+    : [];
+  const sessionTitle = buildSessionTitle(mode, titleTopics);
 
   // The session always stores a course. Scoped: that course. Unscoped: the course with most of the selected topics
   // (ties: the first selected topic's course); with no topics selected, the course with most of the drawn questions.

@@ -86,3 +86,13 @@ describe('progressText', () => {
     expect(progressText({ status: 'segmenting', working: false, pageCount: null, error: null }, c)).toBe('Waiting to continue splitting into topics…')
   })
 })
+
+describe('progressText pages', () => {
+  const base = { status: 'segmenting', working: true, error: null }
+  const c = { topics: 0, imported: 0, starters: 0 }
+  it('uses the singular, and names no pages for text files', () => {
+    expect(progressText({ ...base, pageCount: 1 }, c)).toBe('Splitting 1 page into topics…')
+    expect(progressText({ ...base, pageCount: 42 }, c)).toBe('Splitting 42 pages into topics…')
+    expect(progressText({ ...base, pageCount: 4, isPdf: false }, c)).toBe('Splitting into topics…')
+  })
+})

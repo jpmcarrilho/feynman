@@ -16,6 +16,9 @@ export const MAX_OCR_PAGES = 300
 export const OCR_RANGE_SIZE = 15
 /** Synthetic page size of .txt / .md files. */
 export const TEXT_PAGE_CHARS = 4000
+/** Stored topic text above this size is not sent to the viewer (two imported topics hold ~40 MB of JSON as "content"). */
+export const MAX_SERVED_CONTENT_CHARS = 2_000_000
+export const CONTENT_TOO_LARGE_MESSAGE = 'This file could not be imported, so there is nothing to show.'
 /** A topic's content is split into parts above this size (used by segmentation). */
 export const MAX_TOPIC_CHARS = 120_000
 
