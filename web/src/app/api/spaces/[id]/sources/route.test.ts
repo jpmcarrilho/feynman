@@ -92,7 +92,7 @@ describe('POST /api/spaces/[id]/sources', () => {
     expect(body.sources.map((s: { originalName: string; status: string }) => [s.originalName, s.status])).toEqual([['a.txt', 'uploaded'], ['b.md', 'uploaded']])
     expect(queued.ids).toEqual(body.sources.map((s: { id: string }) => s.id))
     const rows = await prisma.source.findMany({ where: { courseId } })
-    expect(rows.every((r) => r.bundle === 'later')).toBe(true)
+    expect(rows.every((r) => r.bundle === 'initial')).toBe(true) // no tutor yet: the server ignores the requested bundle
     for (const r of rows) expect(fs.existsSync(path.join(env.dir, 'storage', r.storageKey))).toBe(true)
   })
 

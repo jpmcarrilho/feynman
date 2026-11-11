@@ -147,10 +147,33 @@ export async function acceptProfile(
   return { ok: true, starters: requested ? 'requested' : 'not_needed' }
 }
 
-/** Drops the stored suggestion (Ignore on an update, or discarding a proposal). The accepted profile is never touched. */
-export async function dismissSuggestion(courseId: string): Promise<{ ok: true } | PersonaFailure> {
-  const done = await prisma.course.updateMany({ where: { id: courseId }, data: { profileSuggestion: null } })
-  return done.count === 1 ? { ok: true } : { ok: false, reason: 'Studyspace not found.' }
+export const SUGGESTION_CHANGED_REASON = 'This suggestion was replaced by a newer one. Reload the page to see it.'
+
+/**
+ * Drops the stored suggestion (Ignore on an update, or discarding a proposal). The accepted profile is never touched. With
+ * `createdAt` (the suggestion the owner was looking at) a newer suggestion that replaced it meanwhile is left alone.
+ */
+export async function dismissSuggestion(courseId: string, createdAt?: string): Promise<{ ok: true } | PersonaFailure> {
+  const course = await prisma.course.findUnique({ where: { id: courseId }, select: { profileSuggestion: true } })
+  if (!course) return { ok: false, reason: 'Studyspace not found.' }
+  if (createdAt !== undefined && parseSuggestion(course.profileSuggestion)?.createdAt !== createdAt) return { ok: true }
+  await prisma.course.updateMany({ where: { id: courseId }, data: { profileSuggestion: null } })
+  return { ok: true }
+}
+
+/**
+ * Accept on a suggested update: applies exactly the stored suggestion through acceptProfile (the same validation and write as a save of
+ * the tutor card; the suggestion is cleared by it). `createdAt` names the suggestion the owner saw; if another one was stored since,
+ * nothing is applied. No starter run is requested: an update changes how new questions are made, not the questions that exist.
+ */
+export async function acceptUpdateSuggestion(courseId: string, createdAt: string): Promise<{ ok: true } | PersonaFailure> {
+  const course = await prisma.course.findUnique({ where: { id: courseId }, select: { profileSuggestion: true } })
+  if (!course) return { ok: false, reason: 'Studyspace not found.' }
+  const stored = parseSuggestion(course.profileSuggestion)
+  if (!stored || stored.kind !== 'update') return { ok: false, reason: 'There is no suggested update to accept. It may have been handled already; reload the page.' }
+  if (stored.createdAt !== createdAt) return { ok: false, reason: SUGGESTION_CHANGED_REASON }
+  const result = await acceptProfile(courseId, stored.profile, { requestStarters: async () => false })
+  return result.ok ? { ok: true } : result
 }
 
 /** "Keep together": the stored proposal stays, only its split offer goes. */

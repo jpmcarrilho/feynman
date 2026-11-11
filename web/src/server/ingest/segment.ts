@@ -620,7 +620,19 @@ export function notStudyMaterialReason(title: string): string {
   return `${NOT_STUDY_MATERIAL_PREFIX}: front matter or course logistics, classified when the file was segmented ("${title.slice(0, 80)}").`
 }
 
-const UPLOADED_WEEK_RE = /^\d+ · /
+const UPLOADED_WEEK_RE = /^(\d+) · /
+
+/**
+ * Number of the last module that comes before a new source: the largest "NN · " prefix among the module labels, or the number of
+ * distinct labels when that is larger (the two imported studyspaces have labels without a number, so a file added to one gets the
+ * next number after their modules). Labels already in the course are never touched; only the new rows use this.
+ */
+export function moduleNumberBase(weeks: (string | null)[]): number {
+  const labels = new Set(weeks.filter((w): w is string => !!w))
+  let highest = 0
+  for (const w of labels) highest = Math.max(highest, Number(UPLOADED_WEEK_RE.exec(w)?.[1] ?? 0))
+  return Math.max(highest, labels.size)
+}
 
 // ---------------------------------------------------------------------------------------------------------------------
 // segmentSource
@@ -719,9 +731,11 @@ export async function segmentSource(sourceId: string, deps: { generate?: Generat
         base = (agg._max.order ?? -1) + 1
       }
       const before = await tx.topic.findMany({
-        where: { courseId: source.courseId, NOT: { sourceId }, order: { lt: base }, week: { not: null } }, select: { week: true }, distinct: ['week'],
+        // `NOT: { sourceId }` alone would skip the imported rows: in SQL, NULL <> 'id' is not true
+        where: { courseId: source.courseId, OR: [{ sourceId: null }, { sourceId: { not: sourceId } }], order: { lt: base }, week: { not: null } },
+        select: { week: true }, distinct: ['week'],
       })
-      const moduleBase = before.filter((t) => t.week && UPLOADED_WEEK_RE.test(t.week)).length
+      const moduleBase = moduleNumberBase(before.map((t) => t.week))
 
       const plan = planTopicRows(normalized.modules, pages, moduleBase)
       if (old.length > 0) {

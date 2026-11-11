@@ -186,7 +186,7 @@ function StarterPanel({ courseId, initial, onStudy, onRetry }: { courseId: strin
  * The tutor card: shows the proposal (or the accepted tutor) and lets the owner edit every field. Used by the setup wizard after the
  * outline and by the tutor settings page. `onStudy` opens the study page.
  */
-export function PersonaCard({ courseId, onStudy, onBack, initial }: { courseId: string; onStudy: () => void; onBack?: () => void; initial?: PersonaStep }) {
+export function PersonaCard({ courseId, onStudy, onBack, onRenamed, initial }: { courseId: string; onStudy: () => void; onBack?: () => void; /** Called with the new title of this studyspace after a split, so the page header can show it at once. */ onRenamed?: (title: string) => void; initial?: PersonaStep }) {
   const [first] = useState(() => (initial ? viewOf(initial) : null))
   const [phase, setPhase] = useState<'loading' | 'error' | 'ready'>(initial ? 'ready' : 'loading')
   const [reason, setReason] = useState('')
@@ -337,7 +337,8 @@ export function PersonaCard({ courseId, onStudy, onBack, initial }: { courseId: 
       const names = step.split.groups.map((g, i) => (splitNames[i] ?? g.label).trim().replace(/\s+/g, ' '))
       const badName = names.findIndex((n) => !n || n.length > MAX_SPACE_NAME_LENGTH)
       if (badName >= 0) {
-        setMessage(`Each studyspace needs a name of 1 to ${MAX_SPACE_NAME_LENGTH} characters (check group ${badName + 1}).`)
+        const field = badName === 0 ? 'Name of the studyspace that stays' : `Name of new studyspace ${badName}`
+        setMessage(`Each studyspace needs a name of 1 to ${MAX_SPACE_NAME_LENGTH} characters. Check the field “${field}”.`)
         return
       }
       const result = await splitStudyspaceAction(courseId, step.split.groups.map((g, i) => ({ label: names[i], sourceIds: g.sources.map((x) => x.id) })))
@@ -346,6 +347,7 @@ export function PersonaCard({ courseId, onStudy, onBack, initial }: { courseId: 
         return
       }
       setSplitDone({ kept: result.keptTitle, created: result.created })
+      onRenamed?.(result.keptTitle)
       setPhase('loading')
       await fetchStep(() => getPersonaStepAction(courseId))
     } catch {

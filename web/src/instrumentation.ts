@@ -6,6 +6,9 @@ export async function register() {
   // `next build` loads the app to collect page data; it must not start any work
   if (process.env.NEXT_PHASE === 'phase-production-build') return
   const { resumePendingSources } = await import('@/server/ingest/runner')
+  // Suggests a tutor update when a file added later is ready (never changes the tutor itself)
+  const { registerProfileUpdateHook } = await import('@/server/ingest/profileUpdateHook')
+  registerProfileUpdateHook()
   void resumePendingSources()
     .then((queued) => {
       if (queued.sources + queued.starters > 0) console.log(`[ingest] resuming ${queued.sources} file(s) and ${queued.starters} starter job(s)`)

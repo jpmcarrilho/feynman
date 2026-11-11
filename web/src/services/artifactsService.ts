@@ -101,6 +101,17 @@ export async function getCourseArtifactsService(courseId?: string) {
       };
     });
 
+    // Modules made only of uploaded files come after the imported ones, in outline order (their labels need not sort like the imported
+    // labels: a file added to an imported studyspace gets "17 · Title", which sorts before "Week_01..."). Imported modules keep their order.
+    const uploadedOnly = (weekName: string) => (weeksMap.get(weekName) ?? []).every((t) => t.sourceId)
+    const firstOrder = (weekName: string) => Math.min(...(weeksMap.get(weekName) ?? []).map((t) => t.order))
+    weeksList.sort((a, b) => {
+      const ua = uploadedOnly(a.weekName)
+      const ub = uploadedOnly(b.weekName)
+      if (ua !== ub) return ua ? 1 : -1
+      return ua ? firstOrder(a.weekName) - firstOrder(b.weekName) : 0
+    })
+
     // Filter out any courses that have no weeks/materials
     return {
       courseId: course.id,

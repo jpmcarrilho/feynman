@@ -24,5 +24,5 @@ export default async function SpacePage({ params }: { params: Promise<{ id: stri
   }
 
   // key: moving from one studyspace to another remounts the interface, so no state of the first one survives
-  return <StudyInterface key={course.id} courseId={course.id} courseTitle={course.title} profile={course.profile} />
+  return <StudyInterface key={course.id} courseId={course.id} courseTitle={course.title} profile={course.profile} updateSuggestion={course.updateSuggestion ?? null} />
 }

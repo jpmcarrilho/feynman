@@ -14,11 +14,12 @@ import {
 import { readSourceFile, readPages, writePages, removeStaleTempFiles } from '@/server/storage'
 import { OcrPagesSchema, type PagesFile } from './schemas'
 import {
-  cleanPageText, isNoisePage, dehyphenate, stripRepeatedLines, isSparse, pageRanges, pageChars, splitTextIntoPages,
+  cleanPageText, isNoisePage, dehyphenate, stripRepeatedLines, isSparse, pageRanges, pageChars, splitTextIntoPages, splitMarkdownIntoPages,
 } from './cleanText'
+import { HTML_MIN_TEXT_CHARS, stripHtmlIfEvident } from './htmlText'
 
 export * from '@/lib/ingestLimits'
-export { splitTextIntoPages, isSparse, pageRanges } from './cleanText'
+export { splitTextIntoPages, splitMarkdownIntoPages, isSparse, pageRanges } from './cleanText'
 
 /** An expected failure with a message that tells the student what is wrong and what to do. */
 export class ExtractionError extends Error {
@@ -131,14 +132,25 @@ function extractTextPages(bytes: Uint8Array, markdown: boolean): Extracted {
   if (decoded.text.length > MAX_EXTRACTED_CHARS * 1.05 + 1000) {
     throw new ExtractionError(TOO_LONG_MESSAGE(decoded.text.length))
   }
-  const chunks = splitTextIntoPages(decoded.text, { markdown })
+  // A saved web page: keep only its readable text, or refuse it when too little is left to study from
+  const html = stripHtmlIfEvident(decoded.text)
+  if (html.wasHtml && html.text.replace(/\s+/g, ' ').length < HTML_MIN_TEXT_CHARS) {
+    throw new ExtractionError(
+      `This file is a saved web page (HTML) and only ${html.text.replace(/\s+/g, ' ').length} characters of readable text are left after removing the page code, which is too little to study from. Open the page, copy the article text into a .txt or .md file, or print the page to PDF, and upload that instead.`,
+    )
+  }
+  const chunks = markdown ? splitMarkdownIntoPages(html.text) : splitTextIntoPages(html.text, { markdown: false })
   const noisy = chunks.filter(isNoisePage).length
   const texts = chunks.map((p) => cleanPageText(p, { keepIndent: true, markdown })).filter((t) => t !== '')
   if (noisy > 0 && texts.length === 0) {
     throw new ExtractionError('This file does not contain readable text (it looks like binary data). Upload a .txt or .md file saved as plain text, or a PDF.')
   }
   const pages = texts.map((text, i) => ({ n: i + 1, text }))
-  const warnings = [decoded.warning, noisy > 0 ? `${noisy} unreadable section(s) of the file were skipped.` : null].filter(Boolean)
+  const warnings = [
+    decoded.warning,
+    html.wasHtml ? `The file is a saved web page; its scripts, styles and tags were removed (${Math.round(html.strippedShare * 100)}% of the file).` : null,
+    noisy > 0 ? `${noisy} unreadable section(s) of the file were skipped.` : null,
+  ].filter(Boolean)
   return { pages, ocr: false, warning: warnings.length ? warnings.join(' ') : null }
 }
 

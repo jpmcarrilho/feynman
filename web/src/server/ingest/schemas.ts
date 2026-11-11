@@ -54,6 +54,9 @@ export const ImportedQuestionSchema = z.object({
   questionText: z.string(),
   exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
   choices: z.array(z.string()),
+  /** 0-based indexes into `choices` of the correct options (one for single choice and dropdown, one or more for multiple choice, none for numeric). Code derives the stored answer from them. */
+  correctChoiceIndexes: z.array(z.number().int()),
+  /** The number for numeric questions; "" for every choice type. */
   correctAnswer: z.string(),
   explanation: z.string(),
   answerQuote: z.string(),

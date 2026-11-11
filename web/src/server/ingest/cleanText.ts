@@ -268,3 +268,53 @@ export function splitTextIntoPages(text: string, opts: { markdown: boolean; targ
   }
   return pages
 }
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Markdown: pseudo-pages that follow the headings
+// ---------------------------------------------------------------------------------------------------------------------
+
+/** A Markdown section shorter than this (trimmed) is merged with the next one, so a heading alone never becomes a page. */
+export const MD_MIN_SECTION_CHARS = 200
+
+/** Start offsets of the `#` and `##` heading lines of a Markdown text, ignoring lines inside ``` / ~~~ fenced blocks. */
+function headingStarts(text: string): number[] {
+  const starts: number[] = []
+  let inFence = false
+  let pos = 0
+  for (const line of text.split('\n')) {
+    if (/^\s{0,3}(```|~~~)/.test(line)) inFence = !inFence
+    else if (!inFence && /^#{1,2}[ \t]+\S/.test(line)) starts.push(pos)
+    pos += line.length + 1
+  }
+  return starts
+}
+
+/**
+ * Pseudo-pages of a Markdown file: a new page starts at every `#` or `##` heading (headings inside fenced code are not
+ * headings). A section shorter than MD_MIN_SECTION_CHARS is merged with the next one (the last one, with the one before),
+ * and a page above `target` characters is cut by splitTextIntoPages, so the size cap of plain text still holds. A file with
+ * no such heading is cut exactly as splitTextIntoPages cuts it. No text is lost: the pages concatenate to the input.
+ */
+export function splitMarkdownIntoPages(text: string, opts: { target?: number; minSection?: number } = {}): string[] {
+  const target = opts.target ?? TEXT_PAGE_CHARS
+  const minSection = opts.minSection ?? MD_MIN_SECTION_CHARS
+  const starts = headingStarts(text)
+  if (starts.length === 0) return splitTextIntoPages(text, { markdown: true, target })
+
+  const cuts = [...new Set([0, ...starts])].sort((a, b) => a - b)
+  const sections = cuts.map((from, i) => text.slice(from, i + 1 < cuts.length ? cuts[i + 1] : text.length))
+  const merged: string[] = []
+  let carry = ''
+  for (const section of sections) {
+    carry += section
+    if (carry.trim().length >= minSection) {
+      merged.push(carry)
+      carry = ''
+    }
+  }
+  if (carry !== '') {
+    if (merged.length > 0) merged[merged.length - 1] += carry
+    else merged.push(carry)
+  }
+  return merged.flatMap((page) => (page.length > target ? splitTextIntoPages(page, { markdown: true, target }) : [page]))
+}

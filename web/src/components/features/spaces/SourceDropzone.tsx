@@ -159,7 +159,7 @@ export function SourceDropzone({
                 </p>
               </div>
               {(item.state === 'refused' || item.state === 'accepted') && (
-                <Button type="button" variant="ghost" size="icon" aria-label={`Dismiss ${item.file.name}`} title="Dismiss" className="size-8 shrink-0" onClick={() => setItems((prev) => prev.filter((i) => i.key !== item.key))}>
+                <Button type="button" variant="ghost" size="icon" aria-label={`Dismiss ${item.file.name}`} title="Dismiss" className="size-10 shrink-0 sm:size-8" onClick={() => setItems((prev) => prev.filter((i) => i.key !== item.key))}>
                   <X className="size-4" />
                 </Button>
               )}

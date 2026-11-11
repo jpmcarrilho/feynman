@@ -51,6 +51,24 @@ export const ProfileProposalModelSchema = z.object({
   subjectGroups: z.array(z.object({ label: z.string(), sourceIds: z.array(z.string()) })),
 })
 
+// What the model returns when it is asked whether a new file calls for a change of the accepted tutor (T26). It always returns the
+// full set of fields it may change (unchanged ones copied), so the schema has no optional or nullable fields; code works out what
+// differs. Tone, tone notes, chat mode, calibration module and exam preset are the owner's choices and are not in it.
+export const ProfileUpdateModelSchema = z.object({
+  changeWarranted: z.boolean(),
+  rationale: z.string(),
+  subject: z.string(),
+  level: TutorProfileSchema.shape.level,
+  tutorIdentity: z.string(),
+  analogyDomains: z.array(z.string()),
+  quantitative: z.boolean(),
+  questionTypeMix: QuestionTypeMixSchema,
+  quantitativeQuestionTypeMix: QuestionTypeMixSchema,
+  contentLanguage: z.string(),
+  sampleConcept: z.string(),
+  sampleExplanation: z.string(),
+})
+
 export const ProfileSuggestionSchema = z.object({
   kind: z.enum(['initial', 'update']),
   createdAt: z.string(),

@@ -2,6 +2,7 @@
 import { Prisma } from '@prisma/client'
 import { prisma } from '@/lib/db'
 import { NOT_STUDY_MATERIAL_PREFIX } from '@/services/exerciseGenerator'
+import { isUpdateCheckPending } from '@/server/ingest/updateCheckState'
 
 export const SOURCE_STAGES = ['uploaded', 'extracting', 'segmenting', 'importing_questions', 'generating_exercises'] as const
 
@@ -48,6 +49,8 @@ export type SpaceStatus = {
   starterProgress: { topicsWithQuestions: number; studyTopics: number }
   hasProfile: boolean
   profileSuggestion: { kind: 'initial' | 'update'; createdAt: string } | null
+  /** The tutor-update check of a file added later is running or queued (the page keeps asking until it has settled). */
+  updateCheckPending: boolean
   outline: { modules: number; topics: number }
   serverTime: string
 }
@@ -178,6 +181,7 @@ export async function getSpaceStatus(courseId: string, now: Date = new Date()): 
     starterProgress: { studyTopics: num(progressRows[0]?.studyTopics), topicsWithQuestions: num(progressRows[0]?.withQuestions) },
     hasProfile: !!course.profile,
     profileSuggestion: suggestion,
+    updateCheckPending: isUpdateCheckPending(course.id),
     outline: { modules: totalModules, topics: totalTopics },
     serverTime: now.toISOString(),
   }

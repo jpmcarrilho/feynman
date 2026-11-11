@@ -1,6 +1,7 @@
 import { notFound, redirect } from 'next/navigation'
 import { checkIsAuthenticated } from '@/app/auth-actions'
 import { getSpaceStatus } from '@/services/spaceStatus'
+import { getCourseWithProfile } from '@/services/studyspaceService'
 import { readStoredPersonaStep } from '@/server/ingest/persona'
 import { TutorSettingsView } from '@/components/features/spaces/TutorSettingsView'
 
@@ -21,9 +22,11 @@ export default async function SpaceTutorPage({ params }: { params: Promise<{ id:
     redirect(`/spaces/${status.courseId}/setup`)
   }
   const initialPersona = await readStoredPersonaStep(status.courseId)
+  // A tutor update suggested after a file was added, waiting for the owner's decision
+  const updateSuggestion = (await getCourseWithProfile(status.courseId))?.updateSuggestion ?? null
   return (
     <main className="min-h-screen bg-background px-4 py-8 sm:px-8 sm:py-12">
-      <TutorSettingsView key={status.courseId} courseId={status.courseId} title={status.title} initialPersona={initialPersona} />
+      <TutorSettingsView key={status.courseId} courseId={status.courseId} title={status.title} initialPersona={initialPersona} updateSuggestion={updateSuggestion} />
     </main>
   )
 }

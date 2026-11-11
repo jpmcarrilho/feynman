@@ -14,6 +14,7 @@ import { extensionOf, checkUploadList, mimeTypeForExtension, sanitizeFileName, t
 import { writeSourceBlob, removeSourceFiles } from '@/server/storage'
 import { sniffUploadHead, UPLOAD_SNIFF_BYTES } from './extract'
 import { enqueueSource } from './runner'
+import { courseHasTutor } from './profileState'
 
 export type UploadFile = { name: string; size: number; blob: Blob }
 export type AddedSource = { id: string; originalName: string; status: string; sizeBytes: number; nameAlreadyInSpace: boolean }
@@ -37,13 +38,16 @@ export class SpaceNotFoundError extends Error {
 }
 
 /**
- * Validates every file, then stores them all and queues them. Throws UploadRejected before anything is written when a file is
+ * Validates every file, then stores them all and queues them. `requestedBundle` is only what the client asked for; see `bundle` below. Throws UploadRejected before anything is written when a file is
  * not acceptable, SpaceNotFoundError when the studyspace does not exist. Returns the created sources in upload order.
  */
-export async function addSourcesToSpace(courseId: string, bundle: 'initial' | 'later', files: UploadFile[]): Promise<AddedSource[]> {
+export async function addSourcesToSpace(courseId: string, requestedBundle: 'initial' | 'later', files: UploadFile[]): Promise<AddedSource[]> {
   const course = await prisma.course.findUnique({ where: { id: courseId }, select: { id: true } })
   if (!course) throw new SpaceNotFoundError()
-
+  // The server decides, whatever the client sent: a studyspace that already has a tutor (accepted profile, or one of the two imported
+  // studyspaces) takes `later` files, which run the whole pipeline including starter questions; any other takes `initial` files.
+  const bundle: 'initial' | 'later' = (await courseHasTutor(courseId)) ? 'later' : 'initial'
+  void requestedBundle
   const named = files.map((f) => ({ ...f, name: sanitizeFileName(f.name) }))
   const problems = checkUploadList(named)
   if (problems.length > 0) throw new UploadRejected(problems)

@@ -1,16 +1,17 @@
 import { prisma } from '@/lib/db'
 import { MAX_SPACE_NAME_LENGTH, MAX_SPACE_GOAL_LENGTH } from '@/lib/spaceLimits'
-import { defaultProfile, type TutorProfile } from '@/lib/studyspace/profile'
+import { defaultProfile, type ProfileSuggestion, type TutorProfile } from '@/lib/studyspace/profile'
+import { parseUpdateSuggestion } from '@/lib/studyspace/suggestion'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import { resolveProfile } from '@/lib/studyspace/resolveProfile'
 
-export type CourseWithProfile = { id: string; code: string; title: string; profile: TutorProfile }
+export type CourseWithProfile = { id: string; code: string; title: string; profile: TutorProfile; /** A stored tutor update waiting for the owner's decision. */ updateSuggestion?: ProfileSuggestion | null }
 
 /** Course identity plus its tutor profile (stored, legacy by code, or default). null when the course does not exist. */
 export async function getCourseWithProfile(courseId: string): Promise<CourseWithProfile | null> {
   const course = await prisma.course.findUnique({ where: { id: courseId } })
   if (!course) return null
-  return { id: course.id, code: course.code, title: course.title, profile: resolveProfile(course) }
+  return { id: course.id, code: course.code, title: course.title, profile: resolveProfile(course), updateSuggestion: parseUpdateSuggestion(course.profileSuggestion) }
 }
 
 /** True when the studyspace has at least one topic (otherwise it is still being set up). */

@@ -16,7 +16,8 @@ const enrichment = vi.hoisted(() => ({ enrichExercisesByIds: vi.fn(async () => [
 vi.mock('@/services/enrichment', () => ({ enrichExercisesByIds: enrichment.enrichExercisesByIds }))
 
 import { ImportedQuestionsSchema } from './schemas'
-import { looksLikeQuestions, hasQuestionPattern, hasAnswerCue, acceptCandidate, cleanEdxQuestionText, isEdxMarkdown, edxCandidates, isImportEnrichmentEnabled } from './importQuestions'
+import { importQuestionsPrompt } from '@/lib/prompts/ingest'
+import { looksLikeQuestions, hasQuestionPattern, hasQuizPattern, hasAnswerCue, acceptCandidate, candidateFromImported, cleanEdxQuestionText, isEdxMarkdown, edxCandidates, isImportEnrichmentEnabled } from './importQuestions'
 import { validateExerciseStructure } from '@/lib/exerciseValidation'
 import { gradeAnswer } from '@/lib/grading'
 
@@ -161,6 +162,40 @@ describe('looksLikeQuestions', () => {
     expect(hasAnswerCue(cue)).toBe(true)
     expect(looksLikeQuestions(`${questions}${cue}`)).toBe(true)
   })
+  it.each([
+    ['## Answer key', '## Answer key\n1. B'],
+    ['### Solutions', '### Solutions\n1. B'],
+    ['# Answers', '# Answers\n1. B'],
+    ['##Answer key without a space', '##Answer key'],
+    ['## Answer key:', '## Answer key: 1. B'],
+    ['## Gabarito', '## Gabarito'],
+  ])('counts an answer heading behind Markdown marks: %s', (_n, cue) => {
+    expect(hasAnswerCue(cue)).toBe(true)
+  })
+  it('passes the Markdown quiz of the T24 test: numbered open questions followed by an "## Answer key" section', () => {
+    const quiz = [
+      '## Practice questions', '',
+      '1. Why do two candidates in a majority-rule election converge toward the median voter?',
+      '2. What happens to the median voter result when a second policy dimension is added?',
+      '3. Why do platforms stay apart in practice?',
+      '4. Why must preferences be single-peaked?', '',
+      '## Answer key', '',
+      '1. Each wins by moving toward the position most voters prefer to the rival.',
+      '2. A stable majority winner generally fails to exist.',
+    ].join('\n')
+    expect(hasQuestionPattern(quiz)).toBe(true)
+    expect(looksLikeQuestions(quiz)).toBe(true)
+  })
+  it('does not treat a heading that merely starts with an answer word as a cue', () => {
+    expect(hasAnswerCue('## Answering questions in seminars\nBe brief.')).toBe(false)
+    expect(hasAnswerCue('## Solutions to market failures are debated\nText.')).toBe(false)
+  })
+  it('hasQuizPattern wants numbered questions or lettered options, not any line ending in a question mark', () => {
+    expect(hasQuizPattern('What is X?\nWhy Y?\nHow Z?')).toBe(false)
+    expect(hasQuizPattern('1. What is X?\n2. Why Y?\n3. How Z?')).toBe(true)
+    expect(hasQuizPattern('Question 1\nQuestion 2\nQuestion 3')).toBe(true)
+    expect(hasQuizPattern('(a) one\n(b) two\n(c) three')).toBe(true)
+  })
   it('does not treat running prose as a cue', () => {
     expect(hasAnswerCue('Participant: the answer to that is complicated. Correct. This is more accurate.')).toBe(false)
   })
@@ -241,8 +276,33 @@ describe('importQuestionsForSource: edX markdown', () => {
   })
 })
 
+describe('candidateFromImported', () => {
+  const choices = ['$\\frac{a}{b}$', '$\\beta$', '$\\theta$', '$\\nu$']
+  const q = { questionText: 'Q?', exerciseType: 'multiple_choice' as const, choices, correctChoiceIndexes: [0, 3], correctAnswer: '', explanation: 'E', answerQuote: 'Answer key: 1. A, D' }
+  it('derives the key from the indexes, byte for byte', () => {
+    const r = candidateFromImported(q)
+    expect(r.ok && JSON.parse(r.candidate.correctAnswer)).toEqual([choices[0], choices[3]])
+    const single = candidateFromImported({ ...q, exerciseType: 'single_choice', correctChoiceIndexes: [2] })
+    expect(single.ok && single.candidate.correctAnswer).toBe('$\\theta$')
+    const accepted = r.ok && acceptCandidate(r.candidate, 'Answer key: 1. A, D')
+    expect(accepted && accepted.ok).toBe(true)
+  })
+  it('rejects bad index lists with a stable code', () => {
+    for (const idx of [[], [9], [1, 1]]) expect(candidateFromImported({ ...q, correctChoiceIndexes: idx })).toEqual({ ok: false, reason: 'invalid_correct_choice_indexes' })
+    expect(candidateFromImported({ ...q, exerciseType: 'numeric', choices: [], correctChoiceIndexes: [0], correctAnswer: '5' })).toEqual({ ok: false, reason: 'invalid_correct_choice_indexes' })
+  })
+  it('keeps a numeric answer', () => {
+    const r = candidateFromImported({ ...q, exerciseType: 'numeric', choices: [], correctChoiceIndexes: [], correctAnswer: '5' })
+    expect(r.ok && r.candidate.correctAnswer).toBe('5')
+  })
+  it('is required by the schema and asked for by the prompt', () => {
+    expect(ImportedQuestionsSchema.safeParse({ questions: [{ ...q, correctChoiceIndexes: undefined }] }).success).toBe(false)
+    expect(importQuestionsPrompt({ topicTitle: 'T', text: 'x' })).toContain('correctChoiceIndexes')
+  })
+})
+
 describe('importQuestionsForSource: model path', () => {
-  const q = (over: Record<string, unknown> = {}) => ({ questionText: 'What is the capital of France?', exerciseType: 'single_choice', choices: ['Paris', 'Rome', 'Madrid'], correctAnswer: 'Paris', explanation: 'The key says B... as written.', answerQuote: 'Answer key: 1. B', ...over })
+  const q = (over: Record<string, unknown> = {}) => ({ questionText: 'What is the capital of France?', exerciseType: 'single_choice', choices: ['Paris', 'Rome', 'Madrid'], correctChoiceIndexes: [0], correctAnswer: '', explanation: 'The key says B... as written.', answerQuote: 'Answer key: 1. B', ...over })
 
   it('asks the model only for topics that pass the heuristic and are study material, and keeps only answered, valid questions', async () => {
     const { id, topicIds } = await makeSource({
@@ -256,8 +316,8 @@ describe('importQuestionsForSource: model path', () => {
     const result = await importQuestionsForSource(id, {
       generate: generateWith([
         q(),
-        q({ questionText: 'Compute 2+3.', exerciseType: 'numeric', choices: [], correctAnswer: '5', answerQuote: 'Solution 2: the sum is 5.' }),
-        q({ questionText: 'Pick the only option.', choices: ['Only one'], correctAnswer: 'Only one' }),
+        q({ questionText: 'Compute 2+3.', exerciseType: 'numeric', choices: [], correctChoiceIndexes: [], correctAnswer: '5', answerQuote: 'Solution 2: the sum is 5.' }),
+        q({ questionText: 'Pick the only option.', choices: ['Only one'], correctChoiceIndexes: [0] }),
         q({ questionText: 'Invented?', answerQuote: 'The answer is obviously Rome.' }),
         q({ questionText: 'What is the capital of France?' }),
       ]),
@@ -269,12 +329,45 @@ describe('importQuestionsForSource: model path', () => {
     expect(Object.keys(result.stats.rejected).some((k) => k.includes('choice_count'))).toBe(true)
     const rows = await prisma.exercise.findMany({ where: { id: { startsWith: 'imp-' }, topic: { sourceId: id } } })
     expect(rows.map((r) => r.topicId)).toEqual([topicIds[1], topicIds[1]])
-    expect(rows.every((r) => r.promptVersion === 'ingest-v1')).toBe(true)
+    expect(rows.every((r) => r.promptVersion === 'ingest-v2')).toBe(true)
+  })
+
+  it('pairs the questions of one topic with an answer key that segmentation put in another topic of the same source', async () => {
+    const quiz = 'Question 1. What is the capital of France?\n(a) Paris\n(b) Rome\n(c) Madrid\nQuestion 2. Compute 2+3.\nQuestion 3. Which is a prime?\n(a) 4\n(b) 7\n(c) 9'
+    const key = 'Answer key\n1. A\n2. The sum is 5.\n3. B'
+    const lecture = 'Why do voters matter?\nWhat does the median voter want?\nWho decides the platform?\nA lecture paragraph.'
+    const prompts: string[] = []
+    const generate = (async (args: { prompt: string }) => {
+      prompts.push(args.prompt)
+      return { object: { questions: [
+        q({ answerQuote: 'Answer key\n1. A' }),
+        q({ questionText: 'Compute 2+3.', exerciseType: 'numeric', choices: [], correctChoiceIndexes: [], correctAnswer: '5', answerQuote: '2. The sum is 5.' }),
+        q({ questionText: 'Which is a prime?', choices: ['4', '7', '9'], correctChoiceIndexes: [1], answerQuote: '3. B' }),
+        q({ questionText: 'Invented?', answerQuote: '4. D' }),
+      ] }, usage: { inputTokens: 1, outputTokens: 1 } }
+    }) as never
+    const { id, topicIds } = await makeSource({ ext: '.txt', topics: [{ title: 'Quiz, questions', content: quiz }, { title: 'Quiz, key', content: key }, { title: 'Lecture', content: lecture }] })
+    const result = await importQuestionsForSource(id, { generate })
+    expect(prompts).toHaveLength(1) // only the quiz topic is asked: the key has no questions and the lecture has no quiz marks
+    expect(prompts[0]).toContain('ANSWER KEY TEXT')
+    expect(prompts[0]).toContain('1. A\n2. The sum is 5.')
+    expect(result.stats).toMatchObject({ path: 'model', answerKeyTopics: 1, topicsPassingHeuristic: 1, candidates: 4, imported: 3 })
+    expect(result.stats.rejected.answer_quote_not_in_source).toBe(1)
+    const rows = await prisma.exercise.findMany({ where: { id: { startsWith: 'imp-' }, topic: { sourceId: id } } })
+    expect(rows.map((r) => r.topicId)).toEqual([topicIds[0], topicIds[0], topicIds[0]])
+  })
+
+  it('without a key topic the same quiz is not sent to the model', async () => {
+    const quiz = 'Question 1. What is the capital of France?\n(a) Paris\n(b) Rome\n(c) Madrid\nQuestion 2. Compute 2+3.\nQuestion 3. Which is a prime?\n(a) 4\n(b) 7\n(c) 9'
+    const { id } = await makeSource({ ext: '.txt', topics: [{ title: 'Quiz, questions', content: quiz }] })
+    const result = await importQuestionsForSource(id, { generate: generateWith([]) })
+    expect(calls).toBe(0)
+    expect(result.stats).toMatchObject({ path: 'none', answerKeyTopics: 0, imported: 0 })
   })
 
   it('a re-run replaces unanswered imports, keeps answered ones and never duplicates them', async () => {
     const { id, courseId, topicIds } = await makeSource({ ext: '.txt', topics: [{ title: 'Quiz', content: MODEL_TEXT }] })
-    const generate = generateWith([q(), q({ questionText: 'Compute 2+3.', exerciseType: 'numeric', choices: [], correctAnswer: '5', answerQuote: 'Solution 2: the sum is 5.' })])
+    const generate = generateWith([q(), q({ questionText: 'Compute 2+3.', exerciseType: 'numeric', choices: [], correctChoiceIndexes: [], correctAnswer: '5', answerQuote: 'Solution 2: the sum is 5.' })])
     await importQuestionsForSource(id, { generate })
     const first = await prisma.exercise.findMany({ where: { topicId: topicIds[0] } })
     expect(first).toHaveLength(2)

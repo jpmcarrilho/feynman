@@ -280,5 +280,27 @@ describe('PersonaCard', () => {
     await flush()
     expect(a.split).not.toHaveBeenCalled()
     expect(screen.getByRole('alert')).toHaveTextContent(/1 to 80 characters/)
+    // the message names the field by its label, not by a group number
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the field “Name of new studyspace 1”.')
+    expect(screen.getByRole('alert')).not.toHaveTextContent(/group/i)
+    fireEvent.change(screen.getByLabelText('Name of new studyspace 1'), { target: { value: 'History' } })
+    fireEvent.change(screen.getByLabelText('Name of the studyspace that stays'), { target: { value: '' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Split into two studyspaces' }))
+    await flush()
+    expect(screen.getByRole('alert')).toHaveTextContent('Check the field “Name of the studyspace that stays”.')
+  })
+
+  it('tells the page the new title of the studyspace that stays after a split', async () => {
+    vi.useFakeTimers()
+    a.split.mockResolvedValue({ ok: true, ids: ['c1', 'c2'], keptTitle: 'Organic chemistry', created: [{ id: 'c2', title: 'World history' }] })
+    const split = { groups: [{ label: 'Chemistry', sources: [{ id: 's1', name: 'chem.md' }] }, { label: 'History', sources: [{ id: 's2', name: 'wars.pdf' }] }] }
+    a.step.mockResolvedValue(step({ split }))
+    const onRenamed = vi.fn()
+    render(<PersonaCard courseId="c1" onStudy={vi.fn()} onRenamed={onRenamed} />)
+    await flush()
+    a.step.mockResolvedValue(step())
+    fireEvent.click(screen.getByRole('button', { name: 'Split into two studyspaces' }))
+    await flush()
+    expect(onRenamed).toHaveBeenCalledWith('Organic chemistry')
   })
 })

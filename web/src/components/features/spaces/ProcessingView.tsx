@@ -1,24 +1,18 @@
 'use client'
 
-import { useCallback, useEffect, useRef, useState } from 'react'
 import { AlertTriangle, CheckCircle2, Loader2, XCircle } from 'lucide-react'
 import { formatBytes } from '@/lib/formatBytes'
 import { Button } from '@/components/ui/button'
-import { getSpaceStatusAction, removeSourceAction, retrySourceAction } from '@/app/spaces/actions'
-import type { SourceStatusView, SpaceStatus } from '@/services/spaceStatus'
+import type { SourceStatusView } from '@/services/spaceStatus'
 import { SourceDropzone } from './SourceDropzone'
+import { POLL_INTERVAL_MS, isTerminal, useSpaceSources, type RetryPhase } from './useSpaceSources'
 
-export const POLL_INTERVAL_MS = 2000
-
-const isTerminal = (s: { status: string }) => s.status === 'ready' || s.status === 'failed'
+export { POLL_INTERVAL_MS }
 
 const mb = formatBytes
 const isPdfName = (name: string) => /\.pdf$/i.test(name)
 
-/** After Retry: waiting (still showing the old failure), running (status moved on), failedAgain. `since` is the row's updatedAt when Retry was clicked. */
-type RetryPhase = { since: string; phase: 'waiting' | 'running' | 'failedAgain' }
-
-function SourceRow({ source, busy, confirming, retry, onRetry, onRemove }: { source: SourceStatusView; busy: boolean; confirming: boolean; retry?: RetryPhase; onRetry: () => void; onRemove: () => void }) {
+export function SourceRow({ source, busy, confirming, retry, onRetry, onRemove }: { source: SourceStatusView; busy: boolean; confirming: boolean; retry?: RetryPhase; onRetry: () => void; onRemove: () => void }) {
   const retrying = retry?.phase === 'waiting'
   const failed = source.status === 'failed' && !retrying
   const ready = source.status === 'ready'
@@ -42,9 +36,9 @@ function SourceRow({ source, busy, confirming, retry, onRetry, onRemove }: { sou
       </div>
       <div className="flex shrink-0 gap-2">
         {(failed || retrying) && source.canRetry && (
-          <Button type="button" variant="outline" size="sm" className="h-9 px-3" disabled={busy || retrying} onClick={onRetry} aria-label={`Retry ${source.originalName}`}>Retry</Button>
+          <Button type="button" variant="outline" size="sm" className="h-10 px-3 sm:h-9" disabled={busy || retrying} onClick={onRetry} aria-label={`Retry ${source.originalName}`}>Retry</Button>
         )}
-        <Button type="button" variant={confirming ? 'destructive' : 'ghost'} size="sm" className="h-9 px-3" disabled={busy} onClick={onRemove} aria-label={confirming ? `Confirm removing ${source.originalName}` : `Remove ${source.originalName}`}>
+        <Button type="button" variant={confirming ? 'destructive' : 'ghost'} size="sm" className="h-10 px-3 sm:h-9" disabled={busy} onClick={onRemove} aria-label={confirming ? `Confirm removing ${source.originalName}` : `Remove ${source.originalName}`}>
           {confirming ? 'Confirm remove' : 'Remove'}
         </Button>
       </div>
@@ -57,95 +51,7 @@ function SourceRow({ source, busy, confirming, retry, onRetry, onRemove }: { sou
  * everything is ready or failed and while the tab is hidden (it resumes on return), and never overlaps.
  */
 export function ProcessingView({ courseId, onReview }: { courseId: string; onReview: () => void }) {
-  const [status, setStatus] = useState<SpaceStatus | null>(null)
-  const [missing, setMissing] = useState(false)
-  const [loadError, setLoadError] = useState(false)
-  const [message, setMessage] = useState<string | null>(null)
-  const [busyId, setBusyId] = useState<string | null>(null)
-  const [confirmId, setConfirmId] = useState<string | null>(null)
-  const [retries, setRetries] = useState<Record<string, RetryPhase>>({})
-  const [removed, setRemoved] = useState<string[]>([])
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const inFlight = useRef(false)
-  const alive = useRef(true)
-  const lastProcessing = useRef(true)
-  const again = useRef(false)
-  const retriesRef = useRef<Record<string, RetryPhase>>({})
-  const pollRef = useRef<() => void>(() => {})
-
-  const poll = useCallback(async () => {
-    if (!alive.current) return
-    if (inFlight.current) {
-      again.current = true // asked for during a poll: the result may predate the change, so poll once more
-      return
-    }
-    inFlight.current = true
-    if (timer.current) clearTimeout(timer.current)
-    timer.current = null
-    try {
-      const next = await getSpaceStatusAction(courseId)
-      if (!alive.current) return
-      if (!next) {
-        setMissing(true)
-        lastProcessing.current = false
-      } else {
-        setStatus(next)
-        // Follow each retried file: it left 'failed' (or changed while failed) and either got further or failed again
-        const out: Record<string, RetryPhase> = {}
-        for (const [id, r] of Object.entries(retriesRef.current)) {
-          const src = next.sources.find((x) => x.id === id)
-          if (!src || src.status === 'ready') continue
-          if (src.status !== 'failed') out[id] = { ...r, phase: 'running' }
-          else if (r.phase === 'waiting' && src.updatedAt === r.since) out[id] = r
-          else out[id] = { ...r, phase: 'failedAgain' }
-        }
-        retriesRef.current = out
-        setRetries(out)
-        setLoadError(false)
-        lastProcessing.current = next.sources.length === 0 || next.sources.some((s) => !isTerminal(s)) || Object.values(retriesRef.current).some((r) => r.phase === 'waiting')
-      }
-    } catch {
-      if (alive.current) setLoadError(true)
-      lastProcessing.current = true
-    } finally {
-      inFlight.current = false
-    }
-    if (again.current) {
-      again.current = false
-      lastProcessing.current = true
-    }
-    if (alive.current && lastProcessing.current && document.visibilityState === 'visible') timer.current = setTimeout(() => pollRef.current(), POLL_INTERVAL_MS)
-  }, [courseId])
-
-  useEffect(() => {
-    pollRef.current = () => void poll()
-    alive.current = true
-    timer.current = setTimeout(() => pollRef.current(), 0)
-    const onVisible = () => {
-      if (document.visibilityState === 'visible' && lastProcessing.current && !timer.current) void poll()
-    }
-    document.addEventListener('visibilitychange', onVisible)
-    return () => {
-      alive.current = false
-      if (timer.current) clearTimeout(timer.current)
-      document.removeEventListener('visibilitychange', onVisible)
-    }
-  }, [poll])
-
-  const run = async (id: string, action: () => Promise<{ ok: boolean; reason?: string }>) => {
-    setBusyId(id)
-    setMessage(null)
-    try {
-      const result = await action()
-      if (!result.ok) setMessage(result.reason ?? 'That did not work. Try again.')
-    } catch {
-      setMessage('Could not reach the server. Try again.')
-    } finally {
-      setBusyId(null)
-      setConfirmId(null)
-      void poll()
-    }
-  }
+  const { status, missing, loadError, message, busyId, confirmId, retries, removed, poll, retry, remove } = useSpaceSources(courseId, { keepPollingWhenEmpty: true })
 
   const sources = status?.sources ?? []
   const initial = sources.filter((s) => s.bundle === 'initial')
@@ -177,23 +83,8 @@ export function ProcessingView({ courseId, onReview }: { courseId: string; onRev
               busy={busyId === s.id}
               confirming={confirmId === s.id}
               retry={retries[s.id]}
-              onRetry={() => void run(s.id, async () => {
-                const result = await retrySourceAction(s.id)
-                if (result.ok) {
-                  retriesRef.current = { ...retriesRef.current, [s.id]: { since: s.updatedAt, phase: 'waiting' } }
-                  setRetries(retriesRef.current)
-                }
-                return result
-              })}
-              onRemove={() => {
-                // A file that failed can go right away; a file that was read or is being read asks once
-                if (s.status === 'failed' || confirmId === s.id) void run(s.id, async () => {
-                  const result = await removeSourceAction(s.id)
-                  if (result.ok) setRemoved((prev) => [...prev, s.id])
-                  return result
-                })
-                else setConfirmId(s.id)
-              }}
+              onRetry={() => retry(s)}
+              onRemove={() => remove(s)}
             />
           ))}
         </ul>

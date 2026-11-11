@@ -2,6 +2,7 @@
 // instead of throwing, so the wizard can show it (a thrown error from a server action is masked in production builds).
 import { prisma } from '@/lib/db'
 import { removeCourseStorage, removeSourceFiles } from '@/server/storage'
+import { parseSuggestion } from '@/lib/studyspace/suggestion'
 import { enqueueSource, acquireExclusive, SourceBusyError } from './runner'
 
 export type AdminResult = { ok: true } | { ok: false; reason: string }
@@ -46,8 +47,16 @@ export async function removeSource(sourceId: string): Promise<AdminResult> {
   }
   try {
     if ((await answered()) > 0) return { ok: false, reason: answeredMessage }
-    // Topics and exercises follow through the cascade rules of the schema
-    await prisma.source.deleteMany({ where: { id: sourceId } })
+    // Topics and exercises follow through the cascade rules of the schema. A tutor-update suggestion that was based on this file goes in
+    // the same transaction: it would offer a change for a file that is no longer there. (An initial proposal is re-derived on demand.)
+    await prisma.$transaction(async (tx) => {
+      await tx.source.deleteMany({ where: { id: sourceId } })
+      const course = await tx.course.findUnique({ where: { id: source.courseId }, select: { profileSuggestion: true } })
+      const stored = parseSuggestion(course?.profileSuggestion)
+      if (stored && stored.kind === 'update' && stored.basedOnSourceIds.includes(sourceId)) {
+        await tx.course.update({ where: { id: source.courseId }, data: { profileSuggestion: null } })
+      }
+    })
   } finally {
     await exclusive.release()
   }

@@ -18,6 +18,7 @@
 //             leaves the source unchanged is recorded here with a generic reason.
 import { prisma } from '@/lib/db'
 import { parseProfile } from '@/lib/studyspace/profile'
+import { courseHasTutor } from './profileState'
 import { extractSource } from './extract'
 import { segmentSource } from './segment'
 import { importQuestionsForSource } from './importQuestions'
@@ -251,10 +252,7 @@ function startHeartbeat(sourceId: string, lease: LeaseHandle): () => Promise<voi
 
 type SourceOutcome = 'done' | 'busy' | 'cancelled' | 'lost' | 'gone'
 
-async function hasAcceptedProfile(courseId: string): Promise<boolean> {
-  const course = await prisma.course.findUnique({ where: { id: courseId }, select: { profile: true } })
-  return parseProfile(course?.profile) !== null
-}
+const hasAcceptedProfile = courseHasTutor
 
 /** Starter pass after the profile was accepted while a source was finishing: make sure the course job runs again. */
 async function requestStartersIfProfileAppeared(courseId: string): Promise<void> {

@@ -16,10 +16,12 @@ import {
   Clock,
   CheckCircle,
   FileCode,
-  Award
+  Award,
+  Upload
 } from 'lucide-react'
 
 import { studyGuideBlurb } from '@/lib/studyspace/studyGuide'
+import { AddFilesPanel } from './spaces/AddFilesPanel'
 
 // Simple helper to prettify/format week and titles
 const formatDisplayName = (name: string | null | undefined): string => {
@@ -38,28 +40,36 @@ interface ResourcesDashboardProps {
   startingSession?: boolean;
   /** Subject of the studyspace's tutor profile, named in the study guide blurb. */
   subject?: string | null;
+  /** Shows "Add files" in the header (uploads that are processed in the background; new topics appear here when a file is ready). */
+  allowAddFiles?: boolean;
+  /** A file was uploaded or became ready (the page may get a tutor-update suggestion). */
+  onFilesActivity?: () => void;
 }
 
-export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, startingSession = false, subject = null }: ResourcesDashboardProps) {
+export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, startingSession = false, subject = null, allowAddFiles = false, onFilesActivity }: ResourcesDashboardProps) {
   const [courses, setCourses] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [activeCourseCode, setActiveCourseCode] = useState<string>('')
   const [searchText, setSearchText] = useState('')
   const [generatingWeek, setGeneratingWeek] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  // Bumped when a file added later is ready: the list is read again in place (no loading screen, so the open panel stays)
+  const [reloadKey, setReloadKey] = useState(0)
 
   // Load initial data
   useEffect(() => {
+    let cancelled = false
     getCourseArtifacts(courseId).then((data) => {
+      if (cancelled) return
       setCourses(data)
-      if (data.length > 0) {
-        setActiveCourseCode(data[0].courseCode)
-      }
+      setActiveCourseCode((current) => (data.some((c: { courseCode: string }) => c.courseCode === current) ? current : data[0]?.courseCode ?? ''))
       setLoading(false)
     }).catch(err => {
       console.error("Failed to load course artifacts:", err)
-      setLoading(false)
+      if (!cancelled) setLoading(false)
     })
-  }, [courseId])
+    return () => { cancelled = true }
+  }, [courseId, reloadKey])
 
   // Find currently active course
   const activeCourse = courses.find(c => c.courseCode === activeCourseCode)
@@ -128,11 +138,29 @@ export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, s
     <div className="w-full max-w-6xl mx-auto space-y-8 pb-16 font-sans">
       
       {/* 1. Header and Intro */}
-      <div className="space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight font-display italic text-charcoal-graphite">Resources</h1>
-        <p className="text-sm text-charcoal-graphite/65 max-w-2xl">
-          Explore and study all lecture materials, original slides, video lecture transcripts, reading notes, and AI-generated Feynman summaries of this studyspace, organized per module.
-        </p>
+      <div className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-2">
+            <h1 className="text-3xl font-bold tracking-tight font-display italic text-charcoal-graphite">Resources</h1>
+            <p className="text-sm text-charcoal-graphite/65 max-w-2xl">
+              Explore and study all lecture materials, original slides, video lecture transcripts, reading notes, and AI-generated Feynman summaries of this studyspace, organized per module.
+            </p>
+          </div>
+          {allowAddFiles && (
+            <Button
+              type="button"
+              variant="outline"
+              aria-expanded={addOpen}
+              aria-controls="add-files-panel"
+              onClick={() => setAddOpen((o) => !o)}
+              className="h-10 shrink-0 gap-1.5 self-start px-4 font-semibold sm:h-9"
+            >
+              <Upload className="w-4 h-4" aria-hidden />
+              Add files
+            </Button>
+          )}
+        </div>
+        {allowAddFiles && <AddFilesPanel courseId={courseId} open={addOpen} onTopicsChanged={() => setReloadKey((k) => k + 1)} onActivity={onFilesActivity} />}
       </div>
 
       {/* 2. Search and Course Select Filters */}
@@ -282,8 +310,12 @@ export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, s
                         {week.slides.map((slide: any) => (
                           <div 
                             key={slide.id}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Open ${slide.title}`}
                             onClick={() => handleOpenFile(slide.link, slide.title)}
-                            className="p-2.5 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group"
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpenFile(slide.link, slide.title) } }}
+                            className="p-2.5 min-h-11 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group focus-visible:outline-2 focus-visible:outline-fountain-ink"
                           >
                             <div className="w-6 h-6 rounded bg-lecture-red/10 text-lecture-red flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
                               PDF
@@ -318,8 +350,12 @@ export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, s
                         {week.transcriptions.map((transcript: any) => (
                           <div 
                             key={transcript.id}
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Open ${transcript.title}`}
                             onClick={() => handleOpenFile(transcript.link, transcript.title)}
-                            className="p-2.5 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group"
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpenFile(transcript.link, transcript.title) } }}
+                            className="p-2.5 min-h-11 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group focus-visible:outline-2 focus-visible:outline-fountain-ink"
                           >
                             <div className="w-6 h-6 rounded bg-fountain-ink/10 text-fountain-ink flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
                               TXT

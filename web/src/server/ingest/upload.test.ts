@@ -3,6 +3,7 @@
 import { describe, it, expect, vi, beforeAll, afterAll, beforeEach } from 'vitest'
 import fs from 'fs'
 import path from 'path'
+import { defaultProfile } from '@/lib/studyspace/profile'
 
 const env = vi.hoisted(() => ({ dir: '' }))
 const queued = vi.hoisted(() => ({ ids: [] as string[] }))
@@ -62,8 +63,29 @@ describe('addSourcesToSpace: success', () => {
     const [a] = await upload.addSourcesToSpace(courseId, 'later', [toUpload(file('../../etc/pass\u0000wd‮.txt'))])
     expect(a.originalName).toBe('passwd.txt')
     const row = await prisma.source.findUniqueOrThrow({ where: { id: a.id } })
-    expect(row.bundle).toBe('later')
     expect(row.storageKey).not.toContain('passwd')
+  })
+
+  it('the server decides the bundle: initial without a tutor whatever the client sent, later with an accepted profile or imported topics', async () => {
+    const [first] = await upload.addSourcesToSpace(courseId, 'later', [toUpload(file('a.txt'))])
+    expect((await prisma.source.findUniqueOrThrow({ where: { id: first.id } })).bundle).toBe('initial')
+
+    await prisma.course.update({ where: { id: courseId }, data: { profile: JSON.stringify(defaultProfile({ title: 'T' })) } })
+    const [second] = await upload.addSourcesToSpace(courseId, 'initial', [toUpload(file('b.txt'))])
+    expect((await prisma.source.findUniqueOrThrow({ where: { id: second.id } })).bundle).toBe('later')
+
+    // An imported studyspace (topics without a source) takes later files even where no profile is stored in the row
+    const imported = `${courseId}-imported`
+    await prisma.course.create({ data: { id: imported, code: imported, title: imported } })
+    await prisma.topic.create({ data: { courseId: imported, title: 'Week 1', week: 'Week_01', className: 'c', unit: '1', resourceType: 'Transcript', content: 'x', order: 1 } })
+    const [third] = await upload.addSourcesToSpace(imported, 'initial', [toUpload(file('c.txt'))])
+    expect((await prisma.source.findUniqueOrThrow({ where: { id: third.id } })).bundle).toBe('later')
+
+    // A profile that does not validate counts as no tutor
+    const broken = `${courseId}-broken`
+    await prisma.course.create({ data: { id: broken, code: broken, title: broken, profile: '{"version":1}' } })
+    const [fourth] = await upload.addSourcesToSpace(broken, 'later', [toUpload(file('d.txt'))])
+    expect((await prisma.source.findUniqueOrThrow({ where: { id: fourth.id } })).bundle).toBe('initial')
   })
 
   it('accepts a second file with a name already used in the studyspace as a separate source and says so', async () => {

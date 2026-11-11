@@ -71,7 +71,7 @@ import {
 import { formatScore, sessionScore, logScore, answerDisplayLines } from '@/lib/grading'
 import { topicSourceLabel } from '@/lib/topicLabel'
 import { plannerSuggestions, moduleLabelsOf } from '@/lib/plannerSuggestions'
-import type { TutorChatMode, TutorProfile } from '@/lib/studyspace/profile'
+import type { ProfileSuggestion, TutorChatMode, TutorProfile } from '@/lib/studyspace/profile'
 import { getChatMode, setChatMode, subscribeChatMode, migrateLegacyChatMode } from '@/lib/studyspace/chatMode'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
 import { FeynmanLogo } from './FeynmanLogo'
@@ -96,6 +96,8 @@ import {
 import type { SessionState } from '@/services/sessionService'
 import { StudyPlanDraftWidget } from './StudyPlanDraftWidget'
 import { ResourcesDashboard } from './ResourcesDashboard'
+import { ProfileSuggestionBanner } from './spaces/ProfileSuggestionBanner'
+import { useSuggestionWatch } from './spaces/useSuggestionWatch'
 
 // Helper functions for safe storage access with automatic sessionStorage fallback if localStorage is full
 const safeGetItem = (key: string): string | null => {
@@ -175,7 +177,19 @@ const readAssisted = (sessionId: string): string[] => {
  * studyspace's stored tutor profile) is the only persona the tutor uses. The page mounts this with `key={courseId}`, so
  * nothing in memory (planner chat, plan draft, selection) can carry over from another studyspace.
  */
-export function StudyInterface({ courseId, courseTitle, profile }: { courseId: string; courseTitle: string; profile: TutorProfile }) {
+export function StudyInterface({ courseId, courseTitle, profile: storedProfile, updateSuggestion = null }: { courseId: string; courseTitle: string; profile: TutorProfile; updateSuggestion?: ProfileSuggestion | null }) {
+  // The tutor in use. It follows the stored profile and changes at once when the owner accepts a suggested update (the next question
+  // and chat turn use it; questions are made on the server from the stored profile)
+  const [profile, setProfile] = useState<TutorProfile>(storedProfile)
+  const [seenStoredProfile, setSeenStoredProfile] = useState(storedProfile)
+  if (storedProfile !== seenStoredProfile) {
+    // The page was refreshed with another stored profile: follow it (adjusting state while rendering, as React documents)
+    setSeenStoredProfile(storedProfile)
+    setProfile(storedProfile)
+  }
+  const [suggestion, setSuggestion] = useState<ProfileSuggestion | null>(updateSuggestion)
+  // A suggestion stored after this page was rendered (or replaced by a newer one) appears here without a reload
+  const { kick: watchSuggestions } = useSuggestionWatch(courseId, suggestion?.createdAt ?? null, setSuggestion)
   const [topics, setTopics] = useState<any[]>([])
   // The Create Session dialog's selection only
   const [selectedTopics, setSelectedTopics] = useState<string[]>([])
@@ -1538,6 +1552,21 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
           </div>
         </div>
 
+        {suggestion && (
+          <div className="mx-4 sm:mx-8 mt-3">
+            <ProfileSuggestionBanner
+              key={suggestion.createdAt}
+              courseId={courseId}
+              suggestion={suggestion}
+              current={profile}
+              onResolved={(outcome, next) => {
+                setProfile(next)
+                if (outcome === 'ignored') setSuggestion(null)
+              }}
+            />
+          </div>
+        )}
+
         {notice && !isModalOpen && (
           <div role="alert" className="mx-4 sm:mx-8 mt-3 flex items-start justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 font-sans">
             <p>{notice}</p>
@@ -2167,7 +2196,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
         </TabsContent>
 
         <TabsContent value="resources" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">
-          <ResourcesDashboard courseId={courseId} onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} startingSession={isLoading} subject={profile.subject} />
+          <ResourcesDashboard courseId={courseId} onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} startingSession={isLoading} subject={profile.subject} allowAddFiles onFilesActivity={() => { watchSuggestions(); void getTopicsWithPerformance(courseId).then(setTopics) }} />
         </TabsContent>
 
         <TabsContent value="analytics" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">

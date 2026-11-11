@@ -162,12 +162,32 @@ export async function acceptProfileAction(courseId: string, profile: TutorProfil
   return acceptProfile(courseId, profile, { requestStarters })
 }
 
-/** Throws away the stored suggestion (an update the owner ignores). The accepted tutor stays as it is. */
-export async function dismissProfileSuggestionAction(courseId: string): Promise<AdminResult> {
+/**
+ * Throws away the stored suggestion (an update the owner ignores). The accepted tutor stays as it is. `createdAt` is the suggestion the
+ * owner was looking at: a newer one that replaced it is kept.
+ */
+export async function dismissProfileSuggestionAction(courseId: string, createdAt?: string): Promise<AdminResult> {
   await requireAuth()
   if (typeof courseId !== 'string' || !courseId) return { ok: false, reason: 'Studyspace not found.' }
   const { dismissSuggestion } = await import('@/server/ingest/persona')
-  return dismissSuggestion(courseId)
+  return dismissSuggestion(courseId, typeof createdAt === 'string' ? createdAt : undefined)
+}
+
+/** The stored tutor update, if any (what the open page shows in its banner). */
+export async function getUpdateSuggestionAction(courseId: string): Promise<import('@/lib/studyspace/profile').ProfileSuggestion | null> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId) return null
+  const row = await prisma.course.findUnique({ where: { id: courseId }, select: { profileSuggestion: true } })
+  const { parseUpdateSuggestion } = await import('@/lib/studyspace/suggestion')
+  return parseUpdateSuggestion(row?.profileSuggestion)
+}
+
+/** Accept on a suggested tutor update: applies exactly the suggestion the owner saw (`createdAt` names it); starts no starter run. */
+export async function acceptProfileUpdateAction(courseId: string, createdAt: string): Promise<AdminResult> {
+  await requireAuth()
+  if (typeof courseId !== 'string' || !courseId || typeof createdAt !== 'string' || !createdAt) return { ok: false, reason: 'Studyspace not found.' }
+  const { acceptUpdateSuggestion } = await import('@/server/ingest/persona')
+  return acceptUpdateSuggestion(courseId, createdAt)
 }
 
 /** "Keep together": removes the split offer from the stored proposal, nothing else. */

@@ -14,6 +14,7 @@ vi.mock('@/lib/db', async () => {
 })
 
 import { SegmentationOutputSchema, WindowTopicsSchema, ModuleGroupingSchema } from './schemas'
+import { moduleNumberBase } from './segment'
 
 type Prisma = typeof import('@/lib/db').prisma
 let prisma: Prisma
@@ -170,6 +171,43 @@ describe('segmentSource: several sources and re-runs', () => {
     ])
   })
 
+  it('a later upload to a studyspace with imported-style topics appends new modules after them and rewrites no existing row', async () => {
+    const courseId = `imported-${++courseCounter}`
+    await prisma.course.create({ data: { id: courseId, code: courseId, title: courseId } })
+    // Imported-style rows: week labels without an "NN · " prefix, unit values that are not positions, sparse order, no source
+    const old = [
+      { week: 'Week_01_Introduction', unit: '3', order: 0, title: 'Lecture A' },
+      { week: 'Week_01_Introduction', unit: '1', order: 10, title: 'Lecture B' },
+      { week: 'Week_02_Voting', unit: 'Lecture 12', order: 20, title: 'Lecture C' },
+      { week: 'Week_13_Comprehensive_Review', unit: '2', order: 35, title: 'Review' },
+    ]
+    for (const [i, t] of old.entries()) {
+      await prisma.topic.create({ data: { id: `old-${courseId}-${i}`, courseId, className: `Class ${i}`, resourceType: 'Transcript', content: `content ${i}`, localPath: `/x/${i}.txt`, ...t } })
+    }
+    const before = await prisma.topic.findMany({ where: { courseId }, orderBy: { id: 'asc' } })
+
+    const a = await makeSource(SIX, { courseId, name: 'later.txt' })
+    await segmentSource(a.id, { generate: fakeGenerate({ single: () => ({ modules: [{ title: 'Added one', topics: [topic('n1', 1, 3)] }, { title: 'Added two', topics: [topic('n2', 4, 6)] }] }) }) })
+
+    const after = await prisma.topic.findMany({ where: { courseId, sourceId: null }, orderBy: { id: 'asc' } })
+    expect(after).toEqual(before) // byte-identical: every column of every existing row
+    const added = await prisma.topic.findMany({ where: { courseId, sourceId: a.id }, orderBy: { order: 'asc' } })
+    expect(added.map((t) => [t.order, t.week, t.unit])).toEqual([[36, '04 · Added one', '1'], [37, '05 · Added two', '1']])
+  })
+
+  it('a later upload to an uploaded studyspace numbers its modules after the existing ones even when a module number is missing', async () => {
+    const a = await makeSource(SIX, { name: 'first.txt' })
+    await segmentSource(a.id, { generate: fakeGenerate({ single: () => ({ modules: [{ title: 'M1', topics: [topic('a1', 1, 3)] }, { title: 'M2', topics: [topic('a2', 4, 6)] }] }) }) })
+    // The owner removed the first module's file elsewhere: only "02 · M2" is left
+    await prisma.topic.deleteMany({ where: { week: '01 · M1', courseId: a.courseId } })
+    const before = await prisma.topic.findMany({ where: { courseId: a.courseId }, orderBy: { id: 'asc' } })
+    const b = await makeSource(SIX, { courseId: a.courseId, name: 'second.txt' })
+    await segmentSource(b.id, { generate: fakeGenerate({ single: () => ({ modules: [{ title: 'M3', topics: [topic('b1', 1, 6)] }] }) }) })
+    expect(await prisma.topic.findMany({ where: { courseId: a.courseId, sourceId: a.id }, orderBy: { id: 'asc' } })).toEqual(before)
+    const added = await prisma.topic.findMany({ where: { sourceId: b.id } })
+    expect(added.map((t) => [t.week, t.order])).toEqual([['03 · M3', 2]])
+  })
+
   it('re-running keeps the slot, shifts the topics after it and never touches other sources', async () => {
     const a = await makeSource(SIX, { name: 'a.txt' })
     await segmentSource(a.id, { generate: fakeGenerate({ single: () => ({ modules: [{ title: 'A', topics: [topic('a1', 1, 3), topic('a2', 4, 6)] }] }) }) })
@@ -277,5 +315,17 @@ describe('segmentSource: windowed', () => {
     expect(source).toMatchObject({ status: 'failed', failedStage: 'segmenting' })
     expect(source!.error).toMatch(/pages 4-/)
     expect(await prisma.topic.count({ where: { sourceId: id } })).toBe(0)
+  })
+})
+
+
+describe('moduleNumberBase', () => {
+  it('is the highest "NN · " number, or the count of distinct labels when that is larger', () => {
+    expect(moduleNumberBase([])).toBe(0)
+    expect(moduleNumberBase(['01 · A', '01 · A', '02 · B'])).toBe(2)
+    expect(moduleNumberBase(['02 · B', '03 · C'])).toBe(3) // the first module is gone: the next one is 04, not 03
+    expect(moduleNumberBase(['Week_01', 'Week_02', null, 'Week_03'])).toBe(3)
+    expect(moduleNumberBase(['Week_01', '02 · Uploaded'])).toBe(2)
+    expect(moduleNumberBase(['Week_01', 'Week_02', 'Week_03', '01 · Uploaded'])).toBe(4)
   })
 })

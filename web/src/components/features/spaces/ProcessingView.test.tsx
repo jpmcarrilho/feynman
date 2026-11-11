@@ -17,7 +17,7 @@ const src = (id: string, status: string, over: Partial<SourceStatusView> = {}): 
 })
 const space = (sources: SourceStatusView[]): SpaceStatus => ({
   courseId: 'c1', title: 'T', sources, initialBundleFinished: sources.every((s) => ['ready', 'failed'].includes(s.status)), processing: sources.some((s) => !['ready', 'failed'].includes(s.status)),
-  starterStatus: null, starterProgress: { topicsWithQuestions: 0, studyTopics: 0 }, hasProfile: false, profileSuggestion: null, outline: { modules: 0, topics: 0 }, serverTime: '',
+  starterStatus: null, starterProgress: { topicsWithQuestions: 0, studyTopics: 0 }, hasProfile: false, profileSuggestion: null, updateCheckPending: false, outline: { modules: 0, topics: 0 }, serverTime: '',
 })
 
 beforeEach(() => {

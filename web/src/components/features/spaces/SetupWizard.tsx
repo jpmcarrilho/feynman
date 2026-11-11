@@ -10,10 +10,13 @@ import { ProcessingView } from './ProcessingView'
 import { OutlineEditor } from './OutlineEditor'
 import type { PersonaStep } from '@/server/ingest/persona'
 import { PersonaCard } from './PersonaCard'
+import { QUESTION_IMPORT_NOTE } from '@/lib/uploadNotes'
 
 /** The setup steps of one studyspace. The first step comes from the server (resolveSetupStep); moving on updates the address without a reload. */
-export function SetupWizard({ courseId, title, initialStep, initialPersona }: { courseId: string; title: string; initialStep: SetupStep; initialPersona?: PersonaStep | null }) {
+export function SetupWizard({ courseId, title: initialTitle, initialStep, initialPersona }: { courseId: string; title: string; initialStep: SetupStep; initialPersona?: PersonaStep | null }) {
   const router = useRouter()
+  // The title follows a split: the studyspace that stays may get a new name
+  const [title, setTitle] = useState(initialTitle)
   const [step, setStepState] = useState<SetupStep>(initialStep)
   const [uploading, setUploading] = useState(false)
   const [accepted, setAccepted] = useState(0)
@@ -46,7 +49,7 @@ export function SetupWizard({ courseId, title, initialStep, initialPersona }: { 
         <section className="flex flex-col gap-4" aria-label="Upload files">
           <div>
             <h2 className="font-display text-xl font-bold italic text-charcoal-graphite">Upload your files</h2>
-            <p className="mt-1 text-sm text-charcoal-graphite/70">Add lecture notes, slides or readings as .txt, .md or .pdf. Files that contain practice questions are used for them too.</p>
+            <p className="mt-1 text-sm text-charcoal-graphite/70">Add lecture notes, slides or readings as .txt, .md or .pdf. {QUESTION_IMPORT_NOTE}</p>
           </div>
           <SourceDropzone courseId={courseId} bundle="initial" onUploaded={() => setAccepted((n) => n + 1)} onBusyChange={setUploading} />
           <div className="flex justify-end">
@@ -61,7 +64,7 @@ export function SetupWizard({ courseId, title, initialStep, initialPersona }: { 
 
       {step === 'outline' && <OutlineEditor courseId={courseId} continueLabel="Continue" onBack={() => go('processing')} onContinue={() => go('persona')} />}
 
-      {step === 'persona' && <PersonaCard courseId={courseId} initial={step === initialStep ? initialPersona ?? undefined : undefined} onBack={() => go('outline')} onStudy={() => router.push(`/spaces/${courseId}`)} />}
+      {step === 'persona' && <PersonaCard courseId={courseId} onRenamed={setTitle} initial={step === initialStep ? initialPersona ?? undefined : undefined} onBack={() => go('outline')} onStudy={() => router.push(`/spaces/${courseId}`)} />}
     </div>
   )
 }

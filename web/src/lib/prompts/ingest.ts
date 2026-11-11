@@ -14,7 +14,7 @@ Rules:
 // --- Segmentation (T22) -------------------------------------------------------------------------------------------
 
 /** Bump whenever the segmentation or import prompts change (stored on the marker rows and reported by the measurements). */
-export const INGEST_PROMPT_VERSION = 'ingest-v1'
+export const INGEST_PROMPT_VERSION = 'ingest-v2'
 
 const TOPIC_FIELD_RULES = `For every topic give:
 - "title": at most 80 characters, specific (name the concept, method or example, not "Introduction" or "Slide 12"), written in the language of the document text.
@@ -97,18 +97,19 @@ ${lines}`
 // --- Question import (T22) ----------------------------------------------------------------------------------------
 
 /** Extraction of the questions a topic's text already contains. The answer must be stated in the text. */
-export function importQuestionsPrompt(input: { topicTitle: string; text: string }): string {
+export function importQuestionsPrompt(input: { topicTitle: string; text: string; answerKeyText?: string }): string {
+  const key = input.answerKeyText?.trim()
   return `You extract practice questions that already exist in a study document. Below is the text of one topic, "${input.topicTitle}".
 
-Extract only questions that are present in the text AND whose correct answer is stated in the text (an answer key, a marked option such as "[x]" or "correct", a worked solution, "Answer: ..."). Never work out an answer yourself and never guess one: if the text does not state the answer, leave the question out. Leave out rhetorical questions of a lecture, questions that depend on a figure, table or dataset that is not in the text, and survey, feedback or opinion items. If there are none, return {"questions":[]}.
+Extract only questions that are present in the topic text AND whose correct answer is stated in the text${key ? ' or in the ANSWER KEY TEXT below, which comes from another part of the same document and holds the answers to these questions' : ''} (an answer key, a marked option such as "[x]" or "correct", a worked solution, "Answer: ..."). Never work out an answer yourself and never guess one: if the text does not state the answer, leave the question out. Leave out rhetorical questions of a lecture, questions that depend on a figure, table or dataset that is not in the text, and survey, feedback or opinion items. If there are none, return {"questions":[]}.
 
 For every question return:
 - "questionText": the question as written, complete enough to be answered on its own (include the setup the text gives for it). Keep the language of the text. Remove numbering such as "Question 3", points ("1/1 point (graded)") and instructions such as "Submit" or "Show answer".
 - "exerciseType": one of
-  - "single_choice": 3 to 6 options, exactly one correct. "choices" lists the options in the order of the text; "correctAnswer" is exactly the text of the correct option. (A true/false question with only two options is not importable: leave it out.)
-  - "multiple_choice": 3 to 6 options, "select all that apply". "correctAnswer" is a JSON array string of the exact texts of all the correct options, e.g. "[\\"Option A\\",\\"Option C\\"]". Not every option may be correct.
-  - "numeric": the answer is a number. "choices" is []. "correctAnswer" is a plain number such as "0.8" or "-12" (no units, no percent sign, no thousands separators, no words).
-  - "dropdown": a fill-in-the-blank sentence with 3 to 5 options: "questionText" contains exactly one "[Dropdown 1]" placeholder, "choices" the options, "correctAnswer" the exact correct option.
+  - "single_choice": 3 to 6 options, exactly one correct. "choices" lists the options in the order of the text; "correctChoiceIndexes" is a list with the one 0-based position in "choices" of the correct option (the first option is 0); "correctAnswer" is "". (A true/false question with only two options is not importable: leave it out.)
+  - "multiple_choice": 3 to 6 options, "select all that apply". "correctChoiceIndexes" lists the 0-based positions in "choices" of all the correct options, each once, e.g. [0, 2]; "correctAnswer" is "". Never copy or JSON-encode option texts into "correctAnswer". Not every option may be correct.
+  - "numeric": the answer is a number. "choices" is [] and "correctChoiceIndexes" is []. "correctAnswer" is a plain number such as "0.8" or "-12" (no units, no percent sign, no thousands separators, no words).
+  - "dropdown": a fill-in-the-blank sentence with 3 to 5 options: "questionText" contains exactly one "[Dropdown 1]" placeholder, "choices" the options, "correctChoiceIndexes" a list with the one 0-based position of the correct option, "correctAnswer" "".
   - Questions that need a free-text answer or a long derivation cannot be imported: leave them out.
 - "choices": the options as plain strings without letters or bullets ("A)", "i."), copied from the text.
 - "explanation": the explanation or solution the text gives for the answer, copied or lightly condensed. If the text gives none, write a one-sentence statement of the correct answer as the text gives it. Never add reasoning of your own.
@@ -118,5 +119,8 @@ For every question return:
 Return JSON {"questions":[...]}.
 
 TOPIC TEXT:
-${input.text}`
+${input.text}${key ? `
+
+ANSWER KEY TEXT (other part of the same document; match each answer to its question by its number or wording, and copy the "answerQuote" from the part that states the answer):
+${key}` : ''}`
 }

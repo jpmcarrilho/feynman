@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   cleanPageText, isNoisePage, noiseShare, dehyphenate, stripRepeatedLines, isSparse, pageRanges, splitTextIntoPages,
+  splitMarkdownIntoPages, MD_MIN_SECTION_CHARS,
 } from './cleanText'
 
 const pdfOpts = { keepIndent: false }
@@ -187,5 +188,72 @@ describe('splitTextIntoPages', () => {
   it('returns one page for short text and none for empty text', () => {
     expect(splitTextIntoPages('short', { markdown: false })).toEqual(['short'])
     expect(splitTextIntoPages('', { markdown: false })).toEqual([])
+  })
+})
+
+
+describe('splitMarkdownIntoPages', () => {
+  const words = (n: number, w = 'market') => Array.from({ length: n }, (_, i) => `${w}${i % 7}`).join(' ')
+  const logistics = [
+    '## Course logistics', '',
+    'Lectures are on Tuesdays and Thursdays at 10:00 in room 4.101. Office hours are on Fridays from 14:00 to 16:00.',
+    'Grading: 40% problem sets, 20% midterm, 40% final exam. Late problem sets lose 10% per day.', '',
+  ].join('\n')
+  const doc = [
+    '# Introduction to Microeconomics', '', 'These notes accompany the lectures.', '',
+    logistics,
+    '## Consumer theory', '', words(220), '',
+    '### Budget sets', '', words(150), '',
+    '## Producer theory', '', words(260), '',
+  ].join('\n')
+
+  it('starts a new page at every # and ## heading and keeps a short logistics section as its own page', () => {
+    const pages = splitMarkdownIntoPages(doc)
+    expect(pages.join('')).toBe(doc)
+    const logisticsPage = pages.find((p) => p.includes('Course logistics'))!
+    expect(logisticsPage).toContain('Office hours')
+    expect(logisticsPage).not.toContain('Consumer theory')
+    expect(logisticsPage.trimStart().startsWith('## Course logistics')).toBe(false) // the title section ahead of it merged forward (it is only a heading and a line)
+    expect(pages.some((p) => p.startsWith('## Consumer theory'))).toBe(true)
+    expect(pages.some((p) => p.startsWith('## Producer theory'))).toBe(true)
+    // ### does not start a page: Budget sets stays with Consumer theory
+    expect(pages.find((p) => p.startsWith('## Consumer theory'))).toContain('### Budget sets')
+  })
+
+  it('merges a section shorter than the minimum with the next one and the last short one with the previous', () => {
+    const short = `## Overview\n\nOne short line.\n\n`
+    expect(short.trim().length).toBeLessThan(MD_MIN_SECTION_CHARS)
+    const text = `${short}## Theory\n\n${words(120)}\n\n## Practice\n\n${words(120)}\n\n## Thanks\n\nBye.\n`
+    const pages = splitMarkdownIntoPages(text)
+    expect(pages.join('')).toBe(text)
+    expect(pages).toHaveLength(2)
+    expect(pages[0].startsWith('## Overview')).toBe(true)
+    expect(pages[0]).toContain('## Theory')
+    expect(pages[1].startsWith('## Practice')).toBe(true)
+    expect(pages[1].endsWith('Bye.\n')).toBe(true)
+  })
+
+  it('still cuts a long section at the size cap', () => {
+    const text = `## Long section\n\n${Array.from({ length: 40 }, (_, i) => `Paragraph ${i}. ${words(30)}`).join('\n\n')}\n\n## Next\n\n${words(100)}\n`
+    const pages = splitMarkdownIntoPages(text, { target: 1000 })
+    expect(pages.join('')).toBe(text)
+    expect(pages.length).toBeGreaterThan(3)
+    expect(pages.filter((p) => !p.startsWith('## Next')).every((p) => p.length <= 1000)).toBe(true)
+  })
+
+  it('behaves as splitTextIntoPages for a file without # or ## headings', () => {
+    const text = `### Only small headings\n\n${Array.from({ length: 30 }, (_, i) => `Paragraph ${i}. ${words(40)}`).join('\n\n')}\n`
+    expect(splitMarkdownIntoPages(text)).toEqual(splitTextIntoPages(text, { markdown: true }))
+    const plain = Array.from({ length: 30 }, (_, i) => `Line ${i} ${words(40)}`).join('\n\n')
+    expect(splitMarkdownIntoPages(plain)).toEqual(splitTextIntoPages(plain, { markdown: true }))
+  })
+
+  it('ignores # lines inside fenced code and keeps a heading alone from becoming a page', () => {
+    const text = `# Python notes\n\n## Loops\n\n${words(80)}\n\n\`\`\`python\n# not a heading\n## also not\nprint(1)\n\`\`\`\n\n${words(60)}\n\n## Functions\n\n${words(100)}\n`
+    const pages = splitMarkdownIntoPages(text)
+    expect(pages.join('')).toBe(text)
+    expect(pages).toHaveLength(2)
+    expect(pages[0]).toContain('# not a heading')
+    expect(pages[1].startsWith('## Functions')).toBe(true)
   })
 })

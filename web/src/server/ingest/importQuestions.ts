@@ -13,7 +13,7 @@ import crypto from 'crypto'
 import { prisma } from '@/lib/db'
 import { extensionOf } from '@/lib/ingestLimits'
 import { gradeAnswer } from '@/lib/grading'
-import { validateExerciseStructure, dropdownAnswerFor, dropdownOption, summarizeIssues } from '@/lib/exerciseValidation'
+import { validateExerciseStructure, deriveChoiceAnswer, INVALID_CHOICE_INDEXES, dropdownAnswerFor, dropdownOption, summarizeIssues } from '@/lib/exerciseValidation'
 import { importQuestionsPrompt, INGEST_PROMPT_VERSION } from '@/lib/prompts/ingest'
 import { parseExerciseMarkdown } from '@/services/ingest'
 import { enrichExercisesByIds, type EnrichmentOutcome } from '@/services/enrichment'
@@ -33,10 +33,10 @@ const QUESTION_HEURISTIC = /\b(question|exercise|problem)\s*\d|\?\s*$|^\s*\(?[a-
  * its answer is stated, so a topic with question marks but none of these cues (a lecture transcript, a slide deck) is not
  * sent to the model. Case-insensitive, multiline; the one place to extend. Cues were chosen from the real inputs:
  *  - an edX marked option `[x]`;
- *  - a line that starts with an answer heading and a colon or period: "Answer key:", "Answers:", "Solution 2:",
+ *  - a line that starts with an answer heading (optionally behind Markdown `#` marks) and a colon or period: "Answer key:", "Answers:", "Solution 2:",
  *    "Correct answer:", "Explanation:" (also Portuguese resposta/gabarito/solução, Spanish respuesta/solución,
  *    French réponse/corrigé/solution, German Antwort/Lösung);
- *  - a bare heading line "Answer key", "Solutions", "Gabarito", ...;
+ *  - a bare heading line "Answer key", "Solutions", "Gabarito", ... (also behind Markdown heading marks: "## Answer key");
  *  - answer-key lines: "1. B", "2) c", "Question 3: A, B", "Q4 - D";
  *  - the phrase "the correct answer/option/choice is".
  * Only these languages are supported; a document in another language never matches the headings and is skipped unless it
@@ -44,8 +44,8 @@ const QUESTION_HEURISTIC = /\b(question|exercise|problem)\s*\d|\?\s*$|^\s*\(?[a-
  */
 export const ANSWER_CUES: RegExp[] = [
   /\[x\]/i,
-  /^\s*(answer key|answers?|solutions?|correct answers?|explanations?|resposta|respostas|gabarito|solu[cç][aã]o|solu[cç][oõ]es|respuestas?|soluci[oó]n|soluciones|r[ée]ponses?|corrig[ée]|antworten?|l[öo]sung(en)?)\s*(\d+\s*)?[:.]/im,
-  /^\s*(answer key|solutions?|answers|gabarito|respuestas|corrig[ée]|l[öo]sungen)\s*$/im,
+  /^\s*(?:#{1,6}[ \t]*)?(answer key|answers?|solutions?|correct answers?|explanations?|resposta|respostas|gabarito|solu[cç][aã]o|solu[cç][oõ]es|respuestas?|soluci[oó]n|soluciones|r[ée]ponses?|corrig[ée]|antworten?|l[öo]sung(en)?)\s*(\d+\s*)?[:.]/im,
+  /^\s*(?:#{1,6}[ \t]*)?(answer key|solutions?|answers|gabarito|respuestas|corrig[ée]|l[öo]sungen)\s*$/im,
   /^\s*(question|problem|exercise|q|quest[aã]o|pregunta|ejercicio)?\s*\d+\s*[:.)\-]\s*\(?[a-h]\)?(\s*[,&]\s*\(?[a-h]\)?)*\s*$/im,
   /\bthe correct (answer|option|choice)s? (is|are)\b/i,
 ]
@@ -55,10 +55,21 @@ export function hasAnswerCue(text: string): boolean {
   return ANSWER_CUES.some((cue) => cue.test(text))
 }
 
+/** Characters of answer-key text passed along with one question topic (keys are short; this bounds a huge one). */
+export const ANSWER_KEY_MAX_CHARS = 30_000
+
 /** The question-pattern half of the pre-filter alone (at least three question-like marks). */
 export function hasQuestionPattern(text: string): boolean {
   const matches = text.match(QUESTION_HEURISTIC)
   return (matches?.length ?? 0) >= QUESTION_HEURISTIC_MIN_MATCHES
+}
+
+/** Stricter question marks for a topic whose answers are in another topic: numbered questions and lettered options, not any line ending in "?". */
+const QUIZ_PATTERN = /\b(question|exercise|problem|q)\s*\.?\s*\d+|^\s*\d+[.)]\s+\S.*\?\s*$|^\s*\(?[a-d]\)\s/gim
+
+/** True when the text looks like a quiz: at least three numbered questions or lettered options. */
+export function hasQuizPattern(text: string): boolean {
+  return (text.match(QUIZ_PATTERN)?.length ?? 0) >= QUESTION_HEURISTIC_MIN_MATCHES
 }
 
 /**
@@ -120,6 +131,17 @@ function displayAnswer(c: { exerciseType: string; correctAnswer: string }): stri
     } catch { /* shown as stored */ }
   }
   return c.correctAnswer
+}
+
+/**
+ * A model question as a candidate: the stored key is derived from `correctChoiceIndexes` (see `deriveChoiceAnswer`), so
+ * the model never retypes option text. A bad index list is rejected with the code `invalid_correct_choice_indexes`.
+ */
+export function candidateFromImported(q: ImportedQuestion): { ok: true; candidate: Candidate } | { ok: false; reason: string } {
+  const choices = (q.choices ?? []).map((x) => String(x).trim())
+  const derived = deriveChoiceAnswer(q.exerciseType, choices, q.correctChoiceIndexes, q.correctAnswer ?? '')
+  if (!derived.ok) return { ok: false, reason: INVALID_CHOICE_INDEXES }
+  return { ok: true, candidate: { ...q, choices, correctAnswer: derived.correctAnswer } }
 }
 
 /**
@@ -198,6 +220,8 @@ export type ImportStats = {
   topicsStudyMaterial: number
   /** Topics that passed the heuristic (each costs up to two model attempts). */
   topicsPassingHeuristic: number
+  /** Topics with an answer cue but no question pattern (an answer key) whose text was passed along with the question topics. */
+  answerKeyTopics: number
   /** Question candidates found: edX blocks, or questions the model returned. */
   candidates: number
   imported: number
@@ -250,7 +274,7 @@ export async function importQuestionsForSource(
   const source = await prisma.source.findUnique({ where: { id: sourceId } })
   if (!source) throw new Error(`Source ${sourceId} not found`)
   const stats: ImportStats = {
-    path: 'none', topicsTotal: 0, topicsStudyMaterial: 0, topicsPassingHeuristic: 0, candidates: 0, imported: 0, rejected: {},
+    path: 'none', topicsTotal: 0, topicsStudyMaterial: 0, topicsPassingHeuristic: 0, answerKeyTopics: 0, candidates: 0, imported: 0, rejected: {},
     rejectedExamples: [], explanationFallbacks: 0, model: newModelStats(), enrichment: { enabled: false, outcomes: [] }, ms: 0,
   }
   if (source.status !== 'importing_questions') {
@@ -295,17 +319,32 @@ export async function importQuestionsForSource(
       stats.path = 'edx_markdown'
       edx.forEach((c, i) => take(topicForEdxBlock(c.questionText, i, edx.length, study).id, c, null))
     } else if (study.length > 0) {
-      const candidates = study.filter((t) => looksLikeQuestions(t.content ?? ''))
+      // A quiz and its key can land in different topics (questions on pages 1-2, key on page 3): a topic with an answer cue but
+      // no question pattern is a key, and its text is an extra answer source for the question topics of this source.
+      const keyTopics = study.filter((t) => hasAnswerCue(t.content ?? '') && !hasQuestionPattern(t.content ?? ''))
+      stats.answerKeyTopics = keyTopics.length
+      const candidates = study.filter((t) => looksLikeQuestions(t.content ?? '') || (keyTopics.length > 0 && hasQuizPattern(t.content ?? '')))
       stats.topicsPassingHeuristic = candidates.length
       stats.path = candidates.length > 0 ? 'model' : 'none'
+      const keyTextFor = (topicId: string): string =>
+        keyTopics.filter((k) => k.id !== topicId).map((k) => (k.content ?? '').trim()).join('\n\n').slice(0, ANSWER_KEY_MAX_CHARS)
       const perTopic = await mapWithConcurrency(candidates, STAGE_CONCURRENCY, async (t) => {
+        const answerKeyText = keyTextFor(t.id)
         const object = await structuredCall({
           generate: deps.generate, stats: stats.model, schema: ImportedQuestionsSchema, what: `Reading the questions of "${t.title.slice(0, 60)}"`,
-          prompt: importQuestionsPrompt({ topicTitle: t.title, text: t.content ?? '' }),
+          prompt: importQuestionsPrompt({ topicTitle: t.title, text: t.content ?? '', answerKeyText: answerKeyText || undefined }),
         })
         return object.questions as ImportedQuestion[]
       })
-      perTopic.forEach((questions, i) => questions.forEach((q) => take(candidates[i].id, q, candidates[i].content ?? '')))
+      // The quoted passage may come from the topic itself or from a key topic
+      perTopic.forEach((questions, i) => questions.forEach((q) => {
+        const made = candidateFromImported(q)
+        if (!made.ok) {
+          stats.candidates++
+          return addReject(stats, made.reason, q.questionText ?? '')
+        }
+        take(candidates[i].id, made.candidate, [candidates[i].content ?? '', keyTextFor(candidates[i].id)].join('\n\n'))
+      }))
     }
 
     // Write: replace the unanswered imported questions of this source in one transaction

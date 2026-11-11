@@ -133,6 +133,31 @@ describe('stage mapping', () => {
     expect((await statusOf(src)).warning).toBe('Earlier warning. Starter questions: 4 created, 1 could not be generated.')
   })
 
+  it('an imported studyspace (topics without a source, no stored profile) runs generating_exercises for a later file and keeps its starter status', async () => {
+    const course = await makeCourse({ starterStatus: 'done' })
+    await prisma.topic.create({ data: { id: `imp-${course}`, courseId: course, order: 0, week: 'Week_01', title: 'Imported', content: 'x' } })
+    const src = await makeSource(course, 'uploaded', { bundle: 'later' })
+    runner.enqueueSource(src)
+    await runner.whenIdle()
+    expect((await statusOf(src)).status).toBe('ready')
+    expect(stages.starters).toHaveBeenCalledTimes(1)
+    expect((await prisma.course.findUniqueOrThrow({ where: { id: course } })).starterStatus).toBe('done')
+  })
+
+  it('calls the registered terminal hooks with the studyspace, the file and its final status', async () => {
+    const course = await makeCourse({ profile: JSON.stringify(defaultProfile({ title: 'x' })) })
+    const src = await makeSource(course, 'uploaded', { bundle: 'later' })
+    const seen: unknown[] = []
+    const off = runner.onSourceTerminal('t26-probe', async (info) => { seen.push(info) })
+    try {
+      runner.enqueueSource(src)
+      await runner.whenIdle()
+    } finally {
+      off()
+    }
+    expect(seen).toEqual([{ courseId: course, sourceId: src, status: 'ready' }])
+  })
+
   it('a starter-stage crash never fails the source', async () => {
     const course = await makeCourse({ profile: JSON.stringify(defaultProfile({ title: 'x' })) })
     const src = await makeSource(course, 'generating_exercises')

@@ -63,6 +63,31 @@ describe('getCourseArtifactsService course scope', () => {
   })
 })
 
+describe('getCourseArtifactsService: files added to an imported studyspace', () => {
+  beforeEach(() => vi.clearAllMocks())
+
+  const topic = (id: string, week: string, order: number, over: Record<string, unknown> = {}) => ({
+    id, courseId: 'course-1', week, className: 'Class', unit: '1', title: id, resourceType: 'Transcript .txt', localPath: 'x.txt', content: 'c', order, sourceId: null, source: null, pageStart: null, pageEnd: null,
+    course: { code: '14.750x' }, exercises: [], ...over,
+  })
+
+  it('lists the uploaded modules and their topics after the imported modules, in outline order, and links them through the topic link', async () => {
+    vi.mocked(prisma.course.findMany).mockResolvedValueOnce([{ id: 'course-1', code: '14.750x', title: 'PE', description: null, profile: null, profileSuggestion: null, goal: null, starterStatus: 'done', createdAt: new Date(0) }] as never)
+    // the database returns them sorted by week label: "04 · ..." sorts before "Week_..."
+    vi.mocked(prisma.topic.findMany).mockResolvedValueOnce([
+      topic('up-b', '05 · Second added module', 41, { sourceId: 's1', resourceType: 'Uploaded text', localPath: null, source: { originalName: 'notes.md', mimeType: 'text/markdown' } }),
+      topic('up-a', '04 · First added module', 40, { sourceId: 's1', resourceType: 'Uploaded PDF', localPath: null, pageStart: 3, pageEnd: 4, source: { originalName: 'deck.pdf', mimeType: 'application/pdf' } }),
+      topic('imp-1', 'Week_01_Intro', 0),
+      topic('imp-2', 'Week_02_Voting', 10),
+    ] as never)
+    const [course] = await getCourseArtifactsService('course-1')
+    expect(course.weeks.map((w) => w.weekName)).toEqual(['Week_01_Intro', 'Week_02_Voting', '04 · First added module', '05 · Second added module'])
+    const pdf = course.weeks[2].slides[0]
+    expect(pdf).toMatchObject({ id: 'up-a', detail: 'deck.pdf · pages 3-4', link: '/api/files/topic/up-a#page=3' })
+    expect(course.weeks[3].transcriptions[0]).toMatchObject({ id: 'up-b', detail: 'notes.md', link: '/api/files/topic/up-b' })
+  })
+})
+
 describe('getCourseArtifactsService', () => {
   beforeEach(() => {
     vi.clearAllMocks()

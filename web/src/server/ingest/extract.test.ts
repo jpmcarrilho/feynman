@@ -135,6 +135,33 @@ describe('extractBytes: text files', () => {
     expect(r.pages.slice(1).every((p) => p.text.startsWith('#'))).toBe(true)
   })
 
+  it('gives a short Markdown logistics section its own page and a file without headings the same pages as before', async () => {
+    const body = (n: number) => Array.from({ length: n }, (_, i) => `Sentence ${i} about prices and quantities in a market.`).join(' ')
+    const md = ['# Microeconomics notes', '', '## Course logistics', '', 'Lectures on Tuesdays at 10:00. Office hours on Fridays. Grading: 40% problem sets, 20% midterm, 40% final.', 'Late work loses 10% per day. Contact the teaching assistant by email for extensions.', '', '## Consumer theory', '', body(60), '', '## Producer theory', '', body(60), ''].join('\n')
+    const r = await extractBytes('.md', Buffer.from(md))
+    const logisticsPage = r.pages.find((p) => p.text.includes('Office hours'))!
+    expect(logisticsPage.text).toContain('Course logistics')
+    expect(logisticsPage.text).not.toContain('Consumer theory')
+    expect(r.pages.filter((p) => p.text.startsWith('## ')).map((p) => p.text.split('\n')[0])).toEqual(['## Consumer theory', '## Producer theory'])
+    const plain = Array.from({ length: 12 }, (_, i) => `Paragraph ${i}. ${body(20)}`).join('\n\n')
+    const a = await extractBytes('.md', Buffer.from(plain))
+    const b = await extractBytes('.txt', Buffer.from(plain))
+    expect(a.pages).toEqual(b.pages)
+  })
+
+  it('strips a saved web page uploaded as .txt and says so; a page with nothing to read is refused with what to upload instead', async () => {
+    const para = '<p>The median voter theorem says that, with single-peaked preferences and majority rule, both candidates converge on the position of the median voter.</p>'
+    const html = `<!DOCTYPE html><html><head><title>t</title><style>.a{color:red}</style><script>var track = 1; function f(){ return "<b>x</b>" }</script></head><body><nav><a href="/">Home</a></nav>${para.repeat(6)}<script>f()</script></body></html>`
+    const r = await extractBytes('.txt', Buffer.from(html))
+    const all = r.pages.map((p) => p.text).join('\n')
+    expect(all).toContain('converge on the position of the median voter')
+    expect(all).not.toMatch(/<|var track|color:red/)
+    expect(r.warning).toMatch(/saved web page/)
+
+    const shell = '<!DOCTYPE html><html><head><script>var a=1;</script></head><body><div id="app"></div><script src="bundle.js"></script><noscript>Enable JavaScript to view this page.</noscript></body></html>'
+    await expect(extractBytes('.md', Buffer.from(shell))).rejects.toThrow(/saved web page[\s\S]*too little to study from[\s\S]*\.txt or \.md file, or print the page to PDF/)
+  })
+
   it('reports Windows-1252 decoding as a warning', async () => {
     const r = await extractBytes('.txt', Buffer.from([...enc.encode('Na'), 0xef, ...enc.encode('ve caf'), 0xe9]))
     expect(r.pages[0].text).toBe('Naïve café')

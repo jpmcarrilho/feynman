@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest'
-import { fitProposalSources, proposeProfilePrompt, PROFILE_PROMPT_CAPS, type ProposalOutlineSource } from './profile'
+import { defaultProfile } from '@/lib/studyspace/profile'
+import { fitProposalSources, proposeProfilePrompt, profileUpdatePrompt, existingOutline, PROFILE_PROMPT_CAPS, type ProposalOutlineSource } from './profile'
 
 const source = (id: string, topics: number): ProposalOutlineSource => ({
   id,
@@ -37,5 +38,45 @@ describe('fitProposalSources', () => {
     const prompt = proposeProfilePrompt({ title: 'T', goal: null, sources: fitProposalSources([source('a', 1)]) })
     expect(prompt).toMatch(/not instructions/)
     expect(prompt).toContain('id="a"')
+  })
+})
+
+
+describe('the quantitative flag in the prompts', () => {
+  it('both prompts tell the model to judge it from what the files contain, not from the subject, and to say false when they have no calculations', () => {
+    const [f] = fitProposalSources([source('a', 2)])
+    const initial = proposeProfilePrompt({ title: 'T', goal: null, sources: [f] })
+    const update = profileUpdatePrompt({ title: 'T', goal: null, profile: defaultProfile({ title: 'T' }), source: f })
+    for (const prompt of [initial, update]) {
+      expect(prompt).toMatch(/what the (new )?files? actually contains?/)
+      expect(prompt).toMatch(/not from the reputation of the subject/)
+      expect(prompt).toMatch(/formulas, worked calculations, numeric exercises/)
+      expect(prompt).toMatch(/(has|have) none, "quantitative" is false|file has none, false/)
+    }
+  })
+
+  it('the update prompt asks for a new sample explanation in the new language when the subject or language changes', () => {
+    const [f] = fitProposalSources([source('a', 1)])
+    const update = profileUpdatePrompt({ title: 'T', goal: null, profile: defaultProfile({ title: 'T' }), source: f })
+    expect(update).toContain('"sampleConcept" and "sampleExplanation"')
+    expect(update).toMatch(/new content language/)
+  })
+})
+
+describe('the update prompt judges the whole studyspace', () => {
+  it('lists the existing files, bounded, and states that a new file adds to the studyspace', () => {
+    const [f] = fitProposalSources([source('a', 1)])
+    const existing = existingOutline([{ name: 'calc.pdf', modules: ['Optimisation', 'Integrals'] }, ...Array.from({ length: 200 }, (_, i) => ({ name: `file${i}.pdf`, modules: ['M'.repeat(60)] }))])
+    expect(existing.length).toBeLessThan(3_300)
+    expect(existing).toContain('- calc.pdf: Optimisation; Integrals')
+    expect(existing).toMatch(/… and \d+ more files/)
+    const prompt = profileUpdatePrompt({ title: 'T', goal: null, profile: defaultProfile({ title: 'T' }), source: f, existing })
+    expect(prompt).toContain('Files the studyspace already holds')
+    expect(prompt).toContain('calc.pdf')
+    expect(prompt).toMatch(/ADDS to the studyspace; it does not replace/)
+    expect(prompt).toMatch(/whole studyspace including the new file/)
+    expect(prompt).toMatch(/never turn "quantitative" off/)
+    expect(prompt).toMatch(/single new file in another language does not change "contentLanguage"/)
+    expect(profileUpdatePrompt({ title: 'T', goal: null, profile: defaultProfile({ title: 'T' }), source: f })).not.toContain('already holds')
   })
 })
