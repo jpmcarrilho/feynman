@@ -851,6 +851,7 @@ Verify: lint/typecheck/vitest/`npm run build`; `/` after login → `/spaces` wit
 Commit: `feat(spaces): studyspace list and per-space study route with scoped data and voice persona`
 
 #### T20 — Phone study flow: confirm answers, tutor bottom sheet (sonnet)
+Added 2026-11-11 (from T18 testing): the card header shows the topic title, which for imported question topics is just "Question 6" ("14.750x - Question 6" while the session counter says "Question 3 of 10"). Show the module and class instead (for example "Week 1 · Introduction to Political Economy"), not the source question number.
 Added 2026-11-11 (from T17 testing), required here: in exam mode a multi-select answer is only stored when "Save Answer" is clicked; ticking boxes and moving on loses the answer (a tester lost one this way). Save the draft on every toggle (through the existing debounced draft writer) and remove the need for a separate save button in exams; the "N of M answered" counter must update from it.
 Added 2026-11-10 (section 5.7): the bottom sheet carries the chat mode selector; from T19 on the choice is stored per studyspace (`feynman_chat_mode_<courseId>`, migrating `feynman_chat_mode_legacy`).
 Depends: T19. Files: `src/components/features/Flashcard.tsx` (+ test), `src/components/features/StudyInterface.tsx`, new `src/components/features/TutorSheet.tsx` (+ test).
