@@ -56,6 +56,34 @@ describe('VoiceHub Component', () => {
     await waitFor(() => expect(pendingMessageRef.current).toBeNull())
   })
 
+  it('reports a typed message and a chat-mode switch as help asked, but not an empty message or the already active mode', () => {
+    const onHelpRequested = vi.fn()
+    const onChange = vi.fn()
+    mockConnect.mockReset()
+    mockConnect.mockResolvedValue(undefined)
+    render(
+      <VoiceHub
+        liveAPI={{ ...defaultLiveAPI, setMuted: vi.fn() }}
+        pendingMessageRef={{ current: null }}
+        onHelpRequested={onHelpRequested}
+        chatMode="probe"
+        onChatModeChange={onChange}
+        chatModeProfile={LEGACY_VOICE_PROFILE}
+        sessionMode="study"
+      />
+    )
+    const form = screen.getByPlaceholderText('Type a message to start chatting...').closest('form')!
+    fireEvent.submit(form)
+    expect(onHelpRequested).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('radio', { name: 'Probe' }))
+    expect(onHelpRequested).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('radio', { name: 'Explain' }))
+    expect(onHelpRequested).toHaveBeenCalledTimes(1)
+    fireEvent.change(screen.getByPlaceholderText('Type a message to start chatting...'), { target: { value: 'hint please' } })
+    fireEvent.submit(form)
+    expect(onHelpRequested).toHaveBeenCalledTimes(2)
+  })
+
   it('displays messages', () => {
     const activeLiveAPI = {
       ...defaultLiveAPI,

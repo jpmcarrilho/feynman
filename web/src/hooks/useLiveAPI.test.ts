@@ -85,4 +85,30 @@ describe('useLiveAPI context vs text', () => {
     act(() => hook.result.current.sendText('hello'))
     expect(hook.result.current.messages.map((m) => m.text)).toEqual(['hello'])
   })
+
+  it('a server "interrupted" event (caused by the app\'s own context or typed message) is not student speech', async () => {
+    const onSpeech = vi.fn()
+    const hook = renderHook(() => useLiveAPI('sys', onSpeech))
+    let p: Promise<void>
+    await act(async () => {
+      p = hook.result.current.connect(false)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      FakeWebSocket.instances[0].onopen?.()
+      await p
+    })
+    const ws = FakeWebSocket.instances[0]
+    // the student moves to the next question: the app sends the new exercise context, the server reports an interruption
+    act(() => hook.result.current.sendContext('[SYSTEM MESSAGE: new exercise]', { interrupt: true }))
+    await act(async () => {
+      await ws.onmessage?.({ data: JSON.stringify({ serverContent: { interrupted: true } }) })
+    })
+    expect(onSpeech).not.toHaveBeenCalled()
+    // a transcript of the student's audio is a signal
+    await act(async () => {
+      await ws.onmessage?.({ data: JSON.stringify({ serverContent: { inputTranscription: { text: 'hmm' } } }) })
+    })
+    expect(onSpeech).toHaveBeenCalledWith('transcript')
+  })
 })

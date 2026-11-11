@@ -15,18 +15,21 @@ import {
   logAnswerForSession,
   getSessionResultsFor,
   EXAM_GRACE_MS,
+  recordStudyTimeFor,
+  boundedIncrement,
+  MAX_LOG_DURATION_SEC,
 } from './sessionService'
 
 const tx = vi.hoisted(() => ({
   studySession: { findUnique: vi.fn(), update: vi.fn(), create: vi.fn() },
-  sessionExercise: { findMany: vi.fn(), findUnique: vi.fn(), createMany: vi.fn() },
+  sessionExercise: { findMany: vi.fn(), findUnique: vi.fn(), createMany: vi.fn(), update: vi.fn() },
   exercise: { findMany: vi.fn() },
   exerciseLog: { findMany: vi.fn(), createMany: vi.fn(), create: vi.fn() },
 }))
 const db = vi.hoisted(() => ({
   $transaction: vi.fn(),
   studySession: { findMany: vi.fn(), findUnique: vi.fn(), updateMany: vi.fn() },
-  sessionExercise: { findMany: vi.fn(), updateMany: vi.fn(), findUnique: vi.fn() },
+  sessionExercise: { findMany: vi.fn(), updateMany: vi.fn(), findUnique: vi.fn(), findFirst: vi.fn() },
   exerciseLog: { findMany: vi.fn(), findUnique: vi.fn() },
 }))
 
@@ -408,6 +411,56 @@ describe('getActiveSessionFor', () => {
   })
 })
 
+describe('submitExamForSession: visible time per question', () => {
+  it('writes each question\'s accumulated time as its log duration, also for a question never answered', async () => {
+    tx.sessionExercise.findMany.mockResolvedValue([
+      { exerciseId: 'e1', draftAnswer: 'A', timeSpentSec: 42 },
+      { exerciseId: 'e2', draftAnswer: null, timeSpentSec: 17 },
+      { exerciseId: 'e3', draftAnswer: null, timeSpentSec: 0 },
+    ])
+    await submitExamForSession('s1')
+    const rows = (tx.exerciseLog.createMany.mock.calls[0][0] as { data: Record<string, unknown>[] }).data
+    expect(rows.map((x) => [x.exerciseId, x.duration, x.assisted])).toEqual([['e1', 42, undefined], ['e2', 17, undefined], ['e3', 0, undefined]])
+  })
+
+  it('an exam finalized after the deadline uses whatever was accumulated', async () => {
+    tx.studySession.findUnique.mockResolvedValue({ id: 's1', mode: 'exam', status: 'active', deadline: NOW, startTime: new Date(NOW.getTime() - 3_600_000) })
+    tx.sessionExercise.findMany.mockResolvedValue([{ exerciseId: 'e1', draftAnswer: null, timeSpentSec: 90 }])
+    tx.exercise.findMany.mockResolvedValue([ex('e1', 'A')])
+    await submitExamForSession('s1', undefined, at(EXAM_GRACE_MS + 5000))
+    const rows = (tx.exerciseLog.createMany.mock.calls[0][0] as { data: Record<string, unknown>[] }).data
+    expect(rows[0].duration).toBe(90)
+  })
+
+  it('never records more than an hour or more than the session\'s wall-clock age, and never a negative value', async () => {
+    tx.studySession.findUnique.mockResolvedValue({ id: 's1', mode: 'exam', status: 'active', deadline: null, startTime: new Date(NOW.getTime() - 60_000) })
+    tx.sessionExercise.findMany.mockResolvedValue([
+      { exerciseId: 'e1', draftAnswer: null, timeSpentSec: 100_000 },
+      { exerciseId: 'e2', draftAnswer: null, timeSpentSec: -5 },
+      { exerciseId: 'e3', draftAnswer: null, timeSpentSec: 30 },
+    ])
+    await submitExamForSession('s1', undefined, NOW)
+    const rows = (tx.exerciseLog.createMany.mock.calls[0][0] as { data: Record<string, unknown>[] }).data
+    expect(rows.map((x) => x.duration)).toEqual([60, 0, 30])
+    expect(MAX_LOG_DURATION_SEC).toBe(3600)
+  })
+})
+
+describe('boundedIncrement', () => {
+  const start = new Date(NOW.getTime() - 100_000)
+  it('rounds, rejects negatives and non-finite values, caps one save at an hour', () => {
+    expect(boundedIncrement(4.6, 0, null, NOW)).toBe(5)
+    for (const bad of [-3, NaN, Infinity, -Infinity, '5', null, undefined]) expect(boundedIncrement(bad, 0, null, NOW)).toBe(0)
+    expect(boundedIncrement(99_999, 0, null, NOW)).toBe(3600)
+  })
+  it('keeps the question\'s total within the wall-clock time since the session started', () => {
+    expect(boundedIncrement(50, 0, start, NOW)).toBe(50)
+    expect(boundedIncrement(50, 70, start, NOW)).toBe(30)
+    expect(boundedIncrement(50, 100, start, NOW)).toBe(0)
+    expect(boundedIncrement(50, 500, start, NOW)).toBe(0)
+  })
+})
+
 describe('saveDraftFor', () => {
   it('writes the draft only for an item of an active exam that is inside deadline + grace, in one conditional update', async () => {
     db.sessionExercise.updateMany.mockResolvedValue({ count: 1 })
@@ -434,6 +487,26 @@ describe('saveDraftFor', () => {
     expect(db.sessionExercise.updateMany.mock.calls.map((c) => c[0].data)).toEqual([{ draftAnswer: null }, { draftAnswer: null }])
   })
 
+  it('a save without a draft (undefined) adds time and leaves the stored draft alone', async () => {
+    db.sessionExercise.findFirst.mockResolvedValue({ timeSpentSec: 0, session: { startTime: new Date(NOW.getTime() - 600_000) } })
+    db.sessionExercise.updateMany.mockResolvedValue({ count: 1 })
+    expect(await saveDraftFor('s', 'e', undefined, 7, NOW)).toEqual({ ok: true })
+    expect(db.sessionExercise.updateMany.mock.calls[0][0].data).toEqual({ timeSpentSec: { increment: 7 } })
+  })
+
+  it('never lets the question\'s time exceed the wall-clock time since the session started', async () => {
+    db.sessionExercise.findFirst.mockResolvedValue({ timeSpentSec: 100, session: { startTime: new Date(NOW.getTime() - 130_000) } })
+    db.sessionExercise.updateMany.mockResolvedValue({ count: 1 })
+    await saveDraftFor('s', 'e', 'A', 500, NOW)
+    expect(db.sessionExercise.updateMany.mock.calls[0][0].data).toEqual({ draftAnswer: 'A', timeSpentSec: { increment: 30 } })
+  })
+
+  it.each([[-5], [NaN], [Infinity]])('a delta of %s adds no time', async (bad) => {
+    db.sessionExercise.updateMany.mockResolvedValue({ count: 1 })
+    await saveDraftFor('s', 'e', 'x', bad, NOW)
+    expect(db.sessionExercise.updateMany.mock.calls[0][0].data).toEqual({ draftAnswer: 'x' })
+  })
+
   it('clamps the time delta', async () => {
     db.sessionExercise.updateMany.mockResolvedValue({ count: 1 })
     await saveDraftFor('s', 'e', 'x', 999_999, NOW)
@@ -458,6 +531,43 @@ describe('saveDraftFor', () => {
   it('rejects malformed input without touching the database', async () => {
     expect(await saveDraftFor('s', 'e', 5 as unknown as string, 0, NOW)).toEqual({ ok: false, reason: 'invalid' })
     expect(await saveDraftFor(1 as unknown as string, 'e', 'A', 0, NOW)).toEqual({ ok: false, reason: 'invalid' })
+    expect(db.sessionExercise.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+describe('recordStudyTimeFor', () => {
+  const START = new Date(NOW.getTime() - 600_000)
+  const row = (extra: Record<string, unknown> = {}) => ({ timeSpentSec: 10, session: { mode: 'study', status: 'active', startTime: START, ...extra } })
+
+  it('adds bounded seconds to a question of an active study session', async () => {
+    db.sessionExercise.findUnique.mockResolvedValue(row())
+    db.exerciseLog.findUnique.mockResolvedValue(null)
+    expect(await recordStudyTimeFor('s', 'e', 12, NOW)).toEqual({ ok: true })
+    const arg = db.sessionExercise.updateMany.mock.calls[0][0]
+    expect(arg.data).toEqual({ timeSpentSec: { increment: 12 } })
+    expect(arg.where).toMatchObject({ sessionId: 's', exerciseId: 'e', session: { status: 'active', mode: { not: 'exam' } } })
+  })
+
+  it('ignores negative and non-finite values and time that arrives after the answer was logged', async () => {
+    db.sessionExercise.findUnique.mockResolvedValue(row())
+    db.exerciseLog.findUnique.mockResolvedValue(null)
+    for (const bad of [-1, NaN, Infinity]) expect(await recordStudyTimeFor('s', 'e', bad, NOW)).toEqual({ ok: true })
+    db.exerciseLog.findUnique.mockResolvedValue({ id: 'l' })
+    expect(await recordStudyTimeFor('s', 'e', 5, NOW)).toEqual({ ok: true })
+    expect(db.sessionExercise.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('says why it did nothing', async () => {
+    db.sessionExercise.findUnique.mockResolvedValueOnce(row({ status: 'completed' }))
+    expect(await recordStudyTimeFor('s', 'e', 5, NOW)).toEqual({ ok: false, reason: 'not_active' })
+    db.sessionExercise.findUnique.mockResolvedValueOnce(row({ mode: 'exam' }))
+    expect(await recordStudyTimeFor('s', 'e', 5, NOW)).toEqual({ ok: false, reason: 'not_exam' })
+    db.sessionExercise.findUnique.mockResolvedValueOnce(null)
+    db.studySession.findUnique.mockResolvedValueOnce({ id: 's' })
+    expect(await recordStudyTimeFor('s', 'x', 5, NOW)).toEqual({ ok: false, reason: 'not_item' })
+    db.sessionExercise.findUnique.mockResolvedValueOnce(null)
+    db.studySession.findUnique.mockResolvedValueOnce(null)
+    expect(await recordStudyTimeFor('nope', 'e', 5, NOW)).toEqual({ ok: false, reason: 'not_found' })
     expect(db.sessionExercise.updateMany).not.toHaveBeenCalled()
   })
 })
@@ -502,9 +612,46 @@ describe('logAnswerForSession', () => {
   })
 
   it('grades on the server and stores the log for an item of an active study session', async () => {
-    expect(await logAnswerForSession('s', 'e1', 'A', { duration: 12 })).toEqual({ score: 1, isCorrect: true })
-    expect(tx.exerciseLog.create.mock.calls[0][0].data).toMatchObject({ sessionId: 's', exerciseId: 'e1', isCorrect: true, score: 1, duration: 12 })
+    expect(await logAnswerForSession('s', 'e1', 'A', { durationSec: 12 })).toEqual({ score: 1, isCorrect: true })
+    expect(tx.exerciseLog.create.mock.calls[0][0].data).toMatchObject({ sessionId: 's', exerciseId: 'e1', isCorrect: true, score: 1, duration: 12, assisted: false })
     expect(tx.sessionExercise.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { sessionId_exerciseId: { sessionId: 's', exerciseId: 'e1' } } }))
+  })
+
+  it('adds the seconds sent with the answer to the time already stored and keeps the question\'s total in step', async () => {
+    tx.sessionExercise.findUnique.mockResolvedValue({ exercise, timeSpentSec: 40 })
+    await logAnswerForSession('s', 'e1', 'A', { durationSec: 20, assisted: true })
+    expect(tx.exerciseLog.create.mock.calls[0][0].data).toMatchObject({ duration: 60, assisted: true })
+    expect(tx.sessionExercise.update).toHaveBeenCalledWith({ where: { sessionId_exerciseId: { sessionId: 's', exerciseId: 'e1' } }, data: { timeSpentSec: 60 } })
+  })
+
+  it('without a duration it stores the time already recorded (0 when none): never an invented number', async () => {
+    await logAnswerForSession('s', 'e1', 'A')
+    expect(tx.exerciseLog.create.mock.calls[0][0].data).toMatchObject({ duration: 0, assisted: false })
+    tx.exerciseLog.create.mockClear()
+    tx.sessionExercise.findUnique.mockResolvedValue({ exercise, timeSpentSec: 25 })
+    await logAnswerForSession('s', 'e1', 'A')
+    expect(tx.exerciseLog.create.mock.calls[0][0].data).toMatchObject({ duration: 25 })
+  })
+
+  it.each([[-4], [NaN], [Infinity], ['9']])('a duration of %s adds nothing', async (bad) => {
+    await logAnswerForSession('s', 'e1', 'A', { durationSec: bad as number })
+    expect(tx.exerciseLog.create.mock.calls[0][0].data.duration).toBe(0)
+  })
+
+  it('caps the duration at an hour and at the session\'s wall-clock age', async () => {
+    await logAnswerForSession('s', 'e1', 'A', { durationSec: 99_999 })
+    expect(tx.exerciseLog.create.mock.calls[0][0].data.duration).toBe(3600)
+    tx.exerciseLog.create.mockClear()
+    tx.studySession.findUnique.mockResolvedValue({ status: 'active', mode: 'study', startTime: new Date(Date.now() - 20_000) })
+    await logAnswerForSession('s', 'e1', 'A', { durationSec: 500 })
+    const d = tx.exerciseLog.create.mock.calls[0][0].data.duration
+    expect(d).toBeGreaterThanOrEqual(19)
+    expect(d).toBeLessThanOrEqual(21)
+  })
+
+  it('stores assisted only when it is exactly true', async () => {
+    await logAnswerForSession('s', 'e1', 'A', { assisted: 'yes' as unknown as boolean })
+    expect(tx.exerciseLog.create.mock.calls[0][0].data.assisted).toBe(false)
   })
 
   it('writes nothing for an exercise that is not an item, a finished session, an exam or an unknown session', async () => {

@@ -1,10 +1,29 @@
 import { prisma } from '@/lib/db'
 import { gradeAnswer, logScore } from '@/lib/grading'
 
-// Visible time per question is measured from T18 on; until then every log keeps the 30 s it has always had.
-const DEFAULT_DURATION_SEC = 30
 const MAX_ANSWER_LENGTH = 20_000
+/** Most seconds one save may add to a question's time. */
 const MAX_SECONDS_PER_SAVE = 3600
+/**
+ * Most seconds one log may record as its duration. Logs written before the visible time was measured (T18) all hold
+ * 30 as a placeholder; from T18 on the value is the question's accumulated visible time (0 when none was recorded).
+ */
+export const MAX_LOG_DURATION_SEC = 3600
+
+/**
+ * How many of `deltaSec` visible seconds may be added to a question that already holds `currentSec`: the delta is
+ * rounded, a negative or non-finite one counts as 0, one save adds at most an hour, and the question's total never
+ * exceeds the wall-clock time since the session started.
+ */
+export function boundedIncrement(deltaSec: unknown, currentSec: number, startTime: Date | null | undefined, now: Date): number {
+  if (typeof deltaSec !== 'number' || !Number.isFinite(deltaSec)) return 0
+  let delta = Math.max(0, Math.min(MAX_SECONDS_PER_SAVE, Math.round(deltaSec)))
+  if (startTime instanceof Date && !Number.isNaN(startTime.getTime())) {
+    const wallClockSec = Math.max(0, Math.floor((now.getTime() - startTime.getTime()) / 1000))
+    delta = Math.min(delta, Math.max(0, wallClockSec - Math.max(0, currentSec)))
+  }
+  return delta
+}
 
 /**
  * How long after an exam's deadline the server still accepts the student's last draft saves and flags (a save that
@@ -134,23 +153,35 @@ export type MutationResult = { ok: true } | { ok: false; reason: RejectReason }
 // Exam submission
 // ---------------------------------------------------------------------------------------------------------------
 
+/** The duration a log records: accumulated visible seconds, never negative, never above an hour or the session's wall-clock age. */
+function logDuration(accumulatedSec: number | null | undefined, startTime: Date | null | undefined, now: Date): number {
+  const sec = typeof accumulatedSec === 'number' && Number.isFinite(accumulatedSec) ? Math.max(0, Math.round(accumulatedSec)) : 0
+  const capped = Math.min(MAX_LOG_DURATION_SEC, sec)
+  if (startTime instanceof Date && !Number.isNaN(startTime.getTime())) {
+    return Math.min(capped, Math.max(0, Math.floor((now.getTime() - startTime.getTime()) / 1000)))
+  }
+  return capped
+}
+
 async function submitOnce(sessionId: string, answers: Record<string, string> | undefined, now: Date): Promise<ExamSubmission | null> {
   return prisma.$transaction(async (tx) => {
     const session = await tx.studySession.findUnique({
       where: { id: sessionId },
-      select: { id: true, mode: true, status: true, deadline: true },
+      select: { id: true, mode: true, status: true, deadline: true, startTime: true },
     })
     if (!session || session.mode !== 'exam' || session.status === 'cancelled') return null
 
     const items = await tx.sessionExercise.findMany({
       where: { sessionId },
       orderBy: { position: 'asc' },
-      select: { exerciseId: true, draftAnswer: true },
+      select: { exerciseId: true, draftAnswer: true, timeSpentSec: true },
     })
     const ids = items.map((i) => i.exerciseId)
     const rows = ids.length > 0 ? await tx.exercise.findMany({ where: { id: { in: ids } }, select: GRADING_SELECT }) : []
     const byId = new Map(rows.map((r) => [r.id, r]))
     const draftById = new Map(items.map((i) => [i.exerciseId, i.draftAnswer]))
+    // Visible seconds the student spent on each question (saved with the drafts), also for questions never answered
+    const timeById = new Map(items.map((i) => [i.exerciseId, i.timeSpentSec]))
     const exercises = ids.map((id) => byId.get(id)).filter((e): e is (typeof rows)[number] => !!e)
 
     // Answers passed by the caller count only until deadline + grace; they never add answers for non-items (the loop
@@ -178,7 +209,8 @@ async function submitOnce(sessionId: string, answers: Record<string, string> | u
         isCorrect: g.isCorrect,
         score: g.score,
         userAnswer,
-        duration: DEFAULT_DURATION_SEC,
+        duration: logDuration(timeById.get(ex.id), session.startTime, now),
+        // The proctor gives no help in an exam, so there is nothing to record: the default (false) stays
       })
     }
     if (data.length > 0) await tx.exerciseLog.createMany({ data })
@@ -484,25 +516,30 @@ async function whyRejected(sessionId: string, exerciseId: string, now: Date): Pr
 }
 
 /**
- * Stores the exam draft of one question (null clears it) and adds the visible seconds spent since the last save.
+ * Stores the exam draft of one question (null clears it; undefined leaves the stored draft alone, for a save that only
+ * carries time) and adds the visible seconds spent since the last save. The delta is bounded (see boundedIncrement).
  * Accepted only for an item of an active exam and until deadline + grace; otherwise nothing changes.
  * The status and deadline are checked inside the same write, so a draft cannot land after the exam was submitted.
  */
 export async function saveDraftFor(
   sessionId: string,
   exerciseId: string,
-  draftAnswer: string | null,
+  draftAnswer: string | null | undefined,
   timeSpentDeltaSec: number,
   now: Date = new Date(),
 ): Promise<MutationResult> {
   if (typeof sessionId !== 'string' || typeof exerciseId !== 'string') return { ok: false, reason: 'invalid' }
-  if (draftAnswer !== null && typeof draftAnswer !== 'string') return { ok: false, reason: 'invalid' }
-  const text = draftAnswer === null || draftAnswer === '' ? null : draftAnswer.slice(0, MAX_ANSWER_LENGTH)
-  const delta = Number.isFinite(timeSpentDeltaSec) ? Math.max(0, Math.min(MAX_SECONDS_PER_SAVE, Math.round(timeSpentDeltaSec))) : 0
-  const res = await prisma.sessionExercise.updateMany({
-    where: { sessionId, exerciseId, session: { mode: 'exam', ...openSessionFilter(now) } },
-    data: delta > 0 ? { draftAnswer: text, timeSpentSec: { increment: delta } } : { draftAnswer: text },
-  })
+  if (draftAnswer !== null && draftAnswer !== undefined && typeof draftAnswer !== 'string') return { ok: false, reason: 'invalid' }
+  const where = { sessionId, exerciseId, session: { mode: 'exam', ...openSessionFilter(now) } }
+  let delta = typeof timeSpentDeltaSec === 'number' && Number.isFinite(timeSpentDeltaSec) ? Math.max(0, Math.min(MAX_SECONDS_PER_SAVE, Math.round(timeSpentDeltaSec))) : 0
+  if (delta > 0) {
+    const row = await prisma.sessionExercise.findFirst({ where, select: { timeSpentSec: true, session: { select: { startTime: true } } } })
+    delta = row ? boundedIncrement(delta, row.timeSpentSec, row.session.startTime, now) : delta
+  }
+  const data: { draftAnswer?: string | null; timeSpentSec?: { increment: number } } = {}
+  if (draftAnswer !== undefined) data.draftAnswer = draftAnswer === null || draftAnswer === '' ? null : draftAnswer.slice(0, MAX_ANSWER_LENGTH)
+  if (delta > 0) data.timeSpentSec = { increment: delta }
+  const res = await prisma.sessionExercise.updateMany({ where, data })
   if (res.count > 0) return { ok: true }
   const reason = await whyRejected(sessionId, exerciseId, now)
   if (reason === 'not_active') {
@@ -510,6 +547,35 @@ export async function saveDraftFor(
     if (s && s.status === 'active' && s.mode !== 'exam') return { ok: false, reason: 'not_exam' }
   }
   return { ok: false, reason }
+}
+
+/**
+ * Adds visible seconds to a question of an active study session (the exam equivalent rides on saveDraftFor). Study
+ * sessions have no deadline. The delta is bounded like in saveDraftFor. A question that already has its log keeps the
+ * duration it was logged with, so time arriving after the answer is ignored.
+ */
+export async function recordStudyTimeFor(sessionId: string, exerciseId: string, deltaSec: number, now: Date = new Date()): Promise<MutationResult> {
+  if (typeof sessionId !== 'string' || typeof exerciseId !== 'string') return { ok: false, reason: 'invalid' }
+  const row = await prisma.sessionExercise.findUnique({
+    where: { sessionId_exerciseId: { sessionId, exerciseId } },
+    select: { timeSpentSec: true, session: { select: { mode: true, status: true, startTime: true } } },
+  })
+  if (!row) {
+    const s = await prisma.studySession.findUnique({ where: { id: sessionId }, select: { id: true } })
+    return { ok: false, reason: s ? 'not_item' : 'not_found' }
+  }
+  if (row.session.status !== 'active') return { ok: false, reason: 'not_active' }
+  if (row.session.mode === 'exam') return { ok: false, reason: 'not_exam' }
+  const delta = boundedIncrement(deltaSec, row.timeSpentSec, row.session.startTime, now)
+  if (delta > 0) {
+    const logged = await prisma.exerciseLog.findUnique({ where: { sessionId_exerciseId: { sessionId, exerciseId } }, select: { id: true } })
+    if (logged) return { ok: true }
+    await prisma.sessionExercise.updateMany({
+      where: { sessionId, exerciseId, session: { status: 'active', mode: { not: 'exam' } } },
+      data: { timeSpentSec: { increment: delta } },
+    })
+  }
+  return { ok: true }
 }
 
 /** Flags or unflags one question of an active session (an exam until deadline + grace). */
@@ -541,36 +607,44 @@ export async function setCurrentPositionFor(sessionId: string, position: number,
  * Grades and logs one answer of a study session on the server. Accepted only for an item of an active study session
  * (an exam collects drafts and is graded by the submit); anything else returns null and writes nothing.
  * First attempt wins: a repeat for the same (sessionId, exerciseId) returns the stored result.
+ *
+ * `opts.durationSec` is the visible seconds not yet saved with recordStudyTimeFor (the client sends what it still
+ * holds). The log's duration is the time already stored on the question plus that, bounded (see boundedIncrement and
+ * MAX_LOG_DURATION_SEC). Without it (an older client, a test) the log gets the stored time, which is 0 when nothing
+ * was ever recorded: the column cannot be null, and 0 means "not measured" rather than a made-up number.
+ * `opts.assisted` is stored only when it is exactly true.
  */
 export async function logAnswerForSession(
   sessionId: string,
   exerciseId: string,
   userAnswer: string,
-  opts?: { duration?: number; assisted?: boolean },
+  opts?: { durationSec?: number; assisted?: boolean },
 ): Promise<{ score: number; isCorrect: boolean } | null> {
   if (typeof userAnswer !== 'string' || typeof sessionId !== 'string' || typeof exerciseId !== 'string') return null
   try {
     return await prisma.$transaction(async (tx) => {
-      const session = await tx.studySession.findUnique({ where: { id: sessionId }, select: { status: true, mode: true } })
+      const session = await tx.studySession.findUnique({ where: { id: sessionId }, select: { status: true, mode: true, startTime: true } })
       if (!session || session.status !== 'active' || session.mode === 'exam') return null
       const item = await tx.sessionExercise.findUnique({
         where: { sessionId_exerciseId: { sessionId, exerciseId } },
-        select: { exercise: { select: { exerciseType: true, choices: true, correctAnswer: true, questionText: true } } },
+        select: { timeSpentSec: true, exercise: { select: { exerciseType: true, choices: true, correctAnswer: true, questionText: true } } },
       })
       if (!item) return null
       const graded = gradeAnswer(item.exercise, userAnswer)
-      const duration = Math.max(0, Math.min(3600, Math.round(opts?.duration ?? DEFAULT_DURATION_SEC)))
+      const stored = Math.max(0, item.timeSpentSec ?? 0)
+      const duration = Math.min(MAX_LOG_DURATION_SEC, stored + boundedIncrement(opts?.durationSec, stored, session.startTime, new Date()))
       await tx.exerciseLog.create({
         data: {
           sessionId,
           exerciseId,
           isCorrect: graded.isCorrect,
           score: graded.score,
-          assisted: opts?.assisted ?? false,
+          assisted: opts?.assisted === true,
           userAnswer,
           duration,
         },
       })
+      if (duration !== stored) await tx.sessionExercise.update({ where: { sessionId_exerciseId: { sessionId, exerciseId } }, data: { timeSpentSec: duration } })
       return graded
     })
   } catch (error) {

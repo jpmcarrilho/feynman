@@ -1,5 +1,6 @@
-import { useState, useRef, useCallback } from 'react'
+import { useState, useRef, useCallback, useEffect } from 'react'
 import { createLiveToken } from '@/app/auth-actions'
+import { SpeechDetector, type SpeechSource } from '@/lib/speechDetector'
 
 export type ChatMessage = {
   id: string
@@ -7,7 +8,7 @@ export type ChatMessage = {
   text: string
 }
 
-export function useLiveAPI(systemInstructionText: string) {
+export function useLiveAPI(systemInstructionText: string, onUserSpeech?: (source: SpeechSource) => void) {
   const [isConnected, setIsConnected] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -15,6 +16,15 @@ export function useLiveAPI(systemInstructionText: string) {
   const [isMuted, setIsMuted] = useState(false)
 
   const isMutedRef = useRef(false)
+  // Called when the student is heard speaking: loud microphone audio while unmuted and connected ('mic'), or an input
+  // transcript of the student's audio ('transcript'). A server `interrupted` event is NOT a signal: the app's own
+  // messages (a new exercise context, a typed message) interrupt the tutor too. It only observes; it never changes what is sent.
+  const onUserSpeechRef = useRef(onUserSpeech)
+  useEffect(() => { onUserSpeechRef.current = onUserSpeech })
+  const [speechDetector] = useState(() => new SpeechDetector())
+  const noteMicChunk = useCallback((buffer: ArrayBuffer) => {
+    if (speechDetector.feed(new Int16Array(buffer))) onUserSpeechRef.current?.('mic')
+  }, [speechDetector])
   const wsRef = useRef<WebSocket | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -69,6 +79,7 @@ export function useLiveAPI(systemInstructionText: string) {
             // Hook up processor port to current websocket
             processorRef.current.port.onmessage = (e) => {
               if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isMutedRef.current) {
+                noteMicChunk(e.data)
                 const base64 = arrayBufferToBase64(e.data)
                 wsRef.current.send(JSON.stringify({
                   realtimeInput: {
@@ -95,7 +106,7 @@ export function useLiveAPI(systemInstructionText: string) {
         }
       }
     }
-  }, [])
+  }, [noteMicChunk])
 
   // Converts ArrayBuffer (PCM16) to Base64 string
   const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
@@ -183,6 +194,7 @@ export function useLiveAPI(systemInstructionText: string) {
       
       // Initialize correct initial muted state based on audioEnabled
       isMutedRef.current = !audioEnabled
+      speechDetector.reset()
       setIsMuted(!audioEnabled)
       
       try {
@@ -235,6 +247,7 @@ export function useLiveAPI(systemInstructionText: string) {
           if (audioEnabled && processorRef.current && sourceRef.current) {
             processorRef.current.port.onmessage = (e) => {
               if (ws.readyState === WebSocket.OPEN && !isMutedRef.current) {
+                noteMicChunk(e.data)
                 const base64 = arrayBufferToBase64(e.data)
                 ws.send(JSON.stringify({
                   realtimeInput: {
@@ -279,7 +292,10 @@ export function useLiveAPI(systemInstructionText: string) {
             const inputTranscript = data.serverContent?.inputTranscription
             if (inputTranscript) {
               const transcriptText = inputTranscript.text || (inputTranscript.parts && inputTranscript.parts[0]?.text)
-              if (transcriptText) addMessage('user', transcriptText)
+              if (transcriptText) {
+                addMessage('user', transcriptText)
+                onUserSpeechRef.current?.('transcript')
+              }
             }
 
             const outputTranscript = data.serverContent?.outputTranscription

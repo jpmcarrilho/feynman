@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getTopics, getTopicsWithPerformance, getAnalyticsData, generateGlobalDiagnosis, saveAndDeployStudyPlan, generateStructuredStudyPlan, generatePlannerResponse, generateSessionSummary, getCourseArtifacts, getSessionHistory, getSessionDetail, getStudyPlans, startSession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, finishStudySession, saveDraft, setFlagged, setCurrentPosition, getActiveSession, getSessionState, reportExercise } from './actions'
+import { explainMistake, generateNextExercise, getTopics, getTopicsWithPerformance, getAnalyticsData, generateGlobalDiagnosis, saveAndDeployStudyPlan, generateStructuredStudyPlan, generatePlannerResponse, generateSessionSummary, getCourseArtifacts, getSessionHistory, getSessionDetail, getStudyPlans, startSession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, recordCardTime, cancelStudySession, finishStudySession, saveDraft, setFlagged, setCurrentPosition, getActiveSession, getSessionState, reportExercise } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 import { defaultProfile } from '@/lib/studyspace/profile'
@@ -7,7 +7,7 @@ import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
 import { enrichInBackground } from '@/services/enrichment'
 import { createSessionSummary } from '@/services/summaryService'
 import { getCourseArtifactsService } from '@/services/artifactsService'
-import { createSessionWithItems, endPreviousActiveSessions, getSessionStateFor, finalizeOverdueExams, logAnswerForSession, completeSession, cancelSession, saveDraftFor, setCurrentPositionFor, getActiveSessionFor } from '@/services/sessionService'
+import { createSessionWithItems, endPreviousActiveSessions, getSessionStateFor, finalizeOverdueExams, logAnswerForSession, completeSession, cancelSession, saveDraftFor, recordStudyTimeFor, setCurrentPositionFor, getActiveSessionFor } from '@/services/sessionService'
 
 /** startSession input with the defaults the old positional createStudySession had. */
 const si = (over: Partial<Parameters<typeof startSession>[0]> = {}): Parameters<typeof startSession>[0] => ({
@@ -43,6 +43,7 @@ vi.mock('@/services/sessionService', async (importOriginal) => {
     getSessionStateFor: vi.fn(async (id: string) => ({ session: { id }, items: [], missingCount: 0, serverNow: 'now' })),
     getActiveSessionFor: vi.fn(async () => null),
     saveDraftFor: vi.fn(async () => ({ ok: true })),
+    recordStudyTimeFor: vi.fn(async () => ({ ok: true })),
     setFlaggedFor: vi.fn(async () => ({ ok: true })),
     setCurrentPositionFor: vi.fn(async () => ({ ok: true })),
     logAnswerForSession: vi.fn(async () => null),
@@ -704,11 +705,22 @@ describe('startSession graded filter', () => {
   })
 })
 
+describe('recordCardTime', () => {
+  it('passes the seconds to the study-time service', async () => {
+    expect(await recordCardTime('s1', 'e1', 9)).toEqual({ ok: true })
+    expect(recordStudyTimeFor).toHaveBeenCalledWith('s1', 'e1', 9)
+  })
+  it('saveDraft passes undefined (time only) through to the service', async () => {
+    await saveDraft('s1', 'e1', undefined, 4)
+    expect(saveDraftFor).toHaveBeenCalledWith('s1', 'e1', undefined, 4)
+  })
+})
+
 describe('logAnswer, finish and cancel (thin actions over the session service)', () => {
   it('logAnswer passes the call to the service, which grades on the server and checks membership and status', async () => {
     vi.mocked(logAnswerForSession).mockResolvedValueOnce({ score: 1, isCorrect: true })
-    await expect(logAnswer('s1', 'e1', 'A', { duration: 12 })).resolves.toEqual({ score: 1, isCorrect: true })
-    expect(logAnswerForSession).toHaveBeenCalledWith('s1', 'e1', 'A', { duration: 12 })
+    await expect(logAnswer('s1', 'e1', 'A', { durationSec: 12 })).resolves.toEqual({ score: 1, isCorrect: true })
+    expect(logAnswerForSession).toHaveBeenCalledWith('s1', 'e1', 'A', { durationSec: 12 })
     vi.mocked(logAnswerForSession).mockResolvedValueOnce(null)
     await expect(logAnswer('s1', 'not-an-item', 'A')).resolves.toBeNull()
   })

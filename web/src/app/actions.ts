@@ -22,6 +22,7 @@ import {
   getSessionStateFor,
   getActiveSessionFor,
   saveDraftFor,
+  recordStudyTimeFor,
   setFlaggedFor,
   setCurrentPositionFor,
   logAnswerForSession,
@@ -441,10 +442,16 @@ export async function getSessionState(sessionId: string, courseId?: string): Pro
   return getSessionStateFor(sessionId, cleanCourseId(courseId))
 }
 
-/** Stores one exam draft (null clears it). Does nothing and reports a reason for a non-item, an inactive session or after the deadline. */
-export async function saveDraft(sessionId: string, exerciseId: string, draftAnswer: string | null, timeSpentDeltaSec: number = 0): Promise<MutationResult> {
+/** Stores one exam draft (null clears it; undefined keeps the stored draft and only adds time). Does nothing and reports a reason for a non-item, an inactive session or after the deadline. */
+export async function saveDraft(sessionId: string, exerciseId: string, draftAnswer: string | null | undefined, timeSpentDeltaSec: number = 0): Promise<MutationResult> {
   await requireAuth()
   return saveDraftFor(sessionId, exerciseId, draftAnswer, timeSpentDeltaSec)
+}
+
+/** Adds visible seconds to a question of an active study session (an exam adds its time through saveDraft). */
+export async function recordCardTime(sessionId: string, exerciseId: string, deltaSec: number): Promise<MutationResult> {
+  await requireAuth()
+  return recordStudyTimeFor(sessionId, exerciseId, deltaSec)
 }
 
 export async function setFlagged(sessionId: string, exerciseId: string, flagged: boolean): Promise<MutationResult> {
@@ -465,7 +472,7 @@ export async function logAnswer(
   sessionId: string,
   exerciseId: string,
   userAnswer: string,
-  opts?: { duration?: number; assisted?: boolean }
+  opts?: { durationSec?: number; assisted?: boolean }
 ): Promise<{ score: number; isCorrect: boolean } | null> {
   await requireAuth()
   // A stale browser tab running the old client would pass a boolean here. The service accepts the answer only for an

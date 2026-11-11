@@ -19,6 +19,7 @@ import {
   getTopicsWithPerformance,
   getSessionHistory,
   logAnswer,
+  recordCardTime,
   submitExam,
   saveChatLog,
   finishStudySession,
@@ -74,6 +75,8 @@ import { SessionHistoryList } from './SessionHistoryList'
 import { SideVisualizer, type ActiveFileKind } from './SideVisualizer'
 import { parseFileLink } from '@/lib/fileLinks'
 import { DebouncedWriter } from '@/lib/debouncedWriter'
+import { speechCountsForCard, type SpeechSource } from '@/lib/speechDetector'
+import { CardTimer, cardKey, runningCardKey } from '@/lib/cardTimer'
 import { ChatBuffer } from '@/lib/chatBuffer'
 import {
   viewFromState,
@@ -140,6 +143,26 @@ const DRAFT_DEBOUNCE_MS = 500
 /** The tutor conversation is saved to the session this often while it changes. */
 const CHAT_SAVE_INTERVAL_MS = 15_000
 const LEGACY_SESSION_KEY = 'dedp_active_session'
+/** Visible time not yet on the server is saved this often, so a crash or a server-side finalization loses little. */
+const CARD_TIME_SAVE_INTERVAL_MS = 15_000
+/** Tailwind's `xl` breakpoint: from here the tutor is a sidebar and the file viewer a side drawer, below it both cover the card. */
+const WIDE_LAYOUT_QUERY = '(min-width: 1280px)'
+const subscribeWideLayout = (cb: () => void) => {
+  const mq = window.matchMedia(WIDE_LAYOUT_QUERY)
+  mq.addEventListener('change', cb)
+  return () => mq.removeEventListener('change', cb)
+}
+const getWideLayout = () => window.matchMedia(WIDE_LAYOUT_QUERY).matches
+/** Exercises of a session the student asked the tutor about before answering them (survives a reload; dropped when the session ends). */
+const assistedStorageKey = (sessionId: string) => `feynman_assisted_${sessionId}`
+const readAssisted = (sessionId: string): string[] => {
+  try {
+    const parsed = JSON.parse(safeGetItem(assistedStorageKey(sessionId)) || '[]')
+    return Array.isArray(parsed) ? parsed.filter((x): x is string => typeof x === 'string') : []
+  } catch {
+    return []
+  }
+}
 
 /**
  * The study screen. The state of the running session (question, drafts, flags, answers, deadline, questions still to
@@ -240,7 +263,9 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
   }, [currentExercise?.choices]);
 
   // Until studyspaces exist in the UI (T19) the tutor uses the global legacy persona and one chat mode key.
-  const liveAPI = useLiveAPI(VOICE_SYSTEM_INSTRUCTION)
+  // Speech heard from the student is forwarded to markAssisted (a ref, because that function is defined further down)
+  const speechHeardRef = useRef<(source: SpeechSource) => void>(() => {})
+  const liveAPI = useLiveAPI(VOICE_SYSTEM_INSTRUCTION, (source) => speechHeardRef.current(source))
 
   // The mode lives in a small external store (memory + localStorage `feynman_chat_mode_legacy`). The exercise-context
   // effect reads it with getChatMode() instead of depending on it, so a mode change never re-sends the exercise context.
@@ -258,6 +283,19 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
   // order they were made, each carrying the session it belongs to, and are flushed before submitting or switching.
   const [writer] = useState(() => new DebouncedWriter())
   const hintKey = activeSessionHintKey(courseId)
+  // Visible time per question (this file decides when a card is on screen; src/lib/cardTimer.ts does the counting)
+  const [cardTimer] = useState(() => new CardTimer())
+  // true from the xl breakpoint up; below it the tutor tab and the file viewer take the whole screen
+  const wideLayout = useSyncExternalStore(subscribeWideLayout, getWideLayout, () => true)
+  const [pageVisible, setPageVisible] = useState(true)
+  // study cards answered at the click (the clock stays stopped even before the log reaches the screen)
+  const closedCardsRef = useRef(new Set<string>())
+  // the card the tutor's help would count for right now (null: nothing to record), kept current by an effect
+  const helpTargetRef = useRef<{ sid: string; exerciseId: string } | null>(null)
+  const sessionModeRef = useRef<string | null>(null)
+  // when the question that tutor help would count for became current (for the speech settling window)
+  const targetSinceRef = useRef(0)
+  const targetKeyRef = useRef<string | null>(null)
   // server clock minus client clock (ms), refreshed whenever a state is read
   const serverOffsetRef = useRef(0)
   // the same offset as state, for the study timer's render
@@ -288,7 +326,12 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
 
   const applyState = (state: SessionState, opts: { keepIndex?: boolean } = {}) => {
     // A different session than the one on screen (start, load, resume): its chat starts empty and is loaded separately
-    if (sessionIdRef.current !== state.session.id) switchChat(state.session.id)
+    if (sessionIdRef.current !== state.session.id) {
+      // the question being left keeps the time it counted
+      cardTimer.run(null)
+      saveAllCardTimes()
+      switchChat(state.session.id)
+    }
     const v = viewFromState(state)
     serverOffsetRef.current = v.serverOffsetMs
     setClockOffsetMs(v.serverOffsetMs)
@@ -352,8 +395,60 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     setTimeout(() => { void refreshFromServer(sid, { force: true }) }, 0)
   }
 
+  // An exam draft carries the visible seconds not yet saved. They are taken when the write RUNS, not when it is queued:
+  // the writer keeps only the newest write per key, so seconds captured in a replaced closure would be lost. A write that
+  // throws gives its seconds back; one the server rejects (session over) needs none.
   const persistDraft = (sid: string, exerciseId: string, value: string | null, debounce: boolean) => {
-    writer.schedule(`${sid}:draft:${exerciseId}`, async () => syncAfterRejection(sid, await saveDraft(sid, exerciseId, value, 0)), debounce ? DRAFT_DEBOUNCE_MS : 0)
+    writer.schedule(`${sid}:draft:${exerciseId}`, async () => {
+      const key = cardKey(sid, exerciseId)
+      const seconds = cardTimer.take(key)
+      try {
+        syncAfterRejection(sid, await saveDraft(sid, exerciseId, value, seconds))
+      } catch (e) {
+        cardTimer.restore(key, seconds)
+        throw e
+      }
+    }, debounce ? DRAFT_DEBOUNCE_MS : 0)
+  }
+
+  /** Saves the visible seconds of one question on their own (exam: a draft write with no draft; study: recordCardTime). Own writer key, so it never replaces a pending draft. */
+  const persistTime = (sid: string, exerciseId: string, mode: string | null) => {
+    writer.schedule(`${sid}:time:${exerciseId}`, async () => {
+      const key = cardKey(sid, exerciseId)
+      const seconds = cardTimer.take(key)
+      if (seconds <= 0) return
+      try {
+        syncAfterRejection(sid, mode === 'exam' ? await saveDraft(sid, exerciseId, undefined, seconds) : await recordCardTime(sid, exerciseId, seconds))
+      } catch (e) {
+        cardTimer.restore(key, seconds)
+        throw e
+      }
+    }, 0)
+  }
+
+  /** Stops the clock and queues the unsaved time of every question of the session on screen. */
+  const saveAllCardTimes = () => {
+    const sid = sessionIdRef.current
+    if (!sid || latestRef.current.status !== 'active') return
+    for (const key of cardTimer.keysWithUnsent(`${sid}:`)) persistTime(sid, key.slice(sid.length + 1), sessionModeRef.current)
+  }
+
+  /**
+   * The student asked the tutor about the question on screen (typed, switched mode, used a control, or was heard
+   * speaking). Counts only for a study question that is current and not answered yet; an exam records nothing
+   * (the proctor gives no help), and a question answered already is never changed.
+   * `speech` is set for signals that come from the student's audio: they are ignored for a short settling window after
+   * the question changed (see SPEECH_SETTLE_MS), so audio spoken on the previous question is not credited to this one.
+   * A typed message or a mode switch is an action on the current question and is attributed to it immediately,
+   * whenever the tutor's reply arrives.
+   */
+  const markAssisted = (speech?: SpeechSource) => {
+    const target = helpTargetRef.current
+    if (!target) return
+    if (speech && !speechCountsForCard(speech, Date.now() - targetSinceRef.current)) return
+    const stored = readAssisted(target.sid)
+    if (stored.includes(target.exerciseId)) return
+    safeSetItem(assistedStorageKey(target.sid), JSON.stringify([...stored, target.exerciseId]))
   }
 
   const toggleFlag = (exerciseId: string) => {
@@ -366,6 +461,11 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
 
   /** Moves to another question and remembers it on the server (debounced). */
   const goToIndex = (index: number) => {
+    // The card being left stops counting now and its time is queued (its own key, so a pending draft is not replaced)
+    if (session?.status === 'active' && currentExercise) {
+      cardTimer.run(null)
+      persistTime(session.id, currentExercise.id, session.mode)
+    }
     setCurrentIndex(index)
     if (session?.status === 'active') {
       const sid = session.id
@@ -518,19 +618,30 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
   useEffect(() => {
     if (!session) return
     if (session.status === 'active') safeSetItem(hintKey, session.id)
-    else if (safeGetItem(hintKey) === session.id) safeRemoveItem(hintKey)
+    else {
+      if (safeGetItem(hintKey) === session.id) safeRemoveItem(hintKey)
+      safeRemoveItem(assistedStorageKey(session.id))
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.id, session?.status])
 
   // What the generation loop and the visibility handler compare the server's state against
   useEffect(() => {
     latestRef.current = { status: session?.status, itemCount: exercises.length, missingCount }
+    sessionModeRef.current = session?.mode ?? null
     chat.observe(liveAPI.messages)
   })
 
   // Pending drafts are sent when the page is hidden or closed; coming back re-reads the session (clock, status)
   useEffect(() => {
     const onVisibility = () => {
+      const visible = document.visibilityState !== 'hidden'
+      setPageVisible(visible)
+      if (!visible) {
+        // stop the clock at once (before any re-render) and queue what it counted
+        cardTimer.run(null)
+        saveAllCardTimes()
+      }
       if (document.visibilityState === 'hidden') {
         void writer.flush()
         const sid = sessionIdRef.current
@@ -543,7 +654,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
         void refreshFromServer(sessionIdRef.current).catch((e) => console.error('Failed to refresh the session', e))
       }
     }
-    const onPageHide = () => { void writer.flush() }
+    const onPageHide = () => { cardTimer.run(null); saveAllCardTimes(); void writer.flush() }
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('pagehide', onPageHide)
     return () => {
@@ -785,6 +896,8 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     try {
       // Drafts still queued are sent first; the server then grades every question from the drafts it stores (unanswered
       // ones score 0), writes the logs and completes the session in one transaction. Submitting twice is harmless.
+      cardTimer.run(null);
+      saveAllCardTimes();
       await writer.flush();
       const examMessages = chat.snapshot(session.id);
       if (examMessages) void saveChatLog(session.id, examMessages).catch(() => {});
@@ -917,6 +1030,8 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       setIsLoading(true)
       try {
         // Save final chat log and mark session as completed in DB
+        cardTimer.run(null)
+        saveAllCardTimes()
         await writer.flush()
         const messages = chat.snapshot(session.id)
         await Promise.all([
@@ -948,6 +1063,53 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
 
   const currentLog = session?.logs?.find((l: any) => l.exerciseId === currentExercise?.id)
 
+  // --- Visible time and tutor help for the question on screen ---------------------------------------------------
+  // The clock of a question runs only while ALL of these hold: its session is active, the Study tab is showing, the
+  // page is visible, no dialog (new session, results) or file viewer covers it, no diagnosis is loading, it is the
+  // current question, and (study mode) it has not been answered. Below xl the file viewer covers the card; from xl up
+  // it only does when it is in full-width mode.
+  const currentCardKey = session && currentExercise ? cardKey(session.id, currentExercise.id) : null
+  const viewerCoversCard = !!activeFile && (!wideLayout || isVisualizerFullWidth)
+  const cardCovered = isDiagnosisLoading || isModalOpen || !!selectedHistory || viewerCoversCard
+  const examCard = session?.mode === 'exam'
+  const cardSessionActive = session?.status === 'active'
+  useEffect(() => {
+    cardTimer.run(runningCardKey({
+      key: currentCardKey,
+      sessionActive: !!cardSessionActive,
+      examMode: !!examCard,
+      answered: !!currentLog,
+      studyTabShowing: activeTab === 'study',
+      pageVisible,
+      covered: cardCovered,
+      closed: closedCardsRef.current,
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentCardKey, cardSessionActive, examCard, !!currentLog, activeTab, pageVisible, cardCovered])
+
+  // Unsaved time goes to the server regularly while a session is active
+  useEffect(() => {
+    if (!session?.id || session.status !== 'active') return
+    const interval = setInterval(saveAllCardTimes, CARD_TIME_SAVE_INTERVAL_MS)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, session?.status])
+
+  // Tutor help counts for the current study question until it is answered (an exam records no help)
+  useEffect(() => {
+    helpTargetRef.current =
+      session && currentExercise && session.status === 'active' && session.mode !== 'exam' && !currentLog &&
+      !closedCardsRef.current.has(cardKey(session.id, currentExercise.id))
+        ? { sid: session.id, exerciseId: currentExercise.id }
+        : null
+    const nowKey = helpTargetRef.current ? cardKey(helpTargetRef.current.sid, helpTargetRef.current.exerciseId) : null
+    if (nowKey !== targetKeyRef.current) {
+      targetKeyRef.current = nowKey
+      targetSinceRef.current = Date.now()
+    }
+    speechHeardRef.current = markAssisted
+  })
+
   const handleAnswer = async (isCorrect: boolean, userAnswer: string) => {
     if (session && currentExercise) {
       if (session.mode === 'exam') {
@@ -961,7 +1123,22 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
         // The server grades with the same gradeAnswer the flashcard just used; its result is what is stored
         const sid: string = session.id
         const exerciseId: string = currentExercise.id
-        const graded = await logAnswer(sid, exerciseId, userAnswer, { duration: 30 }) // dummy duration until T18
+        const key = cardKey(sid, exerciseId)
+        // The clock stops at the click. Time saved earlier is flushed first so it reaches the server before the log;
+        // the seconds still held here travel with the answer, and the server adds them to what it stored.
+        closedCardsRef.current.add(key)
+        cardTimer.run(null)
+        const assisted = readAssisted(sid).includes(exerciseId)
+        await writer.flush()
+        const seconds = cardTimer.take(key)
+        let graded: Awaited<ReturnType<typeof logAnswer>>
+        try {
+          graded = await logAnswer(sid, exerciseId, userAnswer, { durationSec: seconds, assisted })
+        } catch (e) {
+          cardTimer.restore(key, seconds)
+          closedCardsRef.current.delete(key)
+          throw e
+        }
         // null: the server did not record it (the session ended elsewhere or the question is not part of it)
         if (!graded) void refreshFromServer(sid, { force: true }).catch(() => {})
 
@@ -1065,6 +1242,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
 
   const handleRequestExplanation = (userAnswer: string) => {
     if (!currentExercise) return
+    markAssisted() // (the control appears after the answer, when nothing is recorded any more; kept for any earlier use)
     const msg = `I selected "${userAnswer}", but the correct answer is "${currentExercise.correctAnswer}". Can you explain why I am wrong?`
 
     if (!liveAPI.isConnected) {
@@ -1850,6 +2028,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
             chatModeProfile={LEGACY_VOICE_PROFILE}
             sessionMode={session?.mode}
             pendingMessageRef={pendingMessageRef}
+            onHelpRequested={markAssisted}
           />
         </TabsContent>
 
@@ -1934,6 +2113,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
             chatModeProfile={LEGACY_VOICE_PROFILE}
             sessionMode={session?.mode}
             pendingMessageRef={pendingMessageRef}
+            onHelpRequested={markAssisted}
           />
         )}
       </div>

@@ -38,9 +38,11 @@ interface VoiceHubProps {
    * Without it the message is sent shortly after the connection opens.
    */
   pendingMessageRef?: { current: string | null };
+  /** Called when the student sends the tutor a typed message or switches the chat mode (the parent records that help was asked). */
+  onHelpRequested?: () => void;
 }
 
-export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose, chatMode, onChatModeChange, chatModeProfile, sessionMode, pendingMessageRef }: VoiceHubProps) {
+export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose, chatMode, onChatModeChange, chatModeProfile, sessionMode, pendingMessageRef, onHelpRequested }: VoiceHubProps) {
   const { isConnected, isConnecting, error, messages, connect, disconnect, sendText, isMuted, setMuted } = liveAPI
   
   const [inputText, setInputText] = useState('')
@@ -75,6 +77,7 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
   const selectChatMode = (mode: TutorChatMode) => {
     if (!chatMode || !onChatModeChange || !chatModeProfile || mode === chatMode) return
     onChatModeChange(mode)
+    onHelpRequested?.()
     // One hidden message tells the connected tutor about the switch; the exercise context is not re-sent
     if (isConnected && typeof liveAPI.sendContext === 'function') {
       liveAPI.sendContext(chatModeSwitchMessage(chatModeProfile, mode, sessionMode), { interrupt: false })
@@ -260,6 +263,7 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
           <form onSubmit={(e) => {
             e.preventDefault();
             if (!inputText.trim()) return;
+            onHelpRequested?.();
             
             setMuted(true); // Mute mic when sending text
             
