@@ -916,6 +916,12 @@ MIT regression check (quick).
 Commit: `feat(ingest): background runner with restart resume and upload endpoint`
 
 #### T24 — Wizard: create, upload, processing, outline review (sonnet)
+Added 2026-11-11 (from T23, as built and as tested):
+- T23 interfaces to build on: `createStudyspaceAction`, `getSpaceStatusAction`, `retrySourceAction`, `removeSourceAction`, `deleteStudyspaceAction(id, confirmTitle)` return `{ ok: true, ... } | { ok: false, reason }` (show `reason` as is). The upload route answers `201 { sources: [{ id, originalName, status, sizeBytes, nameAlreadyInSpace }] }`, or `{ error, files: [{ name, error }] }` with 400/413/415; a request is refused as a whole when one file is bad, and is capped at 200 MB, so the dropzone sends one file per request and shows the per-file error. `removeSourceAction` can answer "being processed right now, try again in a minute".
+- Upload returns before processing; `uploaded`/`extracting` pass within seconds, `segmenting` takes 30 s to 2 min per file. The processing view must make clear that the page can be closed and work continues (it also resumes after a server restart, measured about 2 min to `ready`).
+- Opening an uploaded PDF topic showed page 1 instead of the topic's first page: the viewer link is built without `page`. Pass `pageStart` through `topicFileLink(topicId, { page })` wherever an uploaded topic is opened (this is the "a topic opens at its start page" check below).
+- Opening a topic of an uploaded `.md`/`.txt` showed the whole file from the top. For text sources show the topic's own `content` (not the original file) in the viewer.
+- At 375 px the resource viewer overlay covers the module list and has to be closed before another topic can be opened; check it has a visible close control.
 Depends: T23. Files: new `src/app/spaces/new/page.tsx`, `src/app/spaces/[id]/setup/page.tsx`, `src/components/features/spaces/NewSpaceForm.tsx`, `SourceDropzone.tsx`, `ProcessingView.tsx`, `OutlineEditor.tsx` (+ tests); extend `src/app/spaces/actions.ts` (outline actions from 5.6); modify `src/app/spaces/page.tsx` (add the "New studyspace" card).
 Steps:
 1. `/spaces/new`: name (required, ≤ 80) + goal (optional, ≤ 300) → `createStudyspaceAction` → `/spaces/<id>/setup?step=upload`.
@@ -927,6 +933,7 @@ Commit: `feat(spaces): new-studyspace wizard with upload, processing status and 
 
 #### T25 — Persona proposal, card, and starter exercises after acceptance (sonnet)
 Added 2026-11-10 (section 5.7): the proposal includes `defaultChatMode`, and the persona card shows it as an editable field next to the tone preset.
+Added 2026-11-11 (from T23): register the proposal with `onSourceTerminal('profileProposal', hook)` from `src/instrumentation.ts` (hooks live on the shared runner state, keyed by name, so the registration is seen by every bundle and survives hot reload); do not edit the runner loop. `acceptProfileAction` calls `requestStarters(courseId)` from the runner (it moves `waiting_for_profile`/`failed` → `pending` and queues the job, once).
 Depends: T24. Files: new `src/server/ingest/profileProposal.ts` (+ test), `src/components/features/spaces/PersonaCard.tsx` (+ test), `src/lib/prompts/profile.ts`; modify `src/server/ingest/runner.ts` (call `maybeProposeProfile` after terminal source states), `src/app/spaces/actions.ts` (`regenerateProfileAction`, `acceptProfileAction`, `dismissProfileSuggestionAction`, `splitStudyspaceAction`), setup page (persona step after outline).
 Steps:
 1. `proposeProfile(courseId)`: outlines + samples of ready sources, failed ones in `excludedSources`, `generateObject(ProfileProposalSchema)`, fill `version`, `calibrationModule: null`, `examPreset: null`, `questionTypeCycles: null`; normalize mixes; `split` when `!subjectsCoherent` with ≥ 2 groups.
@@ -939,6 +946,7 @@ Commit: `feat(persona): propose and accept the tutor profile, then generate star
 
 #### T26 — Later uploads and suggested profile updates (sonnet)
 Added 2026-11-11 (from T22 testing), required before phase F is closed: question import works per topic, so when segmentation puts a quiz's questions and its answer key in different topics of the same source (seen on a 3-page quiz PDF: questions on pages 1-2, key on page 3), nothing is imported. When a topic of a source carries an answer cue but no questions, pair it with the question topics of that source (pass the key topic's text as an additional answer source) before giving up. Also: uploaded text files that are saved web pages can be mostly HTML and script boilerplate (a crawler `.txt` was 94% boilerplate), which ends up in `Topic.content`; strip script/style blocks and tags from `.txt`/`.md` input that is evidently HTML, or reject it with a clear message.
+Added 2026-11-11 (from T23 testing): `.md`/`.txt` files are cut into pseudo-pages of a fixed character size (`TEXT_PAGE_CHARS`), and topics are whole pages, so a short section cannot become its own topic: a 2,400-word Markdown file gave 4 topics of one page each, with its "Course logistics" section merged into the first content topic and never flagged as not study material. For Markdown, start a new pseudo-page at `#`/`##` headings (merge very short sections with the next one, keep the size cap), so sections can be separated and logistics isolated.
 Depends: T25. Files: new `src/components/features/spaces/ProfileSuggestionBanner.tsx` (+ test); modify `StudyInterface.tsx` ("Add files" in the Resources tab header with `SourceDropzone bundle='later'` and a compact status list; banner when `profileSuggestion.kind === 'update'`), `ResourcesDashboard.tsx` (uploaded sources and topics; open via `topicFileLink`), `src/app/spaces/[id]/page.tsx`.
 Steps: later uploads run the full pipeline including `generating_exercises` (profile exists); new topics appended after the current max `order` as new modules; banner shows rationale and changed fields with Accept / Ignore; never automatic.
 Tests: banner renders only for `kind: 'update'`; Ignore calls dismiss.
@@ -1161,6 +1169,8 @@ Assumptions:
 - Found in browser testing (2026-11-11): at 375x812 the Study Plan tab needs a 49 px scroll to reach its main action because of the reserved tutor band; tighten that panel's vertical spacing on phones.
 - Found in browser testing (2026-11-11): the voice call ended once with no action from the student; no code path was found that ends it unintentionally, so a server-side or browser close is the likely cause. The panel now says the call ended. Reconnection belongs with the voice robustness item.
 - Found in browser testing (2026-11-11): the first tutor connection in a dev session took about 18 s before any frame was sent (probably on-demand compilation plus token mint and context prefetch). Measure against the production build in T29 before treating it as a problem.
+- Found in T23 testing (2026-11-11): in a new studyspace with no starter questions, the first question of a 100% AI-generated session appeared about 1 min 40 s after the session started (one blind-solve mismatch, one Gemini response blocked with `blockReason: OTHER`, which surfaces as "Invalid JSON response" and is retried). The starter questions of T25 cover the normal case; a blocked response could be recognised and reported as such instead of as invalid JSON.
+- Found in T23 testing (2026-11-11): segmentation key terms are sometimes generic or inconsistently cased ("limiting", "Quantum yield").
 
 ---
 
