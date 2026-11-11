@@ -50,6 +50,19 @@ This is a Next.js application built to help students study for MIT's Data, Econo
    ```
    Open [http://localhost:3000](http://localhost:3000) in your browser and log in using the `APP_PASSCODE` you set in your `.env`.
 
+## Phone access
+
+The "Phone access" card on `/spaces` runs `tailscale serve --bg --https=443 --yes localhost:<port>` (on) and `tailscale serve --https=443 off` (off) for the app's port (`PORT`, default 3000), shows the state, and when on shows the `https://<mac>.<tailnet>.ts.net` address with a QR code. Serve reaches only devices on your own tailnet; `tailscale funnel` (public internet) is never used. The passcode is still required on the phone.
+
+One-time setup (you do this yourself):
+1. Install Tailscale on the Mac (tailscale.com/download or the Mac App Store) and sign in; install it on the phone with the same account. For the standalone app, enable its command-line integration in its settings.
+2. In the Tailscale admin console, enable MagicDNS and HTTPS certificates.
+3. The first time, Tailscale may need a one-time approval. If the switch reports this, run `tailscale serve --bg --https=443 localhost:3000` in Terminal (use your port), open the link it prints, approve, then press Refresh on the card.
+
+The switch only works from the Mac itself (open the app at `localhost`); on the phone the card shows the state and address only. "Tailscale not running" means the Tailscale app is closed or signed out on the Mac. If the Tailscale binary is somewhere unusual, set `TAILSCALE_BIN` to its path.
+
+Optional `PHONE_ACCESS_HOST=<mac>.<tailnet>.ts.net` adds that name to `serverActions.allowedOrigins` and `allowedDevOrigins`. It is only needed if forms and buttons on the phone fail with "Invalid Server Actions request" in the server log: Next accepts a server action when the request's `Origin` equals its `Host` (or `X-Forwarded-Host`), and Tailscale's documentation does not say which `Host` Serve forwards. Set it before `next build` / `next start`, because `next.config.ts` reads it when it is loaded.
+
 ## Data Ingestion, Seeding & Utilities
 
 Data is generated through a crawler pipeline (see `README_CRAWLER.md` in the root).

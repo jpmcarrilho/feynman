@@ -6,6 +6,7 @@ import { listStudyspacesAction } from '@/app/spaces/actions'
 import { getOverallDiagnosis } from '@/services/spaceSummaries'
 import { FeynmanLogo } from '@/components/features/FeynmanLogo'
 import { SpaceCard } from '@/components/features/spaces/SpaceCard'
+import { PhoneAccessCard } from '@/components/features/spaces/PhoneAccessCard'
 import { OverallDiagnosis } from '@/components/features/spaces/OverallDiagnosis'
 
 export const dynamic = 'force-dynamic'
@@ -42,6 +43,8 @@ export default async function SpacesPage() {
             <span className="text-xs">Upload your own notes, slides or PDFs.</span>
           </Link>
         </div>
+
+        <PhoneAccessCard />
 
         {overallDiagnosis && <OverallDiagnosis text={overallDiagnosis} />}
       </div>
