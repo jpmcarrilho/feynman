@@ -9,6 +9,7 @@ import {
   TOPIC_REJECTION_LIMIT,
   SESSION_REJECTION_LIMIT,
 } from '@/services/exerciseGenerator'
+import { CourseScopeError } from '@/services/courseScope'
 
 /**
  * What one request for "the next question of a session" returns:
@@ -27,7 +28,8 @@ export const MAX_LOGISTICS_SKIPS = 2
 export const GENERATION_FAILED_MESSAGE = 'The question generator is not available right now. Please try again in a moment.'
 
 /**
- * Generates one more question for the session and appends it. Never returns provider errors: the failure is logged here
+ * Generates one more question for the session and appends it. With a courseId the session and all topics must belong
+ * to that course (a foreign session gives `stopped`, foreign topics give an `error`). Never returns provider errors: the failure is logged here
  * and the student gets a short fixed sentence. The caller authenticates first.
  *
  * A session that is missing or not `active` gets no model call and nothing appended. The status is read again after the
@@ -37,12 +39,24 @@ export async function generateNextForSession(
   sessionId: string,
   topicIds: string[],
   existingExerciseIds: string[],
+  courseId?: string,
 ): Promise<NextExerciseResult> {
   if (topicIds.length === 0) return { error: 'No topics are selected for this session.' }
 
   try {
     const session = await prisma.studySession.findUnique({ where: { id: sessionId } })
     if (!session || session.status !== 'active') return { stopped: true }
+
+    // Scoped call: a session stored under another course (or none) is "not found" for it, and topics of another
+    // course are rejected, so nothing from another course is generated from or appended
+    if (courseId) {
+      if (session.courseId !== courseId) return { stopped: true }
+      const inCourse = new Set<string>()
+      for (const chunk of chunkIds([...new Set(topicIds)])) {
+        for (const t of await prisma.topic.findMany({ where: { id: { in: chunk }, courseId }, select: { id: true } })) inCourse.add(t.id)
+      }
+      if (new Set(topicIds).size !== inCourse.size) return { error: new CourseScopeError().message }
+    }
 
     // Never target topics without content or with only ungraded material (surveys, participation items)
     const eligibleTopicIds = await filterGeneratableTopicIds(topicIds)

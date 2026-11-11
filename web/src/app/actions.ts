@@ -8,7 +8,8 @@ import { getCourseArtifactsService, generateWeekSummaryService } from '@/service
 import { z } from 'zod'
 import { requireAuth } from '@/server/auth'
 import { buildVoiceContext } from '@/services/voiceContext'
-import { getCourseWithProfile, getProfileForTopic, getProfileForCourses } from '@/services/studyspaceService'
+import { getCourseWithProfile, getProfileForTopic, getProfileForCourse, getProfileForCourses } from '@/services/studyspaceService'
+import { cleanCourseId, dominantCourseId, CourseScopeError } from '@/services/courseScope'
 import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
 import { generateNextForSession, type NextExerciseResult } from '@/services/sessionGeneration'
 import { submitExamForSession, type ExamSubmission } from '@/services/sessionService'
@@ -24,6 +25,16 @@ import {
 } from '@/lib/prompts'
 
 const round2 = (n: number) => Math.round(n * 100) / 100
+
+/** Profile and identity of one course, in the shape getProfileForCourses returns for the unscoped actions. */
+async function getScopedProfile(courseId: string) {
+  const course = await getCourseWithProfile(courseId)
+  if (!course) return { profile: await getProfileForCourse(courseId), courses: [] as { id: string; code: string; title: string; calibrationModule: string | null }[] }
+  return {
+    profile: course.profile,
+    courses: [{ id: course.id, code: course.code, title: course.title, calibrationModule: course.profile.calibrationModule }],
+  }
+}
 
 // Fields the session list, results dialog and plan view read. No chatLog, diagnosis, draftAnswers or flaggedIds.
 // exerciseIds is selected only so the server can turn it into exerciseCount (see withExerciseCount).
@@ -133,10 +144,21 @@ export async function explainMistake({
   }
 }
 
-export async function getTopics() {
+/**
+ * Order of topics in every list: module label first, then the outline order inside the module. `week` leads because
+ * the module labels sort in module sequence (legacy "Week_NN_...", new spaces "NN · ..."), whereas `order` alone is not
+ * monotonic in the module for the two MIT courses (a few "R Code Solution" topics of weeks 2-10 sit in the week 1
+ * outline section), which would change the sequence in which the UI lists the modules.
+ */
+const TOPIC_ORDER = [{ week: 'asc' }, { order: 'asc' }] as const
+
+/** All topics, or only the topics of one course. */
+export async function getTopics(courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   return prisma.topic.findMany({
-    orderBy: { week: 'asc' },
+    where: scope ? { courseId: scope } : undefined,
+    orderBy: [...TOPIC_ORDER],
     include: { course: true }
   })
 }
@@ -179,9 +201,15 @@ export async function createStudySession(
   sourcingMix: number = 50,
   weakPct: number = 60,
   unstudiedPct: number = 20,
-  expertPct: number = 20
+  expertPct: number = 20,
+  courseId?: string
 ) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
+  if (scope) {
+    const exists = await prisma.course.findUnique({ where: { id: scope }, select: { id: true } })
+    if (!exists) throw new CourseScopeError('Studyspace not found.')
+  }
   let selected: any[] = []
   let missingCount = 0;
   // Candidates the student has never answered, kept for background enrichment (see below)
@@ -190,10 +218,16 @@ export async function createStudySession(
   // Check if we are selecting from a calibration module (the profile's calibrationModule, e.g. a comprehensive review)
   let isComprehensiveReview = false;
   let comprehensiveCourseId: string | null = null;
+  // Courses of the selected topics, in the order the caller listed them (used to derive the session's course)
+  let selectedTopicCourseIds: string[] = [];
   if (topicIds.length > 0) {
     const selectedTopicsData = await prisma.topic.findMany({
       where: { id: { in: topicIds } }
     });
+    // With a scope, topics of another course are rejected before anything is read or written
+    if (scope && selectedTopicsData.some(t => t.courseId !== scope)) throw new CourseScopeError();
+    const courseOfTopic = new Map(selectedTopicsData.map(t => [t.id, t.courseId]));
+    selectedTopicCourseIds = topicIds.map(id => courseOfTopic.get(id)).filter((c): c is string => !!c);
     const { courses } = await getProfileForCourses(selectedTopicsData.map(t => t.courseId));
     const calibrationByCourse = new Map(courses.map(c => [c.id, c.calibrationModule]));
     const calibrationTopic = selectedTopicsData.find(t => {
@@ -229,7 +263,9 @@ export async function createStudySession(
     }
   } else {
     candidateExercises = await prisma.exercise.findMany({
-      where: { isGraded: true, status: 'active' },
+      where: scope
+        ? { topic: { courseId: scope }, isGraded: true, status: 'active' }
+        : { isGraded: true, status: 'active' },
       include: { topic: true }
     });
   }
@@ -239,6 +275,7 @@ export async function createStudySession(
   if (candidateExercises.length > 0) {
     // 1. Fetch user accuracy and coverage stats per exercise to group candidates individually
     const logs = await prisma.exerciseLog.findMany({
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
       select: { exerciseId: true, isCorrect: true }
     });
 
@@ -349,9 +386,15 @@ export async function createStudySession(
     }
   }
 
+  // The session always stores a course. Scoped: that course. Unscoped: the course with most of the selected topics
+  // (ties: the first selected topic's course); with no topics selected, the course with most of the drawn questions.
+  const sessionCourseId = scope
+    ?? dominantCourseId(topicIds.length > 0 ? selectedTopicCourseIds : selected.map((e: { topic?: { courseId?: string } | null }) => e.topic?.courseId));
+
   const session = await prisma.studySession.create({
     data: {
       status: 'active',
+      courseId: sessionCourseId,
       title: sessionTitle,
       mode,
       timeLimit,
@@ -492,9 +535,15 @@ export async function cancelStudySession(sessionId: string) {
   }
 }
 
-export async function getSessionHistory() {
+/**
+ * Session list. With a courseId: the sessions stored under that course (a session belongs to the course it was started
+ * in), without the course's diagnosis holder row (mode 'global_diagnosis', not a study session). Without: all rows.
+ */
+export async function getSessionHistory(courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   const sessions = await prisma.studySession.findMany({
+    where: scope ? { courseId: scope, mode: { not: 'global_diagnosis' } } : undefined,
     orderBy: { startTime: 'desc' },
     select: SESSION_LIST_SELECT
   })
@@ -555,11 +604,25 @@ export async function getSessionWithExercises(sessionId: string) {
   return { session: withExerciseCount(session), exercises: orderedExercises }
 }
 
-export async function getAnalyticsData() {
+/**
+ * Dashboard numbers. With a courseId every figure covers only that course: its sessions (not cancelled, not the
+ * diagnosis holder), the logs of questions that belong to the course, its topics and its diagnosis. A session started
+ * across courses (only possible before scoping) belongs to the course stored on it; its answers to the other course's
+ * questions are not counted here.
+ */
+export async function getAnalyticsData(courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   const sessions = await prisma.studySession.findMany({
-    where: { status: { not: 'cancelled' } },
-    include: { logs: { include: { exercise: { include: { topic: { include: { course: true } } } } } } }
+    where: scope
+      ? { status: { not: 'cancelled' }, courseId: scope, mode: { not: 'global_diagnosis' } }
+      : { status: { not: 'cancelled' } },
+    include: {
+      logs: {
+        where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
+        include: { exercise: { include: { topic: { include: { course: true } } } } },
+      },
+    }
   });
 
   const totalSessions = sessions.length;
@@ -701,11 +764,12 @@ export async function getAnalyticsData() {
     })
     .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
 
+  // Unscoped: the course-less row that has always held the global diagnosis. Scoped: the row of that course.
   const globalSession = await prisma.studySession.findFirst({
-    where: { mode: 'global_diagnosis' }
+    where: { mode: 'global_diagnosis', courseId: scope ?? null }
   });
 
-  const evolutionData = await getTopicEvolutionData();
+  const evolutionData = await getTopicEvolutionData(scope);
 
   return {
     totalSessions,
@@ -731,10 +795,14 @@ export async function generateNextExercise(
   existingExerciseIds: string[],
   // Kept for callers; the number of questions still missing does not change what one call does
   missingCount: number = 1,
+  courseId?: string,
 ): Promise<NextExerciseResult> {
   void missingCount
   await requireAuth()
-  return generateNextForSession(sessionId, topicIds, existingExerciseIds)
+  const scope = cleanCourseId(courseId)
+  return scope
+    ? generateNextForSession(sessionId, topicIds, existingExerciseIds, scope)
+    : generateNextForSession(sessionId, topicIds, existingExerciseIds)
 }
 
 /** Reasons the student can give when reporting a question. */
@@ -856,7 +924,7 @@ Topic ID: ${w.topicId || 'none'}`;
     }).join('\n\n');
 
     const examCourse = await getCourseWithProfile(
-      session.logs.find((l) => l.exercise?.topic?.courseId)?.exercise.topic?.courseId ?? ''
+      session.courseId ?? session.logs.find((l) => l.exercise?.topic?.courseId)?.exercise.topic?.courseId ?? ''
     );
     const prompt = examDiagnosisPrompt(examCourse?.profile ?? LEGACY_VOICE_PROFILE, {
       courseCode: examCourse?.code,
@@ -886,11 +954,17 @@ Topic ID: ${w.topicId || 'none'}`;
   }
 }
 
-export async function generateGlobalDiagnosis() {
+/**
+ * Diagnosis over all answers (or, with a courseId, over the answers to that course's questions, with that course's
+ * profile and topics). The text is stored on the diagnosis holder row of the course; unscoped it is the course-less row.
+ */
+export async function generateGlobalDiagnosis(courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     // 1. Fetch all completed logs with exercises and topics
     const logs = await prisma.exerciseLog.findMany({
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
       include: {
         exercise: {
           include: { topic: true }
@@ -966,9 +1040,11 @@ Lecture Material Content Summary:
 ${wt.content}`;
     }).join('\n\n');
 
-    const scope = await getProfileForCourses(Object.values(topicStats).map(t => t.course));
-    const prompt = globalDiagnosisPrompt(scope.profile, {
-      courseCodes: scope.courses.map(c => c.code),
+    const profileScope = scope
+      ? await getScopedProfile(scope)
+      : await getProfileForCourses(Object.values(topicStats).map(t => t.course));
+    const prompt = globalDiagnosisPrompt(profileScope.profile, {
+      courseCodes: profileScope.courses.map(c => c.code),
       topicLines: allTopicsSummary,
       weakTopicContent: weakTopicsContext,
     });
@@ -980,7 +1056,7 @@ ${wt.content}`;
 
     // Create or update a special StudySession for the global diagnosis
     let globalSession = await prisma.studySession.findFirst({
-      where: { mode: 'global_diagnosis' }
+      where: { mode: 'global_diagnosis', courseId: scope ?? null }
     });
 
     if (globalSession) {
@@ -994,6 +1070,7 @@ ${wt.content}`;
           title: "Global AI Learning Diagnosis",
           status: "completed",
           mode: "global_diagnosis",
+          courseId: scope ?? null,
           diagnosis: text,
           endTime: new Date()
         }
@@ -1007,24 +1084,26 @@ ${wt.content}`;
   }
 }
 
-export async function generateSessionSummary(sessionId: string) {
+export async function generateSessionSummary(sessionId: string, courseId?: string) {
   await requireAuth()
   try {
-    return await createSessionSummary(sessionId);
+    return await createSessionSummary(sessionId, cleanCourseId(courseId));
   } catch (error) {
     console.error('Error in generateSessionSummary action:', error)
     throw error
   }
 }
 
-export async function generatePlannerResponse(messages: any[], accuracyStats: any) {
+/** Planner chat. With a courseId only the persona changes: that course's profile instead of the legacy one. */
+export async function generatePlannerResponse(messages: any[], accuracyStats: any, courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     const formattedHistory = messages.map(m => {
       return `${m.role === 'user' ? 'Student' : 'Professor (Planner)'}: ${m.content}`;
     }).join('\n');
 
-    const prompt = plannerChatPrompt(LEGACY_VOICE_PROFILE, {
+    const prompt = plannerChatPrompt(scope ? await getProfileForCourse(scope) : LEGACY_VOICE_PROFILE, {
       history: formattedHistory,
       stats: JSON.stringify(accuracyStats),
     });
@@ -1061,11 +1140,15 @@ const StudyPlanSchema = z.object({
   sessions: z.array(StudyPlanSessionSchema)
 });
 
-export async function generateStructuredStudyPlan(chatMessages: any[], accuracyStats: any) {
+/** Study plan from the planner chat. With a courseId the topic catalog, the profile and the calibration module are that course's. */
+export async function generateStructuredStudyPlan(chatMessages: any[], accuracyStats: any, courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     // Fetch actual database Topic catalog so Gemini can map correct IDs
     const dbTopics = await prisma.topic.findMany({
+      where: scope ? { courseId: scope } : undefined,
+      ...(scope ? { orderBy: [...TOPIC_ORDER] } : {}),
       select: { id: true, title: true, week: true, courseId: true }
     });
 
@@ -1073,9 +1156,9 @@ export async function generateStructuredStudyPlan(chatMessages: any[], accuracyS
       `ID: "${t.id}" | Course: "${t.courseId}" | Week: "${t.week}" | Title: "${t.title}"`
     ).join('\n');
 
-    const scope = await getProfileForCourses(dbTopics.map(t => t.courseId));
-    const calibrationModules = [...new Set(scope.courses.map(c => c.calibrationModule).filter((m): m is string => !!m))];
-    const prompt = studyPlanPrompt(scope.profile, {
+    const profileScope = scope ? await getScopedProfile(scope) : await getProfileForCourses(dbTopics.map(t => t.courseId));
+    const calibrationModules = [...new Set(profileScope.courses.map(c => c.calibrationModule).filter((m): m is string => !!m))];
+    const prompt = studyPlanPrompt(profileScope.profile, {
       history: JSON.stringify(chatMessages),
       stats: JSON.stringify(accuracyStats),
       topicCatalog: topicsCatalog,
@@ -1095,23 +1178,44 @@ export async function generateStructuredStudyPlan(chatMessages: any[], accuracyS
   }
 }
 
-export async function saveAndDeployStudyPlan(planData: any) {
+/**
+ * Saves a plan and pre-creates its sessions. With a courseId the plan and every session store it, and a plan that
+ * names topics of another course is rejected as a whole (returns null, nothing is written). Without: each session
+ * stores the course of most of its topics (ties: the first topic), the plan the course of most topics overall.
+ */
+export async function saveAndDeployStudyPlan(planData: any, courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
+    if (!Array.isArray(planData.sessions)) throw new Error('A study plan needs a list of sessions.')
+    const plannedSessions = planData.sessions as z.infer<typeof StudyPlanSessionSchema>[]
+    const sessionTopicIds = (sd: { topicIds?: unknown } | null | undefined): string[] => (Array.isArray(sd?.topicIds) ? sd.topicIds.filter((id: unknown) => typeof id === 'string') : [])
+    const allTopicIds = [...new Set(plannedSessions.flatMap(sessionTopicIds))]
+    const topicRows = allTopicIds.length > 0
+      ? await prisma.topic.findMany({ where: { id: { in: allTopicIds } }, select: { id: true, courseId: true } })
+      : []
+    if (scope && topicRows.some(t => t.courseId !== scope)) throw new CourseScopeError()
+    const courseOfTopic = new Map(topicRows.map(t => [t.id, t.courseId]))
+    const coursesOf = (ids: string[]) => ids.map(id => courseOfTopic.get(id))
+    const planCourseId = scope ?? dominantCourseId(plannedSessions.flatMap(sd => coursesOf(sessionTopicIds(sd))))
+
     // 1. Create the StudyPlan record
     const plan = await prisma.studyPlan.create({
       data: {
         title: planData.title,
         executiveSummary: planData.executiveSummary,
-        status: "active"
+        status: "active",
+        courseId: planCourseId
       }
     });
 
     // 2. Loop over and pre-create each StudySession pre-populated
-    for (const sessionData of planData.sessions) {
+    for (const sessionData of plannedSessions) {
       // Find matching exercises in the database for the given topicIds to seed this session
       const exercises = await prisma.exercise.findMany({
-        where: { topicId: { in: sessionData.topicIds }, status: 'active' },
+        where: scope
+          ? { topicId: { in: sessionData.topicIds }, topic: { courseId: scope }, status: 'active' }
+          : { topicId: { in: sessionData.topicIds }, status: 'active' },
         take: sessionData.questionCount
       });
 
@@ -1125,7 +1229,8 @@ export async function saveAndDeployStudyPlan(planData: any) {
           timeLimit: sessionData.mode === 'exam' ? sessionData.durationMinutes * 60 : null,
           sourcingMix: sessionData.sourcingMix,
           exerciseIds: JSON.stringify(exercises.map(e => e.id)),
-          studyPlanId: plan.id
+          studyPlanId: plan.id,
+          courseId: scope ?? dominantCourseId(coursesOf(sessionTopicIds(sessionData))) ?? planCourseId
         }
       });
     }
@@ -1137,13 +1242,16 @@ export async function saveAndDeployStudyPlan(planData: any) {
   }
 }
 
-export async function getStudyPlans() {
+export async function getStudyPlans(courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     const plans = await prisma.studyPlan.findMany({
+      where: scope ? { courseId: scope } : undefined,
       orderBy: { createdAt: 'desc' },
       include: {
         sessions: {
+          ...(scope ? { where: { courseId: scope } } : {}),
           select: SESSION_LIST_SELECT
         }
       }
@@ -1172,22 +1280,25 @@ export async function deleteStudyPlan(planId: string) {
   }
 }
 
-export async function getTopicsWithPerformance() {
+export async function getTopicsWithPerformance(courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     const topics = await prisma.topic.findMany({
-      orderBy: { week: 'asc' },
+      where: scope ? { courseId: scope } : undefined,
+      orderBy: [...TOPIC_ORDER],
       include: { course: true }
     });
 
     // Rejected questions were never shown, so they are not part of any total. Reported ones stay for the accuracy of
     // what the student already answered, but are not part of the pool they can still cover.
     const exercises = await prisma.exercise.findMany({
-      where: { status: { not: 'rejected' } },
+      where: scope ? { status: { not: 'rejected' }, topic: { courseId: scope } } : { status: { not: 'rejected' } },
       select: { id: true, topicId: true, status: true }
     });
 
     const logs = await prisma.exerciseLog.findMany({
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
       select: { exerciseId: true, isCorrect: true, score: true }
     });
 
@@ -1231,11 +1342,13 @@ export async function getTopicsWithPerformance() {
   }
 }
 
-export async function getTopicEvolutionData() {
+export async function getTopicEvolutionData(courseId?: string) {
   await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     // 1. Fetch all completed ExerciseLogs with timestamps and exercises details
     const logs = await prisma.exerciseLog.findMany({
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
       orderBy: { timestamp: 'asc' },
       include: {
         exercise: {
@@ -1257,7 +1370,7 @@ export async function getTopicEvolutionData() {
 
     // Fetch all available exercises in the DB to count total pools for coverage calculation
     const allExercises = await prisma.exercise.findMany({
-      where: { status: 'active' },
+      where: scope ? { status: 'active', topic: { courseId: scope } } : { status: 'active' },
       include: {
         topic: {
           include: { course: true }
@@ -1447,10 +1560,10 @@ export async function getTopicEvolutionData() {
   }
 }
 
-export async function getCourseArtifacts() {
+export async function getCourseArtifacts(courseId?: string) {
   await requireAuth()
   try {
-    return await getCourseArtifactsService();
+    return await getCourseArtifactsService(cleanCourseId(courseId));
   } catch (error) {
     console.error("Failed to get course artifacts:", error);
     return [];

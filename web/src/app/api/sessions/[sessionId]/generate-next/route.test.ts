@@ -43,6 +43,16 @@ describe('POST /api/sessions/[sessionId]/generate-next', () => {
     expect(generateNextForSession).toHaveBeenCalledWith('session-1', ['t1', 't2'], ['e1'])
   })
 
+  it('passes an optional courseId on and rejects a malformed one', async () => {
+    vi.mocked(generateNextForSession).mockResolvedValue({ stopped: true } as never)
+    await call({ topicIds: ['t1'], existingExerciseIds: [], courseId: 'course-1' })
+    expect(generateNextForSession).toHaveBeenCalledWith('session-1', ['t1'], [], 'course-1')
+    vi.mocked(generateNextForSession).mockClear()
+    expect((await call({ topicIds: ['t1'], existingExerciseIds: [], courseId: '../x' })).status).toBe(400)
+    expect((await call({ topicIds: ['t1'], existingExerciseIds: [], courseId: 5 })).status).toBe(400)
+    expect(generateNextForSession).not.toHaveBeenCalled()
+  })
+
   it.each([[{ error: 'plain sentence' }], [{ stopped: true }]])('returns %j unchanged', async (result) => {
     vi.mocked(generateNextForSession).mockResolvedValue(result as never)
     expect(await (await call({ topicIds: ['t1'], existingExerciseIds: [] })).json()).toEqual(result)

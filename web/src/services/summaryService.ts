@@ -8,14 +8,18 @@ import path from 'path'
 import { sessionSummaryLink, summaryLink } from '@/lib/fileLinks'
 import { findSummaryFile, newSessionIndexPath, newSummaryFilePath, summaryKey } from '@/server/storage'
 
-export async function createSessionSummary(sessionId: string) {
+/**
+ * Study guides for the modules a session covers. With a courseId the session must be stored under that course
+ * (otherwise it is "not found") and only that course's modules are covered.
+ */
+export async function createSessionSummary(sessionId: string, courseId?: string) {
   // 1. Get session details
   const session = await prisma.studySession.findUnique({
     where: { id: sessionId },
     include: { logs: { include: { exercise: true } } }
   })
 
-  if (!session) {
+  if (!session || (courseId && session.courseId !== courseId)) {
     throw new Error('Session not found')
   }
 
@@ -26,7 +30,9 @@ export async function createSessionSummary(sessionId: string) {
   const exerciseIds = JSON.parse(session.exerciseIds) as string[]
 
   const exercises = await prisma.exercise.findMany({
-    where: { id: { in: exerciseIds } },
+    where: courseId
+      ? { id: { in: exerciseIds }, topic: { courseId } }
+      : { id: { in: exerciseIds } },
     include: { topic: { include: { course: true } } }
   })
 

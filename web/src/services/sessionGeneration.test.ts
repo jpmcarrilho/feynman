@@ -103,3 +103,29 @@ describe('generateNextForSession: logistics topics', () => {
     expect(prisma.studySession.update).not.toHaveBeenCalled()
   })
 })
+
+describe('generateNextForSession: course scope', () => {
+  it('treats a session stored under another course (or none) as stopped, with no model call', async () => {
+    for (const courseId of ['c2', null]) {
+      vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 's', status: 'active', courseId, startTime: new Date(), exerciseIds: '[]' } as never)
+      expect(await generateNextForSession('s', ['t1'], [], 'c1')).toEqual({ stopped: true })
+    }
+    expect(generateObject).not.toHaveBeenCalled()
+    expect(prisma.studySession.update).not.toHaveBeenCalled()
+  })
+
+  it('rejects topics of another course with a plain error and no model call', async () => {
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 's', status: 'active', courseId: 'c1', startTime: new Date(), exerciseIds: '[]' } as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1' }] as never) // only t1 is in c1
+    const res = await generateNextForSession('s', ['t1', 't2'], [], 'c1')
+    expect(res).toEqual({ error: expect.stringMatching(/do not belong/) })
+    expect(vi.mocked(prisma.topic.findMany).mock.calls[0][0]).toMatchObject({ where: { id: { in: ['t1', 't2'] }, courseId: 'c1' } })
+    expect(generateObject).not.toHaveBeenCalled()
+  })
+
+  it('does not check anything extra without a scope', async () => {
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 's', status: 'completed', courseId: 'c9', startTime: new Date() } as never)
+    expect(await generateNextForSession('s', ['t1'], [])).toEqual({ stopped: true })
+    expect(prisma.topic.findMany).not.toHaveBeenCalled()
+  })
+})

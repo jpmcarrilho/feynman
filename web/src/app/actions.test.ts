@@ -1,10 +1,12 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, reportExercise } from './actions'
+import { explainMistake, generateNextExercise, getTopics, getTopicsWithPerformance, getAnalyticsData, generateGlobalDiagnosis, saveAndDeployStudyPlan, generateStructuredStudyPlan, generatePlannerResponse, generateSessionSummary, getCourseArtifacts, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, reportExercise } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 import { defaultProfile } from '@/lib/studyspace/profile'
 import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
 import { enrichInBackground } from '@/services/enrichment'
+import { createSessionSummary } from '@/services/summaryService'
+import { getCourseArtifactsService } from '@/services/artifactsService'
 
 // Auth: requireAuth always resolves in these tests
 vi.mock('@/server/auth', () => ({
@@ -22,6 +24,9 @@ vi.mock('ai', () => ({
   generateText: vi.fn(),
   generateObject: vi.fn(),
 }))
+
+vi.mock('@/services/summaryService', () => ({ createSessionSummary: vi.fn() }))
+vi.mock('@/services/artifactsService', () => ({ getCourseArtifactsService: vi.fn(async () => []), generateWeekSummaryService: vi.fn() }))
 
 vi.mock('@ai-sdk/google', () => ({
   google: vi.fn(() => 'mocked-google-model'),
@@ -50,6 +55,7 @@ vi.mock('@/lib/db', () => ({
     studyPlan: {
       findMany: vi.fn(),
       delete: vi.fn(),
+      create: vi.fn(),
     },
     sessionExercise: {
       deleteMany: vi.fn(),
@@ -58,6 +64,7 @@ vi.mock('@/lib/db', () => ({
     studySession: {
       deleteMany: vi.fn(),
       findMany: vi.fn(),
+      findFirst: vi.fn(),
       create: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
@@ -688,5 +695,244 @@ describe('reportExercise', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.mocked(prisma.exercise.updateMany).mockRejectedValueOnce(new Error('db'))
     expect(await reportExercise('ex-1', 'other')).toBe(false)
+  })
+})
+
+
+describe('course scope (T16)', () => {
+  type Loose = Record<string, any> // eslint-disable-line @typescript-eslint/no-explicit-any
+  const callArg = (fn: unknown, n = 0): Loose => (fn as { mock: { calls: unknown[][] } }).mock.calls[n][0] as Loose
+  const rows = (...pairs: [string, string][]) => pairs.map(([id, courseId]) => ({ id, courseId, week: 'W', course: { code: courseId } }))
+
+  beforeEach(() => {
+    vi.resetAllMocks()
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.create).mockResolvedValue({ id: 's1' } as never)
+    vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'cA', code: 'A', title: 'A', profile: null } as never)
+  })
+
+  describe('createStudySession', () => {
+    it('stores the course the session was started in and draws only that course when no topic is selected', async () => {
+      vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([{ id: 'e1', topicId: 't1', topic: { id: 't1', courseId: 'cA' } }] as never).mockResolvedValue([] as never)
+      await createStudySession([], 5, 'study', null, 0, 60, 20, 20, 'cA')
+
+      expect(callArg(prisma.exercise.findMany).where).toEqual({ topic: { courseId: 'cA' }, isGraded: true, status: 'active' })
+      expect(callArg(prisma.exerciseLog.findMany).where).toEqual({ exercise: { topic: { courseId: 'cA' } } })
+      expect(callArg(prisma.studySession.create).data.courseId).toBe('cA')
+    })
+
+    it('rejects topics of another course before reading candidates or writing anything', async () => {
+      vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cB']) as never)
+
+      await expect(createStudySession(['t1', 't2'], 5, 'study', null, 0, 60, 20, 20, 'cA')).rejects.toThrow(/do not belong/)
+
+      expect(prisma.exercise.findMany).not.toHaveBeenCalled()
+      expect(prisma.studySession.create).not.toHaveBeenCalled()
+    })
+
+    it('rejects an unknown studyspace', async () => {
+      vi.mocked(prisma.course.findUnique).mockResolvedValue(null as never)
+      await expect(createStudySession([], 5, 'study', null, 0, 60, 20, 20, 'nope')).rejects.toThrow(/not found/)
+      expect(prisma.studySession.create).not.toHaveBeenCalled()
+    })
+
+    it('treats an empty courseId as no scope', async () => {
+      await createStudySession([], 5, 'study', null, 0, 60, 20, 20, '')
+      expect(callArg(prisma.exercise.findMany).where).toEqual({ isGraded: true, status: 'active' })
+      expect(prisma.course.findUnique).not.toHaveBeenCalled()
+    })
+
+    it('derives the course from the selected topics when unscoped: the course with most topics, a tie goes to the first topic', async () => {
+      vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cB'], ['t3', 'cB']) as never)
+      await createStudySession(['t1', 't2', 't3'], 5, 'study', null, 0)
+      expect(callArg(prisma.studySession.create).data.courseId).toBe('cB')
+
+      vi.mocked(prisma.studySession.create).mockClear()
+      vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cB']) as never)
+      await createStudySession(['t2', 't1'], 5, 'study', null, 0)
+      expect(callArg(prisma.studySession.create).data.courseId).toBe('cB')
+    })
+
+    it('derives the course from the drawn questions when unscoped and no topic is selected', async () => {
+      vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([
+        { id: 'e1', topicId: 't1', topic: { id: 't1', courseId: 'cA' } },
+      ] as never).mockResolvedValue([] as never)
+      await createStudySession([], 1, 'study', null, 0, 0, 100, 0)
+      expect(callArg(prisma.studySession.create).data.courseId).toBe('cA')
+    })
+
+    it('stores null only when nothing at all identifies a course', async () => {
+      await createStudySession([], 1, 'study', null, 0)
+      expect(callArg(prisma.studySession.create).data.courseId).toBeNull()
+    })
+  })
+
+  describe('reads', () => {
+    it('getTopics filters by course and orders by module label then outline order', async () => {
+      await getTopics('cA')
+      expect(callArg(prisma.topic.findMany)).toMatchObject({ where: { courseId: 'cA' }, orderBy: [{ week: 'asc' }, { order: 'asc' }] })
+      await getTopics()
+      expect(callArg(prisma.topic.findMany, 1).where).toBeUndefined()
+    })
+
+    it('getSessionHistory filters by course (and leaves the diagnosis holder out); unscoped it has no filter', async () => {
+      await getSessionHistory('cA')
+      expect(callArg(prisma.studySession.findMany).where).toEqual({ courseId: 'cA', mode: { not: 'global_diagnosis' } })
+      await getSessionHistory()
+      expect(callArg(prisma.studySession.findMany, 1).where).toBeUndefined()
+    })
+
+    it('getStudyPlans filters plans and their sessions by course', async () => {
+      vi.mocked(prisma.studyPlan.findMany).mockResolvedValue([] as never)
+      await getStudyPlans('cA')
+      const args = callArg(prisma.studyPlan.findMany)
+      expect(args.where).toEqual({ courseId: 'cA' })
+      expect(args.include.sessions.where).toEqual({ courseId: 'cA' })
+      await getStudyPlans()
+      expect(callArg(prisma.studyPlan.findMany, 1).where).toBeUndefined()
+      expect(callArg(prisma.studyPlan.findMany, 1).include.sessions).not.toHaveProperty('where')
+    })
+
+    it('getTopicsWithPerformance restricts topics, exercises and logs to the course', async () => {
+      await getTopicsWithPerformance('cA')
+      expect(callArg(prisma.topic.findMany)).toMatchObject({ where: { courseId: 'cA' }, orderBy: [{ week: 'asc' }, { order: 'asc' }] })
+      expect(callArg(prisma.exercise.findMany).where).toEqual({ status: { not: 'rejected' }, topic: { courseId: 'cA' } })
+      expect(callArg(prisma.exerciseLog.findMany).where).toEqual({ exercise: { topic: { courseId: 'cA' } } })
+    })
+
+    it('getAnalyticsData restricts sessions, logs, evolution and the diagnosis row to the course, keeping status filters', async () => {
+      vi.mocked(prisma.studySession.findFirst).mockResolvedValue(null as never)
+      await getAnalyticsData('cA')
+      const sessions = callArg(prisma.studySession.findMany)
+      expect(sessions.where).toEqual({ status: { not: 'cancelled' }, courseId: 'cA', mode: { not: 'global_diagnosis' } })
+      expect(sessions.include.logs.where).toEqual({ exercise: { topic: { courseId: 'cA' } } })
+      expect(callArg(prisma.studySession.findFirst).where).toEqual({ mode: 'global_diagnosis', courseId: 'cA' })
+      expect(callArg(prisma.exerciseLog.findMany).where).toEqual({ exercise: { topic: { courseId: 'cA' } } })
+    })
+
+    it('getAnalyticsData unscoped keeps today\'s queries and reads the course-less diagnosis row', async () => {
+      vi.mocked(prisma.studySession.findFirst).mockResolvedValue(null as never)
+      await getAnalyticsData()
+      const sessions = callArg(prisma.studySession.findMany)
+      expect(sessions.where).toEqual({ status: { not: 'cancelled' } })
+      expect(sessions.include.logs.where).toBeUndefined()
+      expect(callArg(prisma.studySession.findFirst).where).toEqual({ mode: 'global_diagnosis', courseId: null })
+      expect(callArg(prisma.exerciseLog.findMany).where).toBeUndefined()
+    })
+
+    it('getCourseArtifacts and generateSessionSummary pass the scope on', async () => {
+      await getCourseArtifacts('cA')
+      expect(getCourseArtifactsService).toHaveBeenCalledWith('cA')
+      await getCourseArtifacts()
+      expect(getCourseArtifactsService).toHaveBeenLastCalledWith(undefined)
+      vi.mocked(createSessionSummary).mockResolvedValue({ link: 'l', content: 'c' } as never)
+      await generateSessionSummary('s1', 'cA')
+      expect(createSessionSummary).toHaveBeenCalledWith('s1', 'cA')
+    })
+  })
+
+  describe('generateNextExercise', () => {
+    it('treats a session of another course as stopped, without any model call', async () => {
+      vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 's1', status: 'active', courseId: 'cB', startTime: new Date() } as never)
+      expect(await generateNextExercise('s1', ['t1'], [], 1, 'cA')).toEqual({ stopped: true })
+      expect(generateObject).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('global diagnosis', () => {
+    const log = { score: 0, isCorrect: false, exercise: { id: 'e1', topic: { id: 't1', title: 'T', courseId: 'cA', week: 'W1', content: 'x' } } }
+
+    it('uses only the course logs and profile, and stores the text on the course row', async () => {
+      vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([log] as never)
+      vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1', content: 'x', course: { code: 'A' } }] as never)
+      vi.mocked(prisma.studySession.findFirst).mockResolvedValue(null as never)
+      vi.mocked(generateText).mockResolvedValue({ text: 'diag' } as never)
+
+      expect(await generateGlobalDiagnosis('cA')).toBe('diag')
+
+      expect(callArg(prisma.exerciseLog.findMany).where).toEqual({ exercise: { topic: { courseId: 'cA' } } })
+      expect(callArg(prisma.studySession.findFirst).where).toEqual({ mode: 'global_diagnosis', courseId: 'cA' })
+      expect(callArg(prisma.studySession.create).data).toMatchObject({ mode: 'global_diagnosis', courseId: 'cA', diagnosis: 'diag' })
+      expect(prisma.course.findUnique).toHaveBeenCalledWith({ where: { id: 'cA' } })
+    })
+
+    it('updates the existing row of the course; unscoped it finds and keeps the course-less row', async () => {
+      vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([log] as never)
+      vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+      vi.mocked(prisma.studySession.findFirst).mockResolvedValue({ id: 'g1' } as never)
+      vi.mocked(prisma.studySession.update).mockResolvedValue({} as never)
+      vi.mocked(generateText).mockResolvedValue({ text: 'diag' } as never)
+
+      await generateGlobalDiagnosis()
+
+      expect(callArg(prisma.exerciseLog.findMany).where).toBeUndefined()
+      expect(callArg(prisma.studySession.findFirst).where).toEqual({ mode: 'global_diagnosis', courseId: null })
+      expect(callArg(prisma.studySession.update).where).toEqual({ id: 'g1' })
+      expect(prisma.studySession.create).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('study plans', () => {
+    const plan = (...topicIds: string[][]) => ({
+      title: 'P', executiveSummary: 'S',
+      sessions: topicIds.map((ids, i) => ({ name: `n${i}`, day: 'Mon', mode: 'study', durationMinutes: 30, sourcingMix: 50, topicIds: ids, questionCount: 5 })),
+    })
+
+    beforeEach(() => {
+      vi.mocked(prisma.studyPlan.create).mockResolvedValue({ id: 'p1' } as never)
+    })
+
+    it('stores the course on the plan and on every session, and seeds only from that course', async () => {
+      vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cA']) as never)
+
+      await saveAndDeployStudyPlan(plan(['t1'], ['t2']), 'cA')
+
+      expect(callArg(prisma.studyPlan.create).data.courseId).toBe('cA')
+      expect(vi.mocked(prisma.studySession.create).mock.calls.map(c => (c[0] as Loose).data.courseId)).toEqual(['cA', 'cA'])
+      expect(callArg(prisma.exercise.findMany).where).toEqual({ topicId: { in: ['t1'] }, topic: { courseId: 'cA' }, status: 'active' })
+    })
+
+    it('rejects a plan that names a topic of another course, writing nothing', async () => {
+      vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t9', 'cB']) as never)
+
+      expect(await saveAndDeployStudyPlan(plan(['t1', 't9']), 'cA')).toBeNull()
+
+      expect(prisma.studyPlan.create).not.toHaveBeenCalled()
+      expect(prisma.studySession.create).not.toHaveBeenCalled()
+    })
+
+    it('unscoped, derives the course of each session and of the plan from the topics', async () => {
+      vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cB'], ['t3', 'cB']) as never)
+
+      await saveAndDeployStudyPlan(plan(['t1'], ['t2', 't3']))
+
+      expect(callArg(prisma.studyPlan.create).data.courseId).toBe('cB')
+      expect(vi.mocked(prisma.studySession.create).mock.calls.map(c => (c[0] as Loose).data.courseId)).toEqual(['cA', 'cB'])
+      expect(callArg(prisma.exercise.findMany).where).toEqual({ topicId: { in: ['t1'] }, status: 'active' })
+    })
+
+    it('generateStructuredStudyPlan filters the catalog to the course and uses its profile', async () => {
+      vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1', title: 'T', week: 'W', courseId: 'cA' }] as never)
+      vi.mocked(generateObject).mockResolvedValue({ object: { title: 'x', executiveSummary: 'y', sessions: [] } } as never)
+
+      await generateStructuredStudyPlan([], {}, 'cA')
+
+      expect(callArg(prisma.topic.findMany).where).toEqual({ courseId: 'cA' })
+      expect(prisma.course.findUnique).toHaveBeenCalledWith({ where: { id: 'cA' } })
+    })
+
+    it('generatePlannerResponse uses the course profile only when scoped', async () => {
+      vi.mocked(generateText).mockResolvedValue({ text: 'ok' } as never)
+      vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'cA', code: 'A', title: 'Organic chemistry', profile: null } as never)
+
+      await generatePlannerResponse([], {}, 'cA')
+      expect(vi.mocked(generateText).mock.calls[0][0].prompt as string).toContain('Organic chemistry')
+
+      await generatePlannerResponse([], {})
+      expect(vi.mocked(generateText).mock.calls[1][0].prompt as string).not.toContain('Organic chemistry')
+    })
   })
 })

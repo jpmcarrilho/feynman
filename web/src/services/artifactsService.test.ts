@@ -40,6 +40,29 @@ vi.mock('fs', () => ({
   }
 }))
 
+describe('getCourseArtifactsService course scope', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    vi.mocked(prisma.course.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+  })
+
+  it('reads only the given course and its topics, in module then outline order', async () => {
+    await getCourseArtifactsService('course-1')
+    expect(prisma.course.findMany).toHaveBeenCalledWith({ where: { id: 'course-1' }, orderBy: { code: 'asc' } })
+    expect(vi.mocked(prisma.topic.findMany).mock.calls[0][0]).toMatchObject({
+      where: { courseId: 'course-1' },
+      orderBy: [{ week: 'asc' }, { order: 'asc' }],
+    })
+  })
+
+  it('reads every course without a scope', async () => {
+    await getCourseArtifactsService()
+    expect(vi.mocked(prisma.course.findMany).mock.calls[0][0]).toMatchObject({ where: undefined })
+    expect(vi.mocked(prisma.topic.findMany).mock.calls[0][0]).toMatchObject({ where: undefined })
+  })
+})
+
 describe('getCourseArtifactsService', () => {
   beforeEach(() => {
     vi.clearAllMocks()

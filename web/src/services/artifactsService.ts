@@ -10,15 +10,17 @@ import { findSummaryFile, newSummaryFilePath, summaryKey } from '@/server/storag
 
 /**
  * Retrieves all courses and groups their resources (slides, transcriptions, exercises)
- * into a weekly structured hierarchy.
+ * into a weekly structured hierarchy. With a courseId only that course is returned.
  */
-export async function getCourseArtifactsService() {
+export async function getCourseArtifactsService(courseId?: string) {
   const courses = await prisma.course.findMany({
+    where: courseId ? { id: courseId } : undefined,
     orderBy: { code: 'asc' }
   });
 
   const topics = await prisma.topic.findMany({
-    orderBy: { week: 'asc' },
+    where: courseId ? { courseId } : undefined,
+    orderBy: [{ week: 'asc' }, { order: 'asc' }], // module label first, outline order inside it
     include: { course: true, exercises: { where: { origin: 'imported', status: 'active' }, select: { id: true } } }
   });
 
