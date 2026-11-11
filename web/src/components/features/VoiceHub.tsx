@@ -32,9 +32,15 @@ interface VoiceHubProps {
   onChatModeChange?: (mode: TutorChatMode) => void;
   chatModeProfile?: TutorProfile;
   sessionMode?: string | null;
+  /**
+   * Owned by the parent. When given, a message typed while disconnected is parked here before connecting
+   * and the parent sends it after the exercise context, so the context never gets its own greeting turn.
+   * Without it the message is sent shortly after the connection opens.
+   */
+  pendingMessageRef?: { current: string | null };
 }
 
-export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose, chatMode, onChatModeChange, chatModeProfile, sessionMode }: VoiceHubProps) {
+export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose, chatMode, onChatModeChange, chatModeProfile, sessionMode, pendingMessageRef }: VoiceHubProps) {
   const { isConnected, isConnecting, error, messages, connect, disconnect, sendText, isMuted, setMuted } = liveAPI
   
   const [inputText, setInputText] = useState('')
@@ -258,9 +264,15 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
             setMuted(true); // Mute mic when sending text
             
             if (!isConnected) {
-              connect(false).then(() => { // Text-only mode
-                setTimeout(() => sendText(inputText), 1000)
-              });
+              const text = inputText
+              if (pendingMessageRef) {
+                pendingMessageRef.current = text
+                connect(false).catch(() => { pendingMessageRef.current = null }) // Text-only mode
+              } else {
+                connect(false).then(() => { // Text-only mode
+                  setTimeout(() => sendText(text), 1000)
+                })
+              }
               setInputText('');
             } else {
               sendText(inputText);

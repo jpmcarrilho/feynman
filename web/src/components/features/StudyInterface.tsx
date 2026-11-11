@@ -113,10 +113,15 @@ const EXAM_DIAGNOSIS_FILE = 'inline:exam-diagnosis.md'
 const VOICE_SYSTEM_INSTRUCTION = voiceSystemInstruction(LEGACY_VOICE_PROFILE)
 // localStorage key suffix for the chat mode (feynman_chat_mode_legacy) until studyspaces exist in the UI
 const CHAT_MODE_SCOPE = 'legacy'
+// How long a typed first message waits for the exercise context prefetch before it is sent without it
+const CONTEXT_WAIT_MS = 5000
 
 export function StudyInterface() {
   const [topics, setTopics] = useState<any[]>([])
+  // The Create Session dialog's selection only
   const [selectedTopics, setSelectedTopics] = useState<string[]>([])
+  // Topics of the running session: used by the background question generator, never by the dialog
+  const [activeSessionTopics, setActiveSessionTopics] = useState<string[]>([])
   const [histories, setHistories] = useState<any[]>([])
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -642,6 +647,7 @@ export function StudyInterface() {
   ) => {
     setIsLoading(true)
     try {
+      setActiveSessionTopics(selectedTopics)
       const res = await createStudySession(selectedTopics, questionCount, mode, timeLimit, sourcingMix, weakPct, unstudiedPct, expertPct)
       setSession(res.session)
       setExercises(res.exercises)
@@ -663,7 +669,7 @@ export function StudyInterface() {
   const handleStartWeekSession = async (topicIds: string[], weekName: string) => {
     setIsLoading(true)
     try {
-      setSelectedTopics(topicIds)
+      setActiveSessionTopics(topicIds)
       const res = await createStudySession(topicIds, questionCount, 'study', null, 50, 60, 20, 20)
       setSession(res.session)
       setExercises(res.exercises)
@@ -839,7 +845,7 @@ export function StudyInterface() {
           const currentIds = exercises.map((e: any) => e.id);
           const newEx = await generateNextExercise(
             session.id,
-            selectedTopics.length > 0 ? selectedTopics : topics.map(t => t.id),
+            activeSessionTopics.length > 0 ? activeSessionTopics : topics.map(t => t.id),
             currentIds,
             missingCount
           );
@@ -859,7 +865,7 @@ export function StudyInterface() {
       };
       generateOne();
     }
-  }, [session, missingCount, isGeneratingNext, exercises, selectedTopics, topics]);
+  }, [session, missingCount, isGeneratingNext, exercises, activeSessionTopics, topics]);
 
   // Exam Countdown Timer tick useEffect
   useEffect(() => {
@@ -981,6 +987,16 @@ export function StudyInterface() {
     }
   }, [session?.id, currentExercise?.id, session?.mode])
 
+  // A message the student typed while the tutor was disconnected (VoiceHub's text box, "explain why I am wrong").
+  // The context effect below sends it right after the context, which goes out without asking for a response.
+  const pendingMessageRef = useRef<string | null>(null)
+  const flushPendingMessage = () => {
+    const text = pendingMessageRef.current
+    if (text === null) return
+    pendingMessageRef.current = null
+    liveAPI.sendText(text)
+  }
+
   // Context is sent once per (session, exercise) or per tab, never on every answer
   useEffect(() => {
     if (!liveAPI.isConnected) {
@@ -988,11 +1004,16 @@ export function StudyInterface() {
       lastContextKeyRef.current = null
       return
     }
+    // With a typed message pending the context only joins the conversation (respond:false); the message triggers the answer
+    const respond = pendingMessageRef.current === null
 
     if (session && currentExercise) {
       const key = currentContextKey
-      if (!key || lastContextKeyRef.current === key) return
-      // Not loaded yet: this effect runs again when the prefetch arrives
+      if (!key || lastContextKeyRef.current === key) {
+        flushPendingMessage()
+        return
+      }
+      // Not loaded yet: this effect runs again when the prefetch arrives (the timer below covers a failed prefetch)
       if (!cachedContext || cachedContext.key !== key) return
       lastContextKeyRef.current = key
       liveAPI.sendContext(
@@ -1005,32 +1026,40 @@ export function StudyInterface() {
           // The mode in effect right now, read here (not a dependency) so a mode change never re-runs this effect
           chatMode: getChatMode(CHAT_MODE_SCOPE, LEGACY_VOICE_PROFILE.defaultChatMode),
         }),
-        { interrupt: true }
+        { interrupt: true, respond }
       )
     } else if (!session) {
       const key = `tab:${activeTab === 'plan' ? 'plan' : 'dashboard'}`
-      if (lastContextKeyRef.current === key) return
-      lastContextKeyRef.current = key
-      if (activeTab === 'plan') {
-        const contextMsg = voicePlannerContextMessage();
-        liveAPI.sendContext(contextMsg, { interrupt: false })
-      } else {
-        const contextMsg = voiceDashboardContextMessage();
-        liveAPI.sendContext(contextMsg, { interrupt: false })
+      if (lastContextKeyRef.current !== key) {
+        lastContextKeyRef.current = key
+        const contextMsg = activeTab === 'plan' ? voicePlannerContextMessage() : voiceDashboardContextMessage()
+        liveAPI.sendContext(contextMsg, { interrupt: false, respond })
       }
     }
+    flushPendingMessage()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [liveAPI.isConnected, currentContextKey, cachedContext, session?.mode, activeTab])
+
+  // If the context prefetch never arrives, do not hold the student's message back: send it and skip this exercise's context
+  useEffect(() => {
+    if (!liveAPI.isConnected || pendingMessageRef.current === null) return
+    if (!currentContextKey || (cachedContext && cachedContext.key === currentContextKey)) return
+    const timer = setTimeout(() => {
+      lastContextKeyRef.current = currentContextKey
+      flushPendingMessage()
+    }, CONTEXT_WAIT_MS)
+    return () => clearTimeout(timer)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveAPI.isConnected, currentContextKey, cachedContext])
 
   const handleRequestExplanation = (userAnswer: string) => {
     if (!currentExercise) return
     const msg = `I selected "${userAnswer}", but the correct answer is "${currentExercise.correctAnswer}". Can you explain why I am wrong?`
 
     if (!liveAPI.isConnected) {
-      // Connect first (text-only), then send message after a brief delay
-      liveAPI.connect(false).then(() => {
-        setTimeout(() => liveAPI.sendText(msg), 1500)
-      })
+      // Connect first (text-only); the context effect sends the message right after the context
+      pendingMessageRef.current = msg
+      liveAPI.connect(false).catch(() => { pendingMessageRef.current = null })
     } else {
       liveAPI.sendText(msg)
     }
@@ -1787,6 +1816,7 @@ export function StudyInterface() {
             onChatModeChange={handleChatModeChange}
             chatModeProfile={LEGACY_VOICE_PROFILE}
             sessionMode={session?.mode}
+            pendingMessageRef={pendingMessageRef}
           />
         </TabsContent>
 
@@ -1870,6 +1900,7 @@ export function StudyInterface() {
             onChatModeChange={handleChatModeChange}
             chatModeProfile={LEGACY_VOICE_PROFILE}
             sessionMode={session?.mode}
+            pendingMessageRef={pendingMessageRef}
           />
         )}
       </div>

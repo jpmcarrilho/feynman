@@ -71,6 +71,15 @@ describe('useLiveAPI context vs text', () => {
     expect(hook.result.current.messages).toEqual([])
   })
 
+  it('sendContext with respond:false sends the turn without completing it', async () => {
+    const { hook, ws } = await connected()
+    act(() => hook.result.current.sendContext('[SYSTEM MESSAGE: ctx]', { respond: false }))
+    const payload = JSON.parse(ws.sent[ws.sent.length - 1])
+    expect(payload.clientContent.turnComplete).toBe(false)
+    act(() => hook.result.current.sendText('question'))
+    expect(JSON.parse(ws.sent[ws.sent.length - 1]).clientContent.turnComplete).toBe(true)
+  })
+
   it('sendText still appends the real user message', async () => {
     const { hook } = await connected()
     act(() => hook.result.current.sendText('hello'))

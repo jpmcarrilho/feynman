@@ -33,6 +33,29 @@ describe('VoiceHub Component', () => {
     expect(mockConnect).toHaveBeenCalled()
   })
 
+  it('parks a typed message in pendingMessageRef and connects text-only instead of sending it', async () => {
+    mockConnect.mockReset()
+    mockSendText.mockReset()
+    mockConnect.mockResolvedValue(undefined)
+    const pendingMessageRef = { current: null as string | null }
+    render(<VoiceHub liveAPI={{ ...defaultLiveAPI, setMuted: vi.fn() }} pendingMessageRef={pendingMessageRef} />)
+    fireEvent.change(screen.getByPlaceholderText('Type a message to start chatting...'), { target: { value: 'hello tutor' } })
+    fireEvent.submit(screen.getByPlaceholderText('Type a message to start chatting...').closest('form')!)
+    expect(mockConnect).toHaveBeenCalledWith(false)
+    expect(pendingMessageRef.current).toBe('hello tutor')
+    expect(mockSendText).not.toHaveBeenCalled()
+  })
+
+  it('clears the pending message when the connection fails', async () => {
+    mockConnect.mockReset()
+    mockConnect.mockRejectedValue(new Error('x'))
+    const pendingMessageRef = { current: null as string | null }
+    render(<VoiceHub liveAPI={{ ...defaultLiveAPI, setMuted: vi.fn() }} pendingMessageRef={pendingMessageRef} />)
+    fireEvent.change(screen.getByPlaceholderText('Type a message to start chatting...'), { target: { value: 'hi' } })
+    fireEvent.submit(screen.getByPlaceholderText('Type a message to start chatting...').closest('form')!)
+    await waitFor(() => expect(pendingMessageRef.current).toBeNull())
+  })
+
   it('displays messages', () => {
     const activeLiveAPI = {
       ...defaultLiveAPI,
