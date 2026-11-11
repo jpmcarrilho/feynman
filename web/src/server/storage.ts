@@ -2,6 +2,7 @@
 import fs from 'fs'
 import path from 'path'
 import { isValidSummaryKey, isValidFileId } from '@/lib/fileLinks'
+import { PagesFileSchema, type PagesFile } from '@/server/ingest/schemas'
 
 /** Root of uploaded files and generated summaries of new spaces. Gitignored. */
 export function storageDir(): string {
@@ -38,6 +39,107 @@ export async function readSourceFile(storageKey: string): Promise<Buffer> {
   const realRoot = await fs.promises.realpath(/* turbopackIgnore: true */ root)
   if (!real.startsWith(realRoot + path.sep)) throw new Error('Invalid storage key')
   return fs.promises.readFile(/* turbopackIgnore: true */ real)
+}
+
+// --- Uploaded sources -------------------------------------------------------
+
+/** Storage key (relative to STORAGE_DIR) of a source's original bytes. Pure; throws on invalid ids or extension. */
+export function sourceStorageKey(courseId: string, sourceId: string, ext: string): string {
+  if (!isValidFileId(courseId) || !isValidFileId(sourceId)) throw new Error('Invalid source id')
+  if (!/^\.[a-z0-9]{1,8}$/.test(ext)) throw new Error('Invalid file extension')
+  return `sources/${courseId}/${sourceId}/original${ext}`
+}
+
+/** Storage key of the extracted pages of a source. Pure. */
+export function pagesStorageKey(courseId: string, sourceId: string): string {
+  if (!isValidFileId(courseId) || !isValidFileId(sourceId)) throw new Error('Invalid source id')
+  return `sources/${courseId}/${sourceId}/pages.json`
+}
+
+/** Absolute directory of a source (not created). */
+export function sourceDir(courseId: string, sourceId: string): string {
+  const full = resolveInside(storageDir(), `sources/${courseId}/${sourceId}`)
+  if (!isValidFileId(courseId) || !isValidFileId(sourceId) || !full) throw new Error('Invalid source id')
+  return full
+}
+
+/** Creates the directory of `key` under STORAGE_DIR (if needed) and returns the absolute file path; refuses symlink escapes. */
+async function preparePath(key: string): Promise<string> {
+  const root = storageDir()
+  const full = resolveInside(root, key)
+  if (!full) throw new Error('Invalid storage key')
+  const dir = path.dirname(full)
+  await fs.promises.mkdir(/* turbopackIgnore: true */ dir, { recursive: true })
+  const realDir = await fs.promises.realpath(/* turbopackIgnore: true */ dir)
+  const realRoot = await fs.promises.realpath(/* turbopackIgnore: true */ root)
+  if (realDir !== realRoot && !realDir.startsWith(realRoot + path.sep)) throw new Error('Invalid storage key')
+  return path.join(realDir, path.basename(full))
+}
+
+/**
+ * Writes `data` to `storage/<key>` atomically: a temporary file in the same directory is flushed and renamed over the
+ * target, so a reader sees the old file or the complete new one, never a partial write.
+ */
+export async function atomicWriteStorageFile(key: string, data: string | Uint8Array): Promise<void> {
+  const target = await preparePath(key)
+  const tmp = `${target}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`
+  let handle: fs.promises.FileHandle | undefined
+  try {
+    handle = await fs.promises.open(/* turbopackIgnore: true */ tmp, 'wx')
+    await handle.writeFile(data)
+    await handle.sync()
+    await handle.close()
+    handle = undefined
+    await fs.promises.rename(/* turbopackIgnore: true */ tmp, target)
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {})
+    await fs.promises.rm(/* turbopackIgnore: true */ tmp, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
+/** Removes leftover `*.tmp` files of crashed atomic writes in a source directory. */
+export async function removeStaleTempFiles(courseId: string, sourceId: string): Promise<void> {
+  let names: string[]
+  try {
+    names = await fs.promises.readdir(/* turbopackIgnore: true */ sourceDir(courseId, sourceId))
+  } catch {
+    return
+  }
+  for (const name of names) {
+    if (name.endsWith('.tmp')) {
+      const full = resolveInside(sourceDir(courseId, sourceId), name)
+      if (full) await fs.promises.rm(/* turbopackIgnore: true */ full, { force: true }).catch(() => {})
+    }
+  }
+}
+
+/** Saves the uploaded bytes of a source and returns the storage key to store in `Source.storageKey`. */
+export async function writeSourceFile(courseId: string, sourceId: string, ext: string, bytes: Uint8Array): Promise<string> {
+  const key = sourceStorageKey(courseId, sourceId, ext)
+  await atomicWriteStorageFile(key, bytes)
+  return key
+}
+
+/** Atomically writes pages.json of a source. */
+export async function writePages(courseId: string, sourceId: string, file: PagesFile): Promise<void> {
+  await atomicWriteStorageFile(pagesStorageKey(courseId, sourceId), JSON.stringify(file))
+}
+
+/** Reads and validates pages.json; null when it does not exist or is not a valid pages file. */
+export async function readPages(courseId: string, sourceId: string): Promise<PagesFile | null> {
+  let raw: Buffer
+  try {
+    raw = await readSourceFile(pagesStorageKey(courseId, sourceId))
+  } catch {
+    return null
+  }
+  try {
+    const parsed = PagesFileSchema.safeParse(JSON.parse(raw.toString('utf8')))
+    return parsed.success ? parsed.data : null
+  } catch {
+    return null
+  }
 }
 
 export function contentTypeForPath(p: string): string {

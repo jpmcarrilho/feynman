@@ -10,3 +10,4 @@ export { chatModeDirective, chatModeSwitchMessage, effectiveChatMode, CHAT_MODE_
 export type { ChatModeOrExam } from './chatMode'
 export { voiceSystemInstruction, voiceExerciseContextMessage, voicePlannerContextMessage, voiceDashboardContextMessage } from './voice'
 export type { ExerciseContextInput } from './voice'
+export { ocrPagesPrompt } from './ingest'
