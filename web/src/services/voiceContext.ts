@@ -7,9 +7,9 @@ export const TOTAL_CAP = 24000
 const SOLUTION_TYPE = /exercise|solution/i
 
 export type VoiceContextTopic = {
+  id: string
   title: string
   content: string | null
-  localPath: string | null
   resourceType: string | null
 }
 
@@ -22,7 +22,7 @@ export function formatVoiceContext(topics: VoiceContextTopic[], mode: string): s
     if (remaining <= 0) break
     let content = t.content ? t.content : 'No content available.'
     if (content.length > PER_TOPIC_CAP) content = content.slice(0, PER_TOPIC_CAP)
-    let block = `\n--- Unit: ${t.title} (File: ${t.localPath || 'Unknown'}) ---\n${content}\n`
+    let block = `\n--- Unit: ${t.title} (Topic ID: ${t.id}) ---\n${content}\n`
     if (block.length > remaining) block = block.slice(0, remaining)
     out += block
   }
@@ -42,7 +42,7 @@ export async function buildVoiceContext({ exerciseId, mode }: { exerciseId: stri
   const classTopics = await prisma.topic.findMany({
     where: { courseId: topic.courseId, week: topic.week, className: topic.className },
     orderBy: [{ order: 'asc' }, { unit: 'asc' }],
-    select: { title: true, content: true, localPath: true, resourceType: true },
+    select: { id: true, title: true, content: true, resourceType: true },
   })
   return formatVoiceContext(classTopics, mode)
 }

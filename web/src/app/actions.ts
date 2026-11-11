@@ -76,7 +76,6 @@ const EXERCISE_CLIENT_SELECT = {
       className: true,
       unit: true,
       resourceType: true,
-      localPath: true,
       isQuantitative: true,
       course: { select: { id: true, code: true, title: true } },
     },
@@ -651,9 +650,9 @@ export async function getClassContextForTopic(topicId: string) {
   })
   
   return classTopics.map(t => ({
+    id: t.id,
     title: t.title,
     content: t.content,
-    localPath: t.localPath
   }))
 }
 
@@ -1135,14 +1134,14 @@ export async function generateExamDiagnosis(sessionId: string) {
     const totalCount = session.logs.length;
     let examScoreSum = 0;
 
-    const topicPerformance: Record<string, { correct: number, total: number, localPath: string, week: string }> = {};
+    const topicPerformance: Record<string, { correct: number, total: number, topicId: string, week: string }> = {};
     const wrongAnswers: any[] = [];
 
     for (const log of session.logs) {
       const ex = log.exercise;
       const topic = ex.topic;
       const tTitle = topic?.title || "General";
-      const localPath = topic?.localPath || "";
+      const topicId = topic?.id || "";
       const week = topic?.week || "";
 
       let partialScore = 0;
@@ -1228,7 +1227,7 @@ export async function generateExamDiagnosis(sessionId: string) {
       examScoreSum += partialScore;
 
       if (!topicPerformance[tTitle]) {
-        topicPerformance[tTitle] = { correct: 0, total: 0, localPath, week };
+        topicPerformance[tTitle] = { correct: 0, total: 0, topicId, week };
       }
       topicPerformance[tTitle].total += 1;
       topicPerformance[tTitle].correct += partialScore; // Use precise proportional score
@@ -1240,7 +1239,7 @@ export async function generateExamDiagnosis(sessionId: string) {
           correctAnswer: ex.correctAnswer,
           explanation: ex.explanation,
           topicTitle: tTitle,
-          localPath,
+          topicId,
           week,
           partialScore
         });
@@ -1252,7 +1251,7 @@ export async function generateExamDiagnosis(sessionId: string) {
     // Format metrics and data for the Gemini model to synthesize
     const topicSummaryString = Object.entries(topicPerformance).map(([title, stats]) => {
       const accuracy = Math.round((stats.correct / stats.total) * 100);
-      return `- **${title}** (${stats.week}): ${stats.correct.toFixed(2)}/${stats.total} Correct (${accuracy}%). File: ${stats.localPath}`;
+      return `- **${title}** (${stats.week}): ${stats.correct.toFixed(2)}/${stats.total} Correct (${accuracy}%). Topic ID: ${stats.topicId || 'none'}`;
     }).join('\n');
 
     const wrongAnswersString = wrongAnswers.map((w, idx) => {
@@ -1263,7 +1262,7 @@ User Answer: "${w.userAnswer || 'Unanswered'}"
 Correct Answer: "${w.correctAnswer}"
 Your Partial Score: ${w.partialScore.toFixed(2)}/1.00
 Official Explanation: ${w.explanation || "No explanation available."}
-Source File Path: ${w.localPath}`;
+Topic ID: ${w.topicId || 'none'}`;
     }).join('\n\n');
 
     const examCourse = await getCourseWithProfile(
@@ -1314,7 +1313,7 @@ export async function generateGlobalDiagnosis() {
     }
 
     // 2. Group logs by topicId
-    const topicStats: Record<string, { correct: number, total: number, title: string, course: string, week: string, localPath: string }> = {};
+    const topicStats: Record<string, { correct: number, total: number, title: string, course: string, week: string }> = {};
     for (const log of logs) {
       const ex = log.exercise;
       if (!ex || !ex.topic) continue;
@@ -1328,7 +1327,6 @@ export async function generateGlobalDiagnosis() {
           title: topic.title || "General",
           course: topic.courseId || "General",
           week: topic.week || "",
-          localPath: topic.localPath || ""
         };
       }
       topicStats[tId].total += 1;
@@ -1368,14 +1366,14 @@ export async function generateGlobalDiagnosis() {
 
     // Format stats and content summaries for prompt
     const allTopicsSummary = topicList.map(t => {
-      return `- **${t.title}** (${t.course} - ${t.week}): ${t.correct}/${t.total} Correct (${t.accuracy}%). Source: ${t.localPath}`;
+      return `- **${t.title}** (${t.course} - ${t.week}): ${t.correct}/${t.total} Correct (${t.accuracy}%). Topic ID: ${t.id}`;
     }).join('\n');
 
     const weakTopicsContext = weakTopicsWithContent.map((wt, idx) => {
       return `### Weak Area ${idx + 1}: ${wt.title}
 Course: ${wt.courseCode} (${wt.week})
 Your Accuracy Score: ${wt.correct}/${wt.total} (${wt.accuracy}%)
-Local File Path: ${wt.localPath}
+Topic ID: ${wt.id}
 Lecture Material Content Summary:
 ${wt.content}`;
     }).join('\n\n');

@@ -28,7 +28,7 @@ const formatDisplayName = (name: string | null | undefined): string => {
 }
 
 interface ResourcesDashboardProps {
-  onViewFile: (href: string) => void;
+  onViewFile: (href: string, title?: string) => void;
   onStartWeekSession: (topicIds: string[], weekName: string) => void;
 }
 
@@ -66,11 +66,10 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
   }) || []
 
   // Handler for opening files in side-visualizer
-  const handleOpenFile = (localPath: string | null, title: string) => {
-    if (!localPath) return
-    // Format matching the URL expectation of SideVisualizer
-    const formattedUrl = `/api/file?path=${encodeURIComponent(localPath)}`
-    onViewFile(formattedUrl)
+  const handleOpenFile = (link: string | null, title: string) => {
+    if (!link) return
+    // link is an /api/files/... URL built by the server (topic id or summary key)
+    onViewFile(link, title)
   }
 
   // Handler for generating Feynman study guide summary on-demand
@@ -79,9 +78,9 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
     setGeneratingWeek(key)
     try {
       const result = await generateWeekSummaryAction(courseCode, weekName)
-      if (result && result.filePath) {
+      if (result && result.link) {
         // Open the newly generated summary in visualizer
-        handleOpenFile(result.filePath, "Feynman Study Guide: " + formatDisplayName(weekName))
+        handleOpenFile(result.link, "Feynman Study Guide: " + formatDisplayName(weekName))
         
         // Refresh local courses list to reflect summaryExists = true
         const updatedData = await getCourseArtifacts()
@@ -229,7 +228,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                     
                     {week.summaryExists ? (
                       <Button
-                        onClick={() => handleOpenFile(week.summaryPath, "Feynman Study Guide: " + formatDisplayName(week.weekName))}
+                        onClick={() => handleOpenFile(week.summaryLink, "Feynman Study Guide: " + formatDisplayName(week.weekName))}
                         variant="outline"
                         size="sm"
                         className="w-full text-xs font-semibold h-9 rounded-lg border-bongo-gold/40 text-bongo-gold bg-bongo-gold/5 hover:bg-bongo-gold/15 flex items-center justify-center gap-1.5 shadow-sm"
@@ -274,7 +273,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                         {week.slides.map((slide: any) => (
                           <div 
                             key={slide.id}
-                            onClick={() => handleOpenFile(slide.localPath, slide.title)}
+                            onClick={() => handleOpenFile(slide.link, slide.title)}
                             className="p-2.5 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group"
                           >
                             <div className="w-6 h-6 rounded bg-lecture-red/10 text-lecture-red flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
@@ -308,7 +307,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                         {week.transcriptions.map((transcript: any) => (
                           <div 
                             key={transcript.id}
-                            onClick={() => handleOpenFile(transcript.localPath, transcript.title)}
+                            onClick={() => handleOpenFile(transcript.link, transcript.title)}
                             className="p-2.5 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group"
                           >
                             <div className="w-6 h-6 rounded bg-fountain-ink/10 text-fountain-ink flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">

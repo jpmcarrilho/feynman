@@ -5,6 +5,8 @@ import { generateText } from 'ai'
 import { textModel } from '@/lib/ai'
 import { moduleSummaryPrompt } from '@/lib/prompts'
 import { resolveProfile } from '@/lib/studyspace/resolveProfile'
+import { summaryLink, topicFileLink } from '@/lib/fileLinks'
+import { findSummaryFile, newSummaryFilePath, summaryKey } from '@/server/storage'
 
 /**
  * Retrieves all courses and groups their resources (slides, transcriptions, exercises)
@@ -19,8 +21,6 @@ export async function getCourseArtifactsService() {
     orderBy: { week: 'asc' },
     include: { course: true, exercises: { select: { id: true } } }
   });
-
-  const summariesDir = path.join(process.cwd(), 'summaries');
 
   const results = courses.map(course => {
     const courseTopics = topics.filter(t => t.courseId === course.id);
@@ -38,8 +38,8 @@ export async function getCourseArtifactsService() {
 
     const weeksList = Array.from(weeksMap.entries()).map(([weekName, weekTopics]) => {
       const weekFileSlug = weekName.replace(/\s+/g, '_');
-      const summaryFilePath = path.join(summariesDir, course.code, `${weekFileSlug}.md`);
-      const summaryExists = fs.existsSync(summaryFilePath);
+      const key = summaryKey(weekName);
+      const summaryExists = key !== null && findSummaryFile(course, key) !== null;
 
       // Group topics into slides, transcriptions, exercises
       const slides: any[] = [];
@@ -56,7 +56,7 @@ export async function getCourseArtifactsService() {
           unit: t.unit,
           className: t.className,
           resourceType: t.resourceType,
-          localPath: t.localPath
+          link: topicFileLink(t.id)
         };
 
         const typeLower = (t.resourceType || '').toLowerCase();
@@ -78,7 +78,7 @@ export async function getCourseArtifactsService() {
         weekName,
         weekSlug: weekFileSlug,
         summaryExists,
-        summaryPath: summaryExists ? summaryFilePath : null,
+        summaryLink: summaryExists && key ? summaryLink(course.id, key) : null,
         slides,
         transcriptions,
         exercisesCount,
@@ -108,18 +108,15 @@ export async function generateWeekSummaryService(courseCode: string, weekName: s
     throw new Error(`Course ${courseCode} not found`);
   }
 
-  const summariesDir = path.join(process.cwd(), 'summaries');
-  const courseDir = path.join(summariesDir, courseCode);
-  if (!fs.existsSync(courseDir)) {
-    fs.mkdirSync(courseDir, { recursive: true });
+  const key = summaryKey(weekName);
+  if (!key) {
+    throw new Error(`Invalid module name: ${weekName}`);
   }
 
-  const weekFileSlug = weekName.replace(/\s+/g, '_');
-  const weekSummaryFilePath = path.join(courseDir, `${weekFileSlug}.md`);
-
-  if (fs.existsSync(weekSummaryFilePath)) {
-    const content = fs.readFileSync(weekSummaryFilePath, 'utf8');
-    return { filePath: weekSummaryFilePath, content };
+  const existing = findSummaryFile(course, key);
+  if (existing) {
+    const content = fs.readFileSync(existing, 'utf8');
+    return { link: summaryLink(course.id, key), content };
   }
 
   const classTopics = await prisma.topic.findMany({
@@ -136,8 +133,7 @@ export async function generateWeekSummaryService(courseCode: string, weekName: s
       topicContent = topicContent.substring(0, 15000) + '\n\n[...Content truncated for context efficiency...]';
     }
     materialContext += `--- Lesson Name: ${t.className || 'Unknown'} | Topic Unit: ${t.title} ---\n`;
-    materialContext += `Content/Transcription Outline:\n${topicContent}\n`;
-    materialContext += `Local Slides/Reading Path: ${t.localPath || 'None'}\n\n`;
+    materialContext += `Content/Transcription Outline:\n${topicContent}\n\n`;
   });
 
   const prompt = moduleSummaryPrompt(resolveProfile(course), {
@@ -152,7 +148,13 @@ export async function generateWeekSummaryService(courseCode: string, weekName: s
     prompt,
   });
 
-  fs.writeFileSync(weekSummaryFilePath, text, 'utf8');
+  // New summaries always go under storage/summaries/<courseId>/
+  const target = newSummaryFilePath(course, key);
+  if (!target) {
+    throw new Error(`Invalid module name: ${weekName}`);
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, text, 'utf8');
 
-  return { filePath: weekSummaryFilePath, content: text };
+  return { link: summaryLink(course.id, key), content: text };
 }

@@ -63,7 +63,8 @@ import { FeynmanLogo } from './FeynmanLogo'
 import { ConfigureSessionDialog } from './ConfigureSessionDialog'
 import { SessionResultsDialog } from './SessionResultsDialog'
 import { SessionHistoryList } from './SessionHistoryList'
-import { SideVisualizer } from './SideVisualizer'
+import { SideVisualizer, type ActiveFileKind } from './SideVisualizer'
+import { parseFileLink } from '@/lib/fileLinks'
 import { StudyPlanDraftWidget } from './StudyPlanDraftWidget'
 import { ResourcesDashboard } from './ResourcesDashboard'
 
@@ -152,6 +153,7 @@ export function StudyInterface() {
 
   // Side Visualizer States
   const [activeFile, setActiveFile] = useState<string | null>(null)
+  const [activeFileKind, setActiveFileKind] = useState<ActiveFileKind | null>(null)
   const [activeFilePage, setActiveFilePage] = useState<number | null>(null)
   const [activeFileHighlight, setActiveFileHighlight] = useState<string | null>(null)
   const [activeFileTitle, setActiveFileTitle] = useState<string>('')
@@ -502,41 +504,28 @@ export function StudyInterface() {
     }
   }
 
-  const handleViewFile = (href: string) => {
-    try {
-      const url = new URL(href, window.location.origin);
-      const filePath = url.searchParams.get('path');
-      if (filePath) {
-        setActiveFile(filePath);
-
-        // Extract page parameter if present
-        const pageMatch = url.hash.match(/page=(\d+)/);
-        if (pageMatch) {
-          setActiveFilePage(parseInt(pageMatch[1], 10));
-        } else {
-          setActiveFilePage(null);
-        }
-
-        // Extract highlight parameter if present
-        const highlightParam = url.searchParams.get('highlight');
-        if (highlightParam) {
-          setActiveFileHighlight(decodeURIComponent(highlightParam));
-        } else {
-          setActiveFileHighlight(null);
-        }
-
-        // Set readable title
-        const parts = filePath.split('/');
-        const fileName = parts[parts.length - 1];
-        setActiveFileTitle(fileName.replace(/_+/g, ' '));
-      }
-    } catch (e) {
-      console.error("Failed to parse document link:", e);
+  const handleViewFile = (href: string, title?: string) => {
+    // Accepts every file link form: topic/source/summary links and the legacy /api/file?path= links of saved logs
+    const link = parseFileLink(href, window.location.origin);
+    if (!link) {
+      console.error("Not a document link:", href);
+      return;
     }
+    setActiveFile(link.url);
+    setActiveFilePage(link.page);
+    setActiveFileHighlight(link.highlight);
+    // Topic, source and summary responses carry X-File-Title; legacy links only have the file name
+    let provisional = title || '';
+    if (!provisional && link.kind === 'legacy') {
+      const legacyPath = new URL(link.url, window.location.origin).searchParams.get('path') || '';
+      provisional = (legacyPath.split('/').pop() || '').replace(/_+/g, ' ');
+    }
+    setActiveFileTitle(provisional);
   }
 
   const handleCloseFile = () => {
     setActiveFile(null);
+    setActiveFileKind(null);
     setActiveFilePage(null);
     setActiveFileHighlight(null);
     setActiveFileTitle('');
@@ -549,9 +538,10 @@ export function StudyInterface() {
     setIsGeneratingSummary(true)
     try {
       const result = await generateSessionSummary(session.id)
-      if (result && result.filePath) {
+      if (result && result.link) {
         // Force the visualizer to show the newly generated markdown file!
-        setActiveFile(result.filePath)
+        setActiveFile(result.link)
+        setActiveFileKind('markdown')
         setActiveFileTitle("Session Summary Study Guide")
         setActiveFilePage(null)
         setActiveFileHighlight(null)
@@ -566,27 +556,51 @@ export function StudyInterface() {
 
   useEffect(() => {
     // Inline documents (for example the exam diagnosis) carry their own content and are never fetched
-    if (activeFile && !activeFile.startsWith('inline:') && !activeFile.toLowerCase().endsWith('.pdf')) {
-      setFileLoading(true);
-      fetch(`/api/file?path=${encodeURIComponent(activeFile)}`)
-        .then(res => res.text())
-        .then(text => {
-          setFileContent(text);
-          setFileLoading(false);
-        })
-        .catch(err => {
-          console.error("Failed to fetch file content:", err);
-          setFileContent("Error loading file content.");
-          setFileLoading(false);
-        });
-    }
+    if (!activeFile || activeFile.startsWith('inline:')) return
+    let cancelled = false
+    setActiveFileKind(null)
+    setFileLoading(true)
+    fetch(activeFile)
+      .then(async (res) => {
+        if (cancelled) return
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
+        const headerTitle = res.headers.get('X-File-Title')
+        if (headerTitle) {
+          try {
+            const decoded = decodeURIComponent(headerTitle)
+            setActiveFileTitle((prev) => prev || decoded)
+          } catch { /* malformed header: keep the current title */ }
+        }
+        // PDF vs markdown vs plain text is decided by the response Content-Type
+        const type = (res.headers.get('Content-Type') || '').toLowerCase()
+        if (type.includes('application/pdf')) {
+          setActiveFileKind('pdf')
+          setFileContent('')
+          setFileLoading(false)
+          void res.body?.cancel() // the viewer iframe loads the PDF itself
+          return
+        }
+        const text = await res.text()
+        if (cancelled) return
+        setActiveFileKind(type.includes('markdown') ? 'markdown' : 'text')
+        setFileContent(text)
+        setFileLoading(false)
+      })
+      .catch((err) => {
+        if (cancelled) return
+        console.error("Failed to fetch file content:", err)
+        setActiveFileKind('text')
+        setFileContent("This file could not be opened.")
+        setFileLoading(false)
+      })
+    return () => { cancelled = true }
   }, [activeFile]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       // 1. PDF Search shortcut (Cmd+F / Ctrl+F)
       if ((e.metaKey || e.ctrlKey) && e.code === 'KeyF') {
-        if (activeFile && activeFile.toLowerCase().endsWith('.pdf')) {
+        if (activeFileKind === 'pdf') {
           const iframe = document.querySelector('iframe');
           if (iframe) {
             iframe.focus();
@@ -616,7 +630,7 @@ export function StudyInterface() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [activeFile, liveAPI]);
+  }, [activeFileKind, liveAPI]);
 
   const handleStartSession = async (
     mode: 'study' | 'exam' = 'study', 
@@ -790,6 +804,7 @@ export function StudyInterface() {
         // Automatically open inside Visualizer
         // The ".md" suffix makes the visualizer render it as markdown; "inline:" keeps the fetch effect away
         setActiveFile(EXAM_DIAGNOSIS_FILE);
+        setActiveFileKind('markdown');
         setFileLoading(false);
         setFileContent(reportMarkdown);
         setActiveFileHighlight(null);
@@ -1793,7 +1808,7 @@ export function StudyInterface() {
         </TabsContent>
 
         <TabsContent value="analytics" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">
-          <AnalyticsDashboard />
+          <AnalyticsDashboard onViewFile={handleViewFile} />
         </TabsContent>
       </Tabs>
 
@@ -1806,6 +1821,7 @@ export function StudyInterface() {
         }`}>
           <SideVisualizer
             activeFile={activeFile}
+            activeFileKind={activeFileKind}
             activeFileTitle={activeFileTitle}
             activeFilePage={activeFilePage}
             activeFileHighlight={activeFileHighlight}

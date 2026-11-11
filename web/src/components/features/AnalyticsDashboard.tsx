@@ -14,6 +14,29 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
+import { parseFileLink } from '@/lib/fileLinks'
+
+type ViewFile = (href: string, title?: string) => void
+
+/** Markdown link renderer: file links open in the in-app viewer, everything else in a new tab. */
+const fileAwareLink = (onViewFile?: ViewFile) => {
+  const Link = ({ href, children }: any) => {
+    if (onViewFile && href && parseFileLink(href, window.location.origin)) {
+      const text = typeof children === 'string' ? children : Array.isArray(children) ? children.filter((c: unknown) => typeof c === 'string').join('') : ''
+      return (
+        <a
+          href={href}
+          onClick={(e) => { e.preventDefault(); onViewFile(href, text || undefined) }}
+          className="text-fountain-ink hover:underline font-semibold cursor-pointer"
+        >
+          {children}
+        </a>
+      )
+    }
+    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-fountain-ink hover:underline font-semibold">{children}</a>
+  }
+  return Link
+}
 
 const preprocessLaTeX = (text: string | null | undefined): string => {
   if (!text) return '';
@@ -22,7 +45,7 @@ const preprocessLaTeX = (text: string | null | undefined): string => {
   return processed;
 }
 
-function ExamItem({ exam }: { exam: any }) {
+function ExamItem({ exam, onViewFile }: { exam: any; onViewFile?: ViewFile }) {
   const [isGenerating, setIsGenerating] = useState(false)
   const [examDiagnosis, setExamDiagnosis] = useState(exam.diagnosis)
   const [isExpanded, setIsExpanded] = useState(false)
@@ -86,9 +109,7 @@ function ExamItem({ exam }: { exam: any }) {
             remarkPlugins={[remarkGfm, remarkMath]} 
             rehypePlugins={[rehypeKatex]}
             components={{
-              a: ({ href, children }: any) => {
-                return <a href={href} target="_blank" rel="noopener noreferrer" className="text-fountain-ink hover:underline font-semibold">{children}</a>;
-              }
+              a: fileAwareLink(onViewFile)
             }}
           >
             {preprocessLaTeX(examDiagnosis)}
@@ -99,7 +120,7 @@ function ExamItem({ exam }: { exam: any }) {
   )
 }
 
-export function AnalyticsDashboard() {
+export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {}) {
   const [data, setData] = useState<any>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [globalDiagnosisText, setGlobalDiagnosisText] = useState<string | null>(null)
@@ -233,9 +254,7 @@ export function AnalyticsDashboard() {
                   remarkPlugins={[remarkGfm, remarkMath]} 
                   rehypePlugins={[rehypeKatex]}
                   components={{
-                    a: ({ href, children }: any) => {
-                      return <a href={href} target="_blank" rel="noopener noreferrer" className="text-fountain-ink hover:underline font-semibold">{children}</a>;
-                    }
+                    a: fileAwareLink(onViewFile)
                   }}
                 >
                   {preprocessLaTeX(globalDiagnosisText)}
@@ -272,7 +291,7 @@ export function AnalyticsDashboard() {
         {data.completedExams && data.completedExams.length > 0 ? (
           <div className="space-y-4">
             {data.completedExams.map((exam: any) => (
-              <ExamItem key={exam.id} exam={exam} />
+              <ExamItem key={exam.id} exam={exam} onViewFile={onViewFile} />
             ))}
           </div>
         ) : (

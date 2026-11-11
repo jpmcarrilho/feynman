@@ -11,7 +11,7 @@ import { prisma } from '@/lib/db'
 import { buildVoiceContext, formatVoiceContext, PER_TOPIC_CAP, TOTAL_CAP } from './voiceContext'
 
 const t = (title: string, resourceType: string, content = 'body') => ({
-  title, resourceType, content, localPath: `/p/${title}`,
+  id: `id-${title}`, title, resourceType, content,
 })
 
 describe('formatVoiceContext', () => {
@@ -39,8 +39,14 @@ describe('formatVoiceContext', () => {
     expect(many.length).toBeLessThanOrEqual(TOTAL_CAP)
   })
 
+  it('labels each unit with its topic id and never with a path', () => {
+    const out = formatVoiceContext([t('Lecture', 'Transcript .txt')], 'practice')
+    expect(out).toContain('Unit: Lecture (Topic ID: id-Lecture)')
+    expect(out).not.toContain('/p/')
+  })
+
   it('uses a placeholder for empty content', () => {
-    expect(formatVoiceContext([{ title: 'E', content: null, localPath: null, resourceType: null }], 'practice'))
+    expect(formatVoiceContext([{ id: 'e1', title: 'E', content: null, resourceType: null }], 'practice'))
       .toContain('No content available.')
   })
 })

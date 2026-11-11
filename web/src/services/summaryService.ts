@@ -5,6 +5,8 @@ import { resolveProfile } from '@/lib/studyspace/resolveProfile'
 import { prisma } from '@/lib/db'
 import fs from 'fs'
 import path from 'path'
+import { sessionSummaryLink, summaryLink } from '@/lib/fileLinks'
+import { findSummaryFile, newSessionIndexPath, newSummaryFilePath, summaryKey } from '@/server/storage'
 
 export async function createSessionSummary(sessionId: string) {
   // 1. Get session details
@@ -29,7 +31,7 @@ export async function createSessionSummary(sessionId: string) {
   })
 
   // 3. Group exercises and topics by Course and Week
-  const weekGroups = new Map<string, { courseCode: string, weekName: string, exercises: typeof exercises }>()
+  const weekGroups = new Map<string, { courseId: string, courseCode: string, weekName: string, exercises: typeof exercises }>()
 
   exercises.forEach(ex => {
     if (ex.topic && ex.topic.week && ex.topic.course) {
@@ -38,37 +40,24 @@ export async function createSessionSummary(sessionId: string) {
       const groupKey = `${courseCode}_${weekName}`
       
       if (!weekGroups.has(groupKey)) {
-        weekGroups.set(groupKey, { courseCode, weekName: ex.topic.week, exercises: [] })
+        weekGroups.set(groupKey, { courseId: ex.topic.course.id, courseCode, weekName: ex.topic.week, exercises: [] })
       }
       weekGroups.get(groupKey)!.exercises.push(ex)
     }
   })
 
-  const summariesDir = path.join(process.cwd(), 'summaries')
-  if (!fs.existsSync(summariesDir)) {
-    fs.mkdirSync(summariesDir, { recursive: true })
-  }
-
-  const results: { courseCode: string, weekName: string, filePath: string, reloaded: boolean }[] = []
+  const results: { courseId: string, courseCode: string, weekName: string, key: string, file: string, reloaded: boolean }[] = []
 
   // 4. Generate or re-load summaries for each week covered in the session
   for (const [groupKey, group] of weekGroups.entries()) {
-    const courseDir = path.join(summariesDir, group.courseCode)
-    if (!fs.existsSync(courseDir)) {
-      fs.mkdirSync(courseDir, { recursive: true })
-    }
-
-    const weekFileSlug = group.weekName.replace(/\s+/g, '_')
-    const weekSummaryFilePath = path.join(courseDir, `${weekFileSlug}.md`)
+    const key = summaryKey(group.weekName)
+    if (!key) continue
+    const summaryCourse = { id: group.courseId, code: group.courseCode }
 
     // Check if the Feynman study guide for this week has already been generated as a permanent asset
-    if (fs.existsSync(weekSummaryFilePath)) {
-      results.push({
-        courseCode: group.courseCode,
-        weekName: group.weekName,
-        filePath: weekSummaryFilePath,
-        reloaded: true
-      })
+    const existing = findSummaryFile(summaryCourse, key)
+    if (existing) {
+      results.push({ courseId: group.courseId, courseCode: group.courseCode, weekName: group.weekName, key, file: existing, reloaded: true })
       continue
     }
 
@@ -91,8 +80,7 @@ export async function createSessionSummary(sessionId: string) {
         topicContent = topicContent.substring(0, 15000) + '\n\n[...Content truncated for context efficiency...]'
       }
       materialContext += `--- Lesson Name: ${t.className || 'Unknown'} | Topic Unit: ${t.title} ---\n`
-      materialContext += `Content/Transcription Outline:\n${topicContent}\n`
-      materialContext += `Local Slides/Reading Path: ${t.localPath || 'None'}\n\n`
+      materialContext += `Content/Transcription Outline:\n${topicContent}\n\n`
     })
 
     const prompt = moduleSummaryPrompt(resolveProfile(course), {
@@ -108,14 +96,13 @@ export async function createSessionSummary(sessionId: string) {
         prompt,
       })
 
-      fs.writeFileSync(weekSummaryFilePath, text, 'utf8')
+      // New summaries always go under storage/summaries/<courseId>/
+      const target = newSummaryFilePath(summaryCourse, key)
+      if (!target) continue
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.writeFileSync(target, text, 'utf8')
 
-      results.push({
-        courseCode: group.courseCode,
-        weekName: group.weekName,
-        filePath: weekSummaryFilePath,
-        reloaded: false
-      })
+      results.push({ courseId: group.courseId, courseCode: group.courseCode, weekName: group.weekName, key, file: target, reloaded: false })
     } catch (error) {
       console.error(`Error generating week summary for ${groupKey}:`, error)
       throw error
@@ -126,8 +113,8 @@ export async function createSessionSummary(sessionId: string) {
   if (results.length === 1) {
     // If only one week is covered, serve its study guide directly!
     const singleResult = results[0]
-    const content = fs.readFileSync(singleResult.filePath, 'utf8')
-    return { filePath: singleResult.filePath, content }
+    const content = fs.readFileSync(singleResult.file, 'utf8')
+    return { link: summaryLink(singleResult.courseId, singleResult.key), content }
   } else {
     // If multiple weeks are covered, generate an interactive Master Index file on the fly!
     let indexMarkdown = `# 📓 Feynman Session Study Guides\n`
@@ -135,15 +122,17 @@ export async function createSessionSummary(sessionId: string) {
     
     results.forEach(res => {
       const statusText = res.reloaded ? '⚡ Loaded from memory asset' : '✨ Freshly compiled by AI'
-      indexMarkdown += `* 📖 [**${res.courseCode} - ${res.weekName} Study Guide**](/api/file?path=${encodeURIComponent(res.filePath)}) \n  *(${statusText} | PDF/Slides-grounded)*\n\n`
+      indexMarkdown += `* 📖 [**${res.courseCode} - ${res.weekName} Study Guide**](${summaryLink(res.courseId, res.key)}) \n  *(${statusText} | PDF/Slides-grounded)*\n\n`
     })
 
     indexMarkdown += `---\n`
-    indexMarkdown += `*Note: Week summaries are permanently saved on disk under \`/summaries/\`. Any future session covering these weeks will re-load them instantly in milliseconds!*`
+    indexMarkdown += `*Note: Week summaries are permanently saved on disk. Any future session covering these weeks will re-load them instantly in milliseconds!*`
 
-    const sessionIndexFilePath = path.join(summariesDir, `session_${sessionId}_index.md`)
+    const sessionIndexFilePath = newSessionIndexPath(sessionId)
+    if (!sessionIndexFilePath) throw new Error('Invalid session id')
+    fs.mkdirSync(path.dirname(sessionIndexFilePath), { recursive: true })
     fs.writeFileSync(sessionIndexFilePath, indexMarkdown, 'utf8')
 
-    return { filePath: sessionIndexFilePath, content: indexMarkdown }
+    return { link: sessionSummaryLink(sessionId), content: indexMarkdown }
   }
 }

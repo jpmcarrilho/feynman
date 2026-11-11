@@ -38,19 +38,19 @@ export function voiceExerciseContextMessage(profile: TutorProfile, input: Exerci
       break
     case 'guide':
       intro = `This is your private, hidden reference library. Use this context to give accurate hints and steps toward the answer, but NEVER reveal, repeat, or summarize this text out loud.
-If the student struggles, offer the next small hint. Always reference exact file sources using clickable markdown links to the localPath.
+If the student struggles, offer the next small hint. Always reference exact file sources using clickable markdown links built from the topic ID of the unit.
 ${voiceFileLinkInstructions()}
 `
       break
     case 'explain':
       intro = `This is your private, hidden reference library. Use this context to give accurate, grounded explanations, but NEVER reveal, repeat, or summarize this text out loud word for word.
-When it helps, point the student to exact file sources using clickable markdown links to the localPath.
+When it helps, point the student to exact file sources using clickable markdown links built from the topic ID of the unit.
 ${voiceFileLinkInstructions()}
 `
       break
     default:
       intro = `This is your private, hidden reference library. Use this context to formulate Socratic, probing questions and guide the student, but NEVER reveal, repeat, or summarize this text out loud.
-If the student struggles, guide them to use analogies or explain concepts in their own words. Always reference exact file sources using clickable markdown links to the localPath.
+If the student struggles, guide them to use analogies or explain concepts in their own words. Always reference exact file sources using clickable markdown links built from the topic ID of the unit.
 ${voiceFileLinkInstructions()}
 `
   }

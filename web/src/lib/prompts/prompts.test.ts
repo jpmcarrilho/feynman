@@ -17,6 +17,8 @@ import {
   chatModeDirective,
   chatModeSwitchMessage,
   effectiveChatMode,
+  fileLinkInstructions,
+  voiceFileLinkInstructions,
 } from './index'
 
 const legacy = LEGACY_PROFILES['14.750x']
@@ -182,8 +184,26 @@ describe('voice prompts', () => {
       expect(msg.endsWith(chatModeDirective(legacy, 'probe', 'exam'))).toBe(true)
       expect(msg).toContain('Active Mode: Timed Exam]')
       expect(msg).not.toContain('Thesis Examiner')
-      expect(msg).not.toContain('/api/file?path=') // no link instructions in exams
+      expect(msg).not.toContain('/api/files/topic') // no link instructions in exams
     }
+  })
+
+  it('link instructions use topic ids only, with no copyable placeholder or example id', () => {
+    const banned = [
+      'TOPIC_ID', 'LOCAL_PATH', 'Slides File Title', 'Transcript Title', 'Source Lecture', 'ESTIMATED_PAGE', 'PAGE_NUMBER',
+      'SHORT_QUOTE', '/Users/', 'OLS Basics', 'Leaders and Democratic Institutions', '/api/file?path=',
+    ]
+    for (const text of [fileLinkInstructions(), voiceFileLinkInstructions()]) {
+      expect(text).toContain('/api/files/topic/')
+      expect(text).toContain('Topic ID')
+      for (const b of banned) expect(text, b).not.toContain(b)
+      expect(text).not.toMatch(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}/i)
+      expect(text).toContain('#page=N')
+      expect(text).toContain('?highlight=')
+    }
+    const guide = voiceExerciseContextMessage(legacy, { ...ctx, chatMode: 'guide' })
+    expect(guide).toContain('/api/files/topic/')
+    expect(guide).not.toContain('localPath')
   })
 
   it('planner context drops the hard-coded study hours', () => {

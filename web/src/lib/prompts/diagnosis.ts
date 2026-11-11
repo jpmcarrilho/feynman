@@ -47,10 +47,10 @@ Review each wrong answer. Explain the *cognitive trap*${g.misinterpretation} the
 
 ## 4. Tailored Study Plan & Grounding Map
 Generate a clear, numbered list of study tasks.
-For each task, refer to the exact lecture file (using its localPath) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
+For each task, refer to the exact lecture file (using its Topic ID) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
 ${fileLinkInstructions()}
 
-Ensure that ALL file paths used in the links correspond to the actual ones listed in the breakdowns above. If no local file path was provided, use a placeholder. Do NOT invent external domains or paths outside of the provided localPaths.
+Ensure that ALL topic IDs used in the links are the ones listed in the breakdowns above. If no Topic ID was provided for a task, do not add a link for it. Do NOT invent external domains, IDs or paths.
 `
 }
 
@@ -96,9 +96,9 @@ Detail the *precise theoretical or mathematical mistakes* they are making${g.gap
 
 ## 4. Tailored Remedial Syllabus & Clickable Grounding Map
 Generate a clear, numbered list of study tasks linking directly to their weak areas.
-For each task, refer to the exact lecture file (using its localPath) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
+For each task, refer to the exact lecture file (using its Topic ID) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
 ${fileLinkInstructions()}
 
-Ensure that ALL file paths used in the links correspond to the actual ones listed in the breakdowns above. Do NOT invent external domains or paths outside of the provided localPaths.
+Ensure that ALL topic IDs used in the links are the ones listed in the breakdowns above. Do NOT invent external domains, IDs or paths.
 `
 }

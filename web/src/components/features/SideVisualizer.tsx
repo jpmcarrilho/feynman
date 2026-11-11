@@ -8,9 +8,15 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
+import { parseFileLink } from '@/lib/fileLinks'
+
+export type ActiveFileKind = 'pdf' | 'markdown' | 'text'
 
 interface SideVisualizerProps {
+  /** URL of the file (or an `inline:` sentinel when the content is passed in fileContent). */
   activeFile: string;
+  /** Decided by the response Content-Type; null while loading. */
+  activeFileKind: ActiveFileKind | null;
   activeFileTitle: string;
   activeFilePage: number | null;
   activeFileHighlight: string | null;
@@ -18,7 +24,7 @@ interface SideVisualizerProps {
   fileLoading: boolean;
   fileContent: string;
   onCloseFile: () => void;
-  onViewFile: (href: string) => void;
+  onViewFile: (href: string, title?: string) => void;
   isExpanded?: boolean;
   onToggleExpand?: () => void;
   isFullWidth?: boolean;
@@ -63,6 +69,7 @@ const renderTranscriptWithHighlight = (text: string, highlight: string | null): 
 
 export function SideVisualizer({
   activeFile,
+  activeFileKind,
   activeFileTitle,
   activeFilePage,
   activeFileHighlight,
@@ -83,7 +90,7 @@ export function SideVisualizer({
           <h4 className="font-semibold text-sm truncate" title={activeFileTitle}>
             {activeFileTitle || 'Document Viewer'}
           </h4>
-          {activeFile.toLowerCase().endsWith('.pdf') && (
+          {activeFileKind === 'pdf' && (
             <span className="text-[10px] text-muted-foreground font-medium select-none">
               Press <kbd className="bg-muted px-1 py-0.5 rounded border font-mono">{platform === 'mac' ? '⌘F' : 'Ctrl+F'}</kbd> to search PDF
             </span>
@@ -118,9 +125,9 @@ export function SideVisualizer({
         </div>
       </div>
       <div className="flex-1 overflow-hidden p-0 relative">
-        {activeFile.toLowerCase().endsWith('.pdf') ? (
+        {activeFileKind === 'pdf' ? (
           <iframe 
-            src={`/api/file?path=${encodeURIComponent(activeFile)}${activeFilePage ? `#page=${activeFilePage}` : ''}`} 
+            src={`${activeFile}${activeFilePage ? `#page=${activeFilePage}` : ''}`} 
             className="w-full h-full border-0"
           />
         ) : (
@@ -130,14 +137,14 @@ export function SideVisualizer({
                 <div className="flex items-center justify-center py-12">
                   <Loader2 className="w-6 h-6 animate-spin text-fountain-ink" />
                 </div>
-              ) : activeFile.toLowerCase().endsWith('.md') ? (
+              ) : activeFileKind === 'markdown' ? (
                 <div className="prose max-w-none text-charcoal-graphite/90 prose-p:leading-relaxed prose-headings:font-display prose-headings:italic prose-strong:text-charcoal-graphite">
                   <ReactMarkdown 
                     remarkPlugins={[remarkGfm, remarkMath]} 
                     rehypePlugins={[rehypeKatex]}
                     components={{
                       a: ({ href, children }: any) => {
-                        if (href && (href.startsWith('/api/file?path=') || href.includes('path='))) {
+                        if (href && parseFileLink(href, window.location.origin)) {
                           return (
                             <button 
                               onClick={() => onViewFile(href)} 

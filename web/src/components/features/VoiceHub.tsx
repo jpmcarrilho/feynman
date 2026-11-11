@@ -12,6 +12,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import 'katex/dist/katex.min.css'
+import { parseFileLink } from '@/lib/fileLinks'
 
 const preprocessLaTeX = (text: string | null | undefined) => {
   if (!text) return '';
@@ -22,7 +23,7 @@ const preprocessLaTeX = (text: string | null | undefined) => {
 
 interface VoiceHubProps {
   liveAPI: any;
-  onViewFile?: (filePath: string) => void;
+  onViewFile?: (href: string, title?: string) => void;
   onGeneratePlan?: () => void;
   isGeneratingPlan?: boolean;
   onToggleClose?: () => void;
@@ -174,7 +175,7 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
                       rehypePlugins={[rehypeKatex]}
                       components={{
                         a: ({ href, children }: any) => {
-                          if (href && (href.startsWith('/api/file?path=') || href.includes('path='))) {
+                          if (href && parseFileLink(href, window.location.origin)) {
                             return (
                               <button 
                                 onClick={() => onViewFile?.(href)} 
