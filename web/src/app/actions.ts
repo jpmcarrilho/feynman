@@ -9,6 +9,7 @@ import { z } from 'zod'
 import fs from 'fs'
 import path from 'path'
 import { requireAuth } from '@/server/auth'
+import { buildVoiceContext } from '@/services/voiceContext'
 
 // Fields the session list, results dialog and plan view read. No chatLog, diagnosis, draftAnswers or flaggedIds.
 // exerciseIds is selected only so the server can turn it into exerciseCount (see withExerciseCount).
@@ -618,9 +619,13 @@ export async function logAnswer(sessionId: string, exerciseId: string, isCorrect
 export async function saveChatLog(sessionId: string, messages: any[]) {
   await requireAuth()
   try {
+    // Injected voice context is never part of the transcript (also cleans logs from older clients)
+    const transcript = (messages || []).filter(
+      (m) => !(m && m.role === 'user' && typeof m.text === 'string' && m.text.startsWith('[SYSTEM MESSAGE'))
+    )
     await prisma.studySession.update({
       where: { id: sessionId },
-      data: { chatLog: JSON.stringify(messages) }
+      data: { chatLog: JSON.stringify(transcript) }
     })
   } catch (error: any) {
     console.error("Failed to save chat log (likely stale session):", error.message)
@@ -678,6 +683,11 @@ export async function getClassContextForTopic(topicId: string) {
     content: t.content,
     localPath: t.localPath
   }))
+}
+
+export async function getVoiceContextForExercise(exerciseId: string, mode: string) {
+  await requireAuth()
+  return buildVoiceContext({ exerciseId, mode })
 }
 
 export async function getSessionWithExercises(sessionId: string) {

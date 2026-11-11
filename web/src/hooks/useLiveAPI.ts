@@ -352,6 +352,20 @@ export function useLiveAPI(systemInstructionText: string) {
     }
   }
 
+  // Sends hidden context to the model: not shown in the chat panel, not saved in the chat log.
+  // Only interrupts the tutor's audio when asked to.
+  const sendContext = (text: string, opts?: { interrupt?: boolean }) => {
+    if (opts?.interrupt) stopAllAudio()
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        clientContent: {
+          turns: [{ role: 'user', parts: [{ text }] }],
+          turnComplete: true
+        }
+      }))
+    }
+  }
+
   return {
     isConnected,
     isConnecting,
@@ -361,6 +375,7 @@ export function useLiveAPI(systemInstructionText: string) {
     connect,
     disconnect,
     sendText,
+    sendContext,
     isMuted,
     setMuted
   }

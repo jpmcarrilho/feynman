@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession } from './actions'
+import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession, saveChatLog } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 
@@ -373,5 +373,19 @@ describe('payload trimming', () => {
     expect(clientArgs).not.toHaveProperty('select.topic.select.content')
     expect(clientArgs).toHaveProperty('select.questionText', true)
     expect(res.exercises).toEqual([{ id: 'e1', topic: { id: 't1' } }])
+  })
+})
+
+describe('saveChatLog', () => {
+  it('drops injected [SYSTEM MESSAGE user turns and keeps real messages', async () => {
+    vi.mocked(prisma.studySession.update).mockResolvedValueOnce({} as never)
+    await saveChatLog('s1', [
+      { id: '1', role: 'user', text: '[SYSTEM MESSAGE: The student has navigated to a new exercise.' },
+      { id: '2', role: 'user', text: 'What is the answer?' },
+      { id: '3', role: 'model', text: '[SYSTEM MESSAGE is quoted by the tutor' },
+      { id: '4', role: 'model', text: 'Think about incentives.' },
+    ])
+    const data = (vi.mocked(prisma.studySession.update).mock.calls[0][0] as any).data
+    expect(JSON.parse(data.chatLog).map((m: any) => m.id)).toEqual(['2', '3', '4'])
   })
 })

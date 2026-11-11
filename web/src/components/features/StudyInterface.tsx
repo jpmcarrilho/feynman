@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo } from 'react'
+import { useState, useEffect, useMemo, useRef } from 'react'
 import { Button } from '@/components/ui/button'
 import { Flashcard } from './Flashcard'
 import { SessionTimer } from './SessionTimer'
@@ -16,7 +16,7 @@ import {
   finishStudySession,
   getSessionWithExercises,
   getSessionDetail,
-  getClassContextForTopic,
+  getVoiceContextForExercise,
   generateNextExercise,
   deleteStudySession,
   generateSessionSummary,
@@ -776,7 +776,7 @@ Adhere strictly to these teaching guidelines:
         if (liveAPI.isConnected) {
           const scoreDisplay = `${examScoreSum.toFixed(2)}/${totalCount}`;
           const speechMsg = `[SYSTEM MESSAGE: The student has submitted their timed exam. They scored ${scoreDisplay} (${Math.round((examScoreSum/totalCount)*100)}%). Speak a supportive, Socratic, brief 2-3 sentence overview of their diagnostic results. Keep it warm, and mention you've pushed their full studies guide directly to their Side Visualizer.]`;
-          liveAPI.sendText(speechMsg);
+          liveAPI.sendContext(speechMsg, { interrupt: true });
         }
       }
 
@@ -880,16 +880,6 @@ Adhere strictly to these teaching guidelines:
 
   const currentLog = session?.logs?.find((l: any) => l.exerciseId === currentExercise?.id)
 
-  const [classContext, setClassContext] = useState<any[] | null>(null)
-
-  useEffect(() => {
-    if (currentExercise?.topicId) {
-      getClassContextForTopic(currentExercise.topicId).then(setClassContext)
-    } else {
-      setClassContext(null)
-    }
-  }, [currentExercise?.topicId])
-
   const handleAnswer = async (isCorrect: boolean, userAnswer: string) => {
     if (session && currentExercise) {
       if (session.mode === 'exam') {
@@ -908,15 +898,19 @@ Adhere strictly to these teaching guidelines:
     }
   }
 
-  useEffect(() => {
-    if (!liveAPI.isConnected) return;
+  const lastContextKeyRef = useRef<string | null>(null)
 
-    if (session && currentExercise) {
-      let contextMsg = `[SYSTEM MESSAGE: The student has navigated to a new exercise.
-Topic: ${currentExercise.topic?.title || 'Unknown'}
-Question: ${currentExercise.questionText}
-Choices: ${parsedChoices.join(', ')}
-Active Mode: ${session?.mode === 'exam' ? 'Timed Socratic Oral Defense Exam' : 'Interactive Practice'}]
+  const buildExerciseContextMessage = (
+    exercise: { topic?: { title?: string | null } | null; questionText: string },
+    choices: string[],
+    mode: string | undefined,
+    unitsText: string
+  ) => {
+  let contextMsg = `[SYSTEM MESSAGE: The student has navigated to a new exercise.
+Topic: ${exercise.topic?.title || 'Unknown'}
+Question: ${exercise.questionText}
+Choices: ${choices.join(', ')}
+Active Mode: ${mode === 'exam' ? 'Timed Socratic Oral Defense Exam' : 'Interactive Practice'}]
 
 <private_knowledge>
 This is your private, hidden reference library. Use this context to formulate Socratic, probing questions and guide the student, but NEVER reveal, repeat, or summarize this text out loud.
@@ -926,30 +920,70 @@ Format links exactly like this:
 - For Transcripts/Readings: [Transcript Title](/api/file?path=URL_ENCODED_LOCAL_PATH&highlight=SHORT_QUOTE)
 `;
 
-      if (classContext && classContext.length > 0) {
-        classContext.forEach((t: any) => {
-          contextMsg += `\n--- Unit: ${t.title} (File: ${t.localPath || 'Unknown'}) ---\n${t.content ? t.content : 'No content available.'}\n`;
-        });
-      }
+      contextMsg += unitsText;
 
       contextMsg += `\n</private_knowledge>
 
 Now, act as the Thesis Examiner. Initiate oral defense. Welcome them to the question, challenge them on what they are thinking, and probe their initial intuition BEFORE they select any draft answer. Do not read the choices out loud. Ask them to explain the concepts in their own words!`;
 
-      liveAPI.sendText(contextMsg)
+
+  return contextMsg
+  }
+
+  // Prefetch the exercise context whether or not the voice tutor is connected,
+  // so it is already cached when the connection comes up.
+  const [cachedContext, setCachedContext] = useState<{ key: string; unitsText: string } | null>(null)
+  const currentContextKey = session && currentExercise ? `${session.id}:${currentExercise.id}` : null
+
+  useEffect(() => {
+    if (!session?.id || !currentExercise?.id) return
+    const key = `${session.id}:${currentExercise.id}`
+    let cancelled = false
+    getVoiceContextForExercise(currentExercise.id, session.mode)
+      .then((unitsText) => {
+        if (!cancelled) setCachedContext({ key, unitsText: unitsText ?? '' })
+      })
+      .catch((e) => console.error('Failed to load voice context', e))
+    return () => {
+      cancelled = true
+    }
+  }, [session?.id, currentExercise?.id, session?.mode])
+
+  // Context is sent once per (session, exercise) or per tab, never on every answer
+  useEffect(() => {
+    if (!liveAPI.isConnected) {
+      // A new connection must receive the context again
+      lastContextKeyRef.current = null
+      return
+    }
+
+    if (session && currentExercise) {
+      const key = currentContextKey
+      if (!key || lastContextKeyRef.current === key) return
+      // Not loaded yet: this effect runs again when the prefetch arrives
+      if (!cachedContext || cachedContext.key !== key) return
+      lastContextKeyRef.current = key
+      liveAPI.sendContext(
+        buildExerciseContextMessage(currentExercise, parsedChoices, session.mode, cachedContext.unitsText),
+        { interrupt: true }
+      )
     } else if (!session) {
+      const key = `tab:${activeTab === 'plan' ? 'plan' : 'dashboard'}`
+      if (lastContextKeyRef.current === key) return
+      lastContextKeyRef.current = key
       if (activeTab === 'plan') {
         const contextMsg = `[SYSTEM MESSAGE: The student is currently on the "Study Plan" tab, designing their personalized multi-day timeline curriculum preparing for their MicroMasters exams.
 The student has stated they can study 2 hours in the morning, 2 hours in the afternoon, and 2 hours at night, Monday to Sunday (a 6-hour daily study block).
 Converse with them as a warm Socratic Academic Advisor. Talk to them about opportunity costs of this rigorous schedule, discuss study methodologies (like Active Recall and Spaced Repetition), probe their study habits, and help them refine the plan.
 If they ask to change or generate a study plan, guide them to click the gold "Plan" button in the chat header to compile/re-compile the curriculum timeline on screen!]`;
-        liveAPI.sendText(contextMsg)
+        liveAPI.sendContext(contextMsg, { interrupt: false })
       } else {
         const contextMsg = `[SYSTEM MESSAGE: The student is currently browsing their main dashboard. They can configure and start custom practice sessions, review their histories, or go to the "Study Plan" tab to design a multi-day schedule.]`;
-        liveAPI.sendText(contextMsg)
+        liveAPI.sendContext(contextMsg, { interrupt: false })
       }
     }
-  }, [currentExercise?.id, liveAPI.isConnected, parsedChoices, classContext, session, activeTab])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [liveAPI.isConnected, currentContextKey, cachedContext, session?.mode, activeTab])
 
   const handleRequestExplanation = (userAnswer: string) => {
     if (!currentExercise) return

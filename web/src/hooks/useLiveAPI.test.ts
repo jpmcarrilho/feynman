@@ -1,0 +1,79 @@
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { renderHook, act } from '@testing-library/react'
+
+vi.mock('@/app/auth-actions', () => ({
+  createLiveToken: vi.fn(async () => ({ token: 'tok' })),
+}))
+
+import { useLiveAPI } from './useLiveAPI'
+
+class FakeWebSocket {
+  static OPEN = 1
+  static instances: FakeWebSocket[] = []
+  readyState = 1
+  sent: string[] = []
+  onopen: (() => void) | null = null
+  onmessage: ((e: unknown) => void) | null = null
+  onerror: ((e: unknown) => void) | null = null
+  onclose: ((e: unknown) => void) | null = null
+  constructor(public url: string) {
+    FakeWebSocket.instances.push(this)
+  }
+  send(data: string) {
+    this.sent.push(data)
+  }
+  close() {}
+}
+
+class FakeAudioContext {
+  currentTime = 0
+  state = 'running'
+  destination = {}
+  close() {
+    this.state = 'closed'
+    return Promise.resolve()
+  }
+}
+
+describe('useLiveAPI context vs text', () => {
+  beforeEach(() => {
+    FakeWebSocket.instances = []
+    vi.stubGlobal('WebSocket', FakeWebSocket)
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    Object.assign(window, { AudioContext: FakeAudioContext })
+  })
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  async function connected() {
+    const hook = renderHook(() => useLiveAPI('sys'))
+    let p: Promise<void>
+    await act(async () => {
+      p = hook.result.current.connect(false)
+      await new Promise((r) => setTimeout(r, 0))
+    })
+    await act(async () => {
+      FakeWebSocket.instances[0].onopen?.()
+      await p
+    })
+    return { hook, ws: FakeWebSocket.instances[0] }
+  }
+
+  it('sendContext sends a client turn without touching messages', async () => {
+    const { hook, ws } = await connected()
+    const before = ws.sent.length
+    act(() => hook.result.current.sendContext('[SYSTEM MESSAGE: ctx]'))
+    expect(ws.sent.length).toBe(before + 1)
+    const payload = JSON.parse(ws.sent[ws.sent.length - 1])
+    expect(payload.clientContent.turns[0].parts[0].text).toBe('[SYSTEM MESSAGE: ctx]')
+    expect(payload.clientContent.turnComplete).toBe(true)
+    expect(hook.result.current.messages).toEqual([])
+  })
+
+  it('sendText still appends the real user message', async () => {
+    const { hook } = await connected()
+    act(() => hook.result.current.sendText('hello'))
+    expect(hook.result.current.messages.map((m) => m.text)).toEqual(['hello'])
+  })
+})
