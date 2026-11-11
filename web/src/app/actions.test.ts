@@ -1,8 +1,9 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession } from './actions'
+import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, reportExercise } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 import { defaultProfile } from '@/lib/studyspace/profile'
+import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
 
 // Auth: requireAuth always resolves in these tests
 vi.mock('@/server/auth', () => ({
@@ -36,6 +37,7 @@ vi.mock('@/lib/db', () => ({
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       count: vi.fn(),
     },
     studyPlan: {
@@ -139,28 +141,32 @@ describe('generateNextExercise action', () => {
 
     const mockGeneratedObject = {
       newExercise: {
+        contentKind: 'subject_matter',
+        logisticsReason: '',
         questionText: 'Test generated question?',
         exerciseType: 'single_choice',
-        choices: ['A', 'B'],
+        choices: ['A', 'B', 'C', 'D'],
         correctAnswer: 'A',
         explanation: 'Because it is correct.'
       }
     }
     vi.mocked(generateObject).mockResolvedValueOnce({ object: mockGeneratedObject } as any)
+    // the blind solve (second call) answers correctly
+    vi.mocked(generateObject).mockResolvedValueOnce({ object: { answerable: true, issue: '', answer: ['A'] } } as never)
 
     const mockCreatedExercise = {
       id: 'ex-new',
       topicId: 'topic-1',
       questionText: 'Test generated question?',
       exerciseType: 'single_choice',
-      choices: JSON.stringify(['A', 'B']),
+      choices: JSON.stringify(['A', 'B', 'C', 'D']),
       correctAnswer: 'A',
       explanation: 'Because it is correct.'
     }
     vi.mocked(prisma.exercise.create).mockResolvedValueOnce(mockCreatedExercise as any)
 
-    const mockSession = { id: 'session-1', exerciseIds: JSON.stringify(['ex-old']) }
-    vi.mocked(prisma.studySession.findUnique).mockResolvedValueOnce(mockSession as any)
+    const mockSession = { id: 'session-1', status: 'active', exerciseIds: JSON.stringify(['ex-old']) }
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(mockSession as any)
 
     const result = await generateNextExercise('session-1', ['topic-1'], ['ex-old'])
 
@@ -176,9 +182,12 @@ describe('generateNextExercise action', () => {
         topicId: 'topic-1',
         questionText: 'Test generated question?',
         exerciseType: 'single_choice',
-        choices: JSON.stringify(['A', 'B']),
+        choices: JSON.stringify(['A', 'B', 'C', 'D']),
         correctAnswer: 'A',
-        explanation: 'Because it is correct.'
+        explanation: 'Because it is correct.',
+        origin: 'generated',
+        status: 'active',
+        promptVersion: GENERATE_EXERCISE_PROMPT_VERSION,
       },
       include: { topic: true }
     })
@@ -190,6 +199,62 @@ describe('generateNextExercise action', () => {
     })
 
     expect(result).toEqual({ exercise: mockCreatedExercise })
+  })
+
+  it('stops targeting a topic once 3 of its questions were rejected in this session, without calling the model', async () => {
+    const mockTopic = { id: 'topic-1', title: 'Target Topic', courseId: 'course-1', week: 'week-1', content: 'Some content' }
+    vi.mocked(prisma.topic.findUnique).mockResolvedValue(mockTopic as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([mockTopic] as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 'session-1', status: 'active', startTime: new Date('2026-11-11T10:00:00Z'), exerciseIds: '[]' } as never)
+    vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { status?: unknown } }) =>
+      args?.where?.status === 'rejected' && !(args.where as Record<string, unknown>).reportedReason ? [{ topicId: 'topic-1' }, { topicId: 'topic-1' }, { topicId: 'topic-1' }] : []) as never)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const result = await generateNextExercise('session-1', ['topic-1'], [])
+
+    expect(result).toEqual({ error: expect.stringContaining('quality checks') })
+    expect(generateObject).not.toHaveBeenCalled()
+    // Only rejected rows created since the session started are counted
+    expect(prisma.exercise.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ status: 'rejected', createdAt: { gte: new Date('2026-11-11T10:00:00Z') } }),
+    }))
+  })
+
+  it('still targets the other topics when one topic reached the rejection limit', async () => {
+    const t1 = { id: 'topic-1', title: 'Bad', courseId: 'course-1', week: 'week-1', content: 'x' }
+    const t2 = { id: 'topic-2', title: 'Good', courseId: 'course-1', week: 'week-1', content: 'y' }
+    vi.mocked(prisma.topic.findUnique).mockImplementation((async (args: { where: { id: string } }) => (args.where.id === 'topic-1' ? t1 : t2)) as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([t1, t2] as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 'session-1', status: 'active', startTime: new Date(), exerciseIds: '[]' } as never)
+    vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { status?: unknown } }) =>
+      args?.where?.status === 'rejected' && !(args.where as Record<string, unknown>).reportedReason ? [{ topicId: 'topic-1' }, { topicId: 'topic-1' }, { topicId: 'topic-1' }] : []) as never)
+    vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
+    vi.mocked(generateObject)
+      .mockResolvedValueOnce({ object: { newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctAnswer: 'A', explanation: 'E' } } } as never)
+      .mockResolvedValueOnce({ object: { answerable: true, issue: '', answer: ['A'] } } as never)
+    vi.mocked(prisma.exercise.create).mockResolvedValue({ id: 'ex-new' } as never)
+
+    const result = await generateNextExercise('session-1', ['topic-1', 'topic-2'], [])
+
+    expect(result).toEqual({ exercise: { id: 'ex-new' } })
+    expect(vi.mocked(prisma.exercise.create).mock.calls[0][0].data).toMatchObject({ topicId: 'topic-2' })
+  })
+
+  it('stops generating for the whole session after 9 rejected questions', async () => {
+    const mockTopic = { id: 'topic-1', title: 'T', courseId: 'course-1', week: 'week-1', content: 'c' }
+    const mockTopic2 = { ...mockTopic, id: 'topic-2' }
+    vi.mocked(prisma.topic.findUnique).mockResolvedValue(mockTopic as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([mockTopic, mockTopic2] as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 'session-1', status: 'active', startTime: new Date(), exerciseIds: '[]' } as never)
+    const rows = [...Array(2).fill({ topicId: 'topic-1' }), ...Array(2).fill({ topicId: 'topic-2' })]
+    vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { status?: unknown } }) =>
+      args?.where?.status === 'rejected' && !(args.where as Record<string, unknown>).reportedReason ? [...rows, ...rows, { topicId: 'topic-1' }] : []) as never)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const result = await generateNextExercise('session-1', ['topic-1', 'topic-2'], [])
+
+    expect(result).toEqual({ error: expect.stringContaining('Too many') })
+    expect(generateObject).not.toHaveBeenCalled()
   })
 
   it('returns a plain error, and logs the full error, when the model fails (no key or payload reaches the student)', async () => {
@@ -612,5 +677,33 @@ describe('cancelStudySession', () => {
     expect(arg.data.status).toBe('cancelled')
     expect(arg.data.endTime).toBeInstanceOf(Date)
     expect(prisma.exerciseLog.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('reportExercise', () => {
+  it('marks an active or already reported question as reported with the reason', async () => {
+    vi.mocked(prisma.exercise.updateMany).mockResolvedValue({ count: 1 } as never)
+    expect(await reportExercise('ex-1', 'wrong_answer')).toBe(true)
+    expect(prisma.exercise.updateMany).toHaveBeenCalledWith({
+      where: { id: 'ex-1', status: { in: ['active', 'reported'] } },
+      data: { status: 'reported', reportedReason: 'wrong_answer' },
+    })
+  })
+
+  it('does not touch logs or sessions, so the question stays in the current session', async () => {
+    vi.mocked(prisma.exercise.updateMany).mockResolvedValue({ count: 1 } as never)
+    await reportExercise('ex-1', 'unclear')
+    expect(prisma.exerciseLog.deleteMany).not.toHaveBeenCalled()
+    expect(prisma.studySession.update).not.toHaveBeenCalled()
+  })
+
+  it('returns false for an unknown reason, an unknown or never-shown question, and on database errors', async () => {
+    expect(await reportExercise('ex-1', 'because')).toBe(false)
+    expect(prisma.exercise.updateMany).not.toHaveBeenCalled()
+    vi.mocked(prisma.exercise.updateMany).mockResolvedValueOnce({ count: 0 } as never)
+    expect(await reportExercise('rejected-or-missing', 'other')).toBe(false)
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.mocked(prisma.exercise.updateMany).mockRejectedValueOnce(new Error('db'))
+    expect(await reportExercise('ex-1', 'other')).toBe(false)
   })
 })

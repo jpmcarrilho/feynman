@@ -2,6 +2,7 @@ export { persona, FEYNMAN_METHOD, analogyList, joinOr, languageName } from './pe
 export { fileLinkInstructions, voiceFileLinkInstructions } from './linkInstructions'
 export { subjectGuidance, LEGACY_COURSE_CODES } from './legacySubjectGuidance'
 export { explainMistakePrompt, enrichExercisePrompt, generateExercisePrompt, GENERATE_EXERCISE_PROMPT_VERSION } from './exercise'
+export { blindSolvePrompt, BLIND_SOLVE_PROMPT_VERSION } from './blindSolve'
 export { examDiagnosisPrompt, globalDiagnosisPrompt } from './diagnosis'
 export { plannerChatPrompt, studyPlanPrompt } from './planner'
 export { moduleSummaryPrompt } from './summary'

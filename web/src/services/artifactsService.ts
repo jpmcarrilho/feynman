@@ -19,7 +19,7 @@ export async function getCourseArtifactsService() {
 
   const topics = await prisma.topic.findMany({
     orderBy: { week: 'asc' },
-    include: { course: true, exercises: { select: { id: true } } }
+    include: { course: true, exercises: { where: { origin: 'imported', status: 'active' }, select: { id: true } } }
   });
 
   const results = courses.map(course => {

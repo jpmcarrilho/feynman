@@ -88,7 +88,7 @@ JSON Schema:
 }
 
 /** Bump whenever the text of generateExercisePrompt changes (stored on generated exercises from T14 on). */
-export const GENERATE_EXERCISE_PROMPT_VERSION = 'gen-v2'
+export const GENERATE_EXERCISE_PROMPT_VERSION = 'gen-v4'
 
 export function generateExercisePrompt(
   profile: TutorProfile,
@@ -121,6 +121,8 @@ Your goal is to generate EXACTLY 1 NEW exercise for a course on ${profile.subjec
 
 Here is the primary target content:
 ${input.bucketContext}
+
+FIRST, JUDGE THE TARGET CONTENT. Decide whether the Target Topic content above is SUBJECT MATTER (concepts, methods, models, evidence, worked examples that a student can be tested on) or COURSE LOGISTICS / ADMINISTRATION (course rules, exam rules or format, schedules, grading policies, platform or website instructions, welcome or introduction notes, honor code, surveys, feedback forms, how to use the course). Judge from the content itself, not from its title. Set "contentKind" to "subject_matter" or "logistics". If it is "logistics", give a one-sentence "logisticsReason", leave "questionText", "correctAnswer" and "explanation" as empty strings and "choices" as an empty list: do NOT invent a question about rules, policies or instructions. If it is "subject_matter", set "logisticsReason" to an empty string and follow all the instructions below.
 
 CRITICAL WEEK & TOPICS INTEGRITY RULE:
 The generated question, its choices, correct answer, and explanation MUST be based directly on concepts from "${topic.title}" (in "${topic.week}"). You may use the other topics from "${topic.week}" provided in the content for background enhancement, but you MUST NOT write a question about a different week or general topic.
@@ -159,6 +161,7 @@ ${g.synthesisBlock}
 
 CRITICAL FORMATTING & STRUCTURE INSTRUCTIONS:
 ${g.formatRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}
+${g.formatRules.length + 1}. MATH AND SYMBOLS: Write every mathematical expression or symbol, in the question, the choices and the explanation, between dollar signs ($...$ inline, $$...$$ on its own line), for example $\\beta > 0$. Never write LaTeX commands (\\beta, \\frac, x_{i}) outside the dollar signs, and never double the backslashes. Write currency with an escaped dollar sign (\\$5), never a bare dollar sign. The options of a "dropdown" question are plain text: no LaTeX, no dollar signs.
 
 CRITICAL FORMAT SELECTION:
 You MUST generate an exercise of type: "${targetType}".

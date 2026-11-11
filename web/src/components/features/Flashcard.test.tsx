@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { Flashcard } from './Flashcard'
 
 describe('Flashcard Component', () => {
@@ -111,5 +111,49 @@ describe('Flashcard Component', () => {
       '[Dropdown 1]': 'diverging',
       '[Dropdown 2]': 'increasing'
     }))
+  })
+
+  describe('report control', () => {
+    it('is absent without onReport', () => {
+      render(<Flashcard {...defaultProps} />)
+      expect(screen.queryByText('Report question')).not.toBeInTheDocument()
+    })
+
+    it('reports nothing on a single tap: it takes opening the form, choosing a reason and pressing Send', async () => {
+      const onReport = vi.fn().mockResolvedValue(true)
+      render(<Flashcard {...defaultProps} onReport={onReport} />)
+      fireEvent.click(screen.getByText('Report question'))
+      expect(onReport).not.toHaveBeenCalled()
+      // No reason is preselected and Send is disabled
+      expect(screen.getByText('Send report').closest('button')).toBeDisabled()
+      fireEvent.click(screen.getByLabelText('The marked answer is wrong'))
+      expect(onReport).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByText('Send report'))
+      await waitFor(() => expect(onReport).toHaveBeenCalledWith('wrong_answer'))
+      expect(await screen.findByText(/it won.t be shown again/)).toBeInTheDocument()
+    })
+
+    it('Cancel closes the form without reporting; a failed report can be retried', async () => {
+      const onReport = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+      render(<Flashcard {...defaultProps} onReport={onReport} />)
+      fireEvent.click(screen.getByText('Report question'))
+      fireEvent.click(screen.getByText('Cancel'))
+      expect(onReport).not.toHaveBeenCalled()
+      expect(screen.getByText('Report question')).toBeInTheDocument()
+
+      fireEvent.click(screen.getByText('Report question'))
+      fireEvent.click(screen.getByLabelText('The question is unclear'))
+      fireEvent.click(screen.getByText('Send report'))
+      expect(await screen.findByText(/could not be saved/)).toBeInTheDocument()
+      fireEvent.click(screen.getByText('Send report'))
+      expect(await screen.findByText(/it won.t be shown again/)).toBeInTheDocument()
+      expect(onReport).toHaveBeenCalledTimes(2)
+    })
+
+    it('shows the notice instead of the control for an already reported question', () => {
+      render(<Flashcard {...defaultProps} onReport={vi.fn()} reported />)
+      expect(screen.getByText(/it won.t be shown again/)).toBeInTheDocument()
+      expect(screen.queryByText('Report question')).not.toBeInTheDocument()
+    })
   })
 })

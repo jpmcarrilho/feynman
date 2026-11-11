@@ -38,3 +38,37 @@ describe('generateWithRetry', () => {
     expect(attempt).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('generateWithRetry: stopped sessions and cancellation', () => {
+  it('returns a stopped outcome at once, without retrying or waiting', async () => {
+    const attempt = vi.fn().mockResolvedValue({ stopped: true })
+    const sleep = vi.fn()
+    expect(await generateWithRetry(attempt, () => false, { sleep })).toEqual({ stopped: true })
+    expect(attempt).toHaveBeenCalledTimes(1)
+    expect(sleep).not.toHaveBeenCalled()
+  })
+
+  it('discards a result that arrives after the run was cancelled', async () => {
+    let cancelled = false
+    const attempt = vi.fn(async () => {
+      cancelled = true // the session ends while the request is in flight
+      return { exercise: { id: 'late' } }
+    })
+    expect(await generateWithRetry(attempt, () => cancelled)).toBe('cancelled')
+  })
+
+  it('treats an aborted request as a cancellation: no retry, no wait, nothing logged', async () => {
+    let cancelled = false
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const attempt = vi.fn(async () => {
+      cancelled = true
+      throw new DOMException('aborted', 'AbortError')
+    })
+    const sleep = vi.fn()
+    expect(await generateWithRetry(attempt, () => cancelled, { sleep })).toBe('cancelled')
+    expect(attempt).toHaveBeenCalledTimes(1)
+    expect(sleep).not.toHaveBeenCalled()
+    expect(err).not.toHaveBeenCalled()
+    err.mockRestore()
+  })
+})

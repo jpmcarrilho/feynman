@@ -5,6 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Flashcard } from './Flashcard'
 import { SessionTimer } from './SessionTimer'
 import { generateWithRetry } from '@/lib/generationRetry'
+import { requestNextExercise } from '@/lib/generationClient'
 import { VoiceHub } from './VoiceHub'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -19,7 +20,7 @@ import {
   getSessionWithExercises,
   getSessionDetail,
   getVoiceContextForExercise,
-  generateNextExercise,
+  reportExercise,
   deleteStudySession,
   cancelStudySession,
   generateSessionSummary,
@@ -139,6 +140,16 @@ export function StudyInterface() {
   // Guards for the background generator: only one loop at a time, and a loop stops when the session changes or ends
   const generationLoopActiveRef = useRef(false)
   const generationRunRef = useRef(0)
+  // Cancels the request in flight; set to true when the student ends the session so that no new loop starts meanwhile
+  const generationAbortRef = useRef<AbortController | null>(null)
+  const generationStoppedRef = useRef(false)
+  const stopGeneration = () => {
+    generationStoppedRef.current = true
+    generationRunRef.current += 1
+    generationAbortRef.current?.abort()
+    generationAbortRef.current = null
+    generationLoopActiveRef.current = false
+  }
   const [currentIndex, setCurrentIndex] = useState(0)
   const [selectedHistory, setSelectedHistory] = useState<any>(null)
   const [isFocusMode, setIsFocusMode] = useState(false)
@@ -696,6 +707,7 @@ export function StudyInterface() {
   }
 
   const handleFinishExam = async () => {
+    stopGeneration()
     if (!session || isDiagnosisLoading) return;
     setIsDiagnosisLoading(true);
     try {
@@ -755,14 +767,19 @@ export function StudyInterface() {
   useEffect(() => {
     return () => {
       generationRunRef.current += 1
+      generationAbortRef.current?.abort()
+      generationAbortRef.current = null
+      generationStoppedRef.current = false
       generationLoopActiveRef.current = false
       setGenerationError(null)
     }
   }, [sessionId, sessionEnded])
 
   useEffect(() => {
-    if (!sessionId || sessionEnded || missingCount <= 0 || generationError || generationLoopActiveRef.current) return
+    if (!sessionId || sessionEnded || missingCount <= 0 || generationError || generationLoopActiveRef.current || generationStoppedRef.current) return
     const runId = ++generationRunRef.current
+    const controller = new AbortController()
+    generationAbortRef.current = controller
     const cancelled = () => generationRunRef.current !== runId
     const topicIds = activeSessionTopics.length > 0 ? activeSessionTopics : topics.map(t => t.id)
     const knownIds = exercises.map((e: any) => e.id)
@@ -770,12 +787,15 @@ export function StudyInterface() {
     ;(async () => {
       try {
         let remaining = missingCount
-        while (remaining > 0) {
+        while (remaining > 0 && !cancelled()) {
           const outcome = await generateWithRetry(
-            () => generateNextExercise(sessionId, topicIds, knownIds, remaining),
+            () => requestNextExercise<Record<string, unknown> & { id: string }>(sessionId, { topicIds, existingExerciseIds: knownIds }, controller.signal),
             cancelled,
           )
+          // A result that arrives after the session ended or changed is discarded, never appended
           if (outcome === 'cancelled' || cancelled()) return
+          // The server says the session is over: stop quietly, no failure banner
+          if ('stopped' in outcome) return
           if ('error' in outcome) {
             // Stop here; the banner offers Retry. No timer restarts the loop.
             setGenerationError(outcome.error)
@@ -813,6 +833,7 @@ export function StudyInterface() {
     if (!session) return
     const ok = window.confirm('Cancel this exam? Your answers will be discarded and no score will be recorded.')
     if (!ok) return
+    stopGeneration()
     setIsLoading(true)
     try {
       await cancelStudySession(session.id)
@@ -833,6 +854,7 @@ export function StudyInterface() {
   }
 
   const handleFinishSession = async () => {
+    stopGeneration()
     if (session) {
       setIsLoading(true)
       try {
@@ -1432,6 +1454,13 @@ export function StudyInterface() {
                     isExamMode={session.mode === 'exam' && session.status !== 'completed'}
                     onAnswer={handleAnswer}
                     onRequestExplanation={handleRequestExplanation}
+                    reported={currentExercise.status === 'reported'}
+                    onReport={async (reason) => {
+                      const ok = await reportExercise(currentExercise.id, reason)
+                      // Stays in this session's list (already seen); only future sessions skip it
+                      if (ok) setExercises(prev => prev.map(e => (e.id === currentExercise.id ? { ...e, status: 'reported' } : e)))
+                      return ok
+                    }}
                   />
 
                   <div className="flex justify-between pt-6">
@@ -1472,7 +1501,15 @@ export function StudyInterface() {
                   </div>
                 </div>
               ) : (
-                <div className="text-center text-muted-foreground py-12">No exercises found for this selection.</div>
+                stillGenerating ? (
+                  <div className="flex flex-col items-center gap-3 text-center text-muted-foreground py-12">
+                    <Loader2 className="w-8 h-8 animate-spin text-lecture-red" />
+                    <p className="font-medium text-charcoal-graphite">Writing your first question…</p>
+                    <p className="text-sm max-w-sm">Each question is generated from your material and checked before you see it. This usually takes under a minute.</p>
+                  </div>
+                ) : (
+                  <div className="text-center text-muted-foreground py-12">No exercises found for this selection.</div>
+                )
               )}
             </div>
           ) : (

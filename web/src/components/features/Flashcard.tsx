@@ -31,9 +31,22 @@ interface FlashcardProps {
   isExamMode?: boolean
   onAnswer: (isCorrect: boolean, userAnswer: string) => void
   onRequestExplanation?: (userAnswer: string) => void
+  /** Reports the question; resolves true when it was recorded. When omitted the card has no report control. */
+  onReport?: (reason: ReportReason) => Promise<boolean>
+  /** True when the question was already reported (shows the notice instead of the control). */
+  reported?: boolean
 }
 
-export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, onRequestExplanation }: FlashcardProps) {
+export type ReportReason = 'wrong_answer' | 'unclear' | 'off_topic' | 'other'
+
+const REPORT_OPTIONS: { value: ReportReason; label: string }[] = [
+  { value: 'wrong_answer', label: 'The marked answer is wrong' },
+  { value: 'unclear', label: 'The question is unclear' },
+  { value: 'off_topic', label: 'It is off topic' },
+  { value: 'other', label: 'Something else' },
+]
+
+export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, onRequestExplanation, onReport, reported = false }: FlashcardProps) {
   // The same type resolution and grading the server uses (src/lib/grading.ts)
   const effectiveExerciseType = resolveExerciseType({ exerciseType, choices, questionText })
   const grade = (userAnswer: string) =>
@@ -77,6 +90,20 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
     return !!initialSelectedChoice || !!hasBeenAnswered;
   })
   const [hasRequestedHelp, setHasRequestedHelp] = useState(false)
+  // Reporting takes three deliberate steps (open the form, pick a reason, press Send): no single tap reports a question
+  const [reportOpen, setReportOpen] = useState(false)
+  const [reportReason, setReportReason] = useState<ReportReason | null>(null)
+  const [reportState, setReportState] = useState<'idle' | 'sending' | 'done' | 'failed'>(reported ? 'done' : 'idle')
+
+  const sendReport = async () => {
+    if (!onReport || !reportReason || reportState === 'sending') return
+    setReportState('sending')
+    try {
+      setReportState((await onReport(reportReason)) ? 'done' : 'failed')
+    } catch {
+      setReportState('failed')
+    }
+  }
 
   const handleSubmit = () => {
     if (showResult) return
@@ -320,6 +347,36 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
         )}
 
       </CardContent>
+      {onReport && (
+        <div className="px-6 pb-3 text-xs text-charcoal-graphite/50">
+          {reportState === 'done' ? (
+            <span>Reported &mdash; it won&apos;t be shown again.</span>
+          ) : !reportOpen ? (
+            <button type="button" className="underline-offset-2 hover:underline hover:text-charcoal-graphite/80" onClick={() => setReportOpen(true)}>
+              Report question
+            </button>
+          ) : (
+            <div className="flex flex-col gap-2 rounded-md border border-charcoal-graphite/15 p-3" role="group" aria-label="Report this question">
+              <span className="font-medium text-charcoal-graphite/70">What is wrong with this question?</span>
+              {REPORT_OPTIONS.map((o) => (
+                <label key={o.value} className="flex items-center gap-2 cursor-pointer">
+                  <input type="radio" name="report-reason" value={o.value} checked={reportReason === o.value} onChange={() => setReportReason(o.value)} />
+                  {o.label}
+                </label>
+              ))}
+              {reportState === 'failed' && <span className="text-lecture-red">The report could not be saved. Try again.</span>}
+              <div className="flex gap-2">
+                <Button type="button" size="sm" variant="outline" disabled={!reportReason || reportState === 'sending'} onClick={sendReport}>
+                  {reportState === 'sending' ? 'Sending...' : 'Send report'}
+                </Button>
+                <Button type="button" size="sm" variant="ghost" onClick={() => { setReportOpen(false); setReportReason(null); setReportState('idle') }}>
+                  Cancel
+                </Button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
       {showResult && (
         <CardFooter className="bg-muted p-6 rounded-b-xl border-t border-charcoal-graphite/10 flex flex-col items-start gap-4 shadow-sm">
           {explanation && (

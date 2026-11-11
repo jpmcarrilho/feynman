@@ -18,7 +18,14 @@ import {
   SIBLING_LIMIT,
   SIBLING_EXCERPT_CHARS,
   CALIBRATION_CONTEXT_CAP,
+  MAX_GENERATION_ATTEMPTS,
+  ALREADY_ASKED_LIMIT,
+  ALREADY_ASKED_CHARS,
+  NOT_STUDY_MATERIAL_PREFIX,
+  filterGeneratableTopicIds,
+  generatedExerciseSchema,
 } from './exerciseGenerator'
+import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
 import { defaultProfile, type TutorProfile } from '@/lib/studyspace/profile'
 
 vi.mock('ai', () => ({ generateText: vi.fn(), generateObject: vi.fn() }))
@@ -33,7 +40,14 @@ vi.mock('@/lib/db', () => ({
 }))
 
 const generated = {
-  newExercise: { questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B'], correctAnswer: 'A', explanation: 'E' },
+  newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctAnswer: 'A', explanation: 'E' },
+}
+const solvedRight = { answerable: true, issue: '', answer: ['A'] }
+
+/** Generation prompts get `gen`, the blind-solve prompt (a different call) gets `solve`. */
+function mockModel(gen: unknown = generated, solve: unknown = solvedRight) {
+  vi.mocked(generateObject).mockImplementation((async (args: { prompt: string }) =>
+    ({ object: args.prompt.includes('You are a student taking a quiz') ? solve : gen })) as never)
 }
 
 function setup(topic: Record<string, unknown>, profile: TutorProfile, rigorExercises: unknown[] = []) {
@@ -43,9 +57,15 @@ function setup(topic: Record<string, unknown>, profile: TutorProfile, rigorExerc
   vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'c1', code: 'x1', title: 'Course', profile: JSON.stringify(profile) } as never)
   vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { topicId?: unknown } }) =>
     args?.where?.topicId && typeof args.where.topicId === 'object' && 'in' in (args.where.topicId as object) && (args.where.topicId as { in: string[] }).in[0] === 'cal1' ? rigorExercises : []) as never)
-  vi.mocked(generateObject).mockResolvedValue({ object: generated } as never)
+  mockModel()
   vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
   vi.mocked(prisma.exercise.create).mockResolvedValue({ id: 'gen-1' } as never)
+}
+
+/** Answers the logistics-marker query with `markers` and every other exercise query with `rows`. */
+function mockExerciseRows(rows: unknown[], markers: unknown[] = []) {
+  vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { reportedReason?: unknown } }) =>
+    args?.where?.reportedReason ? markers : rows) as never)
 }
 
 const promptOf = () => vi.mocked(generateObject).mock.calls[0][0].prompt as string
@@ -75,7 +95,7 @@ describe('generateExerciseForTopic', () => {
 
   it('refuses a primary topic that only holds ungraded exercises', async () => {
     setup({}, defaultProfile({ title: 'Course' }))
-    vi.mocked(prisma.exercise.findMany).mockResolvedValue([{ topicId: 't1', isGraded: false }] as never)
+    mockExerciseRows([{ topicId: 't1', isGraded: false }])
     await expect(generateExerciseForTopic({ primaryTopicId: 't1', poolTopicIds: ['t1'], existingExerciseIds: [] })).rejects.toMatchObject({ code: 'ungraded_only' })
     expect(generateObject).not.toHaveBeenCalled()
   })
@@ -125,9 +145,161 @@ describe('generateExerciseForTopic', () => {
     const res = await generateExerciseForTopic({ primaryTopicId: 't1', poolTopicIds: ['t1'], existingExerciseIds: [] })
     expect(res).toEqual({ id: 'gen-1' })
     expect(prisma.exercise.create).toHaveBeenCalledWith({
-      data: expect.objectContaining({ id: expect.stringMatching(/^gen-/), topicId: 't1', questionText: 'Q?', correctAnswer: 'A', choices: JSON.stringify(['A', 'B']) }),
+      data: expect.objectContaining({
+        id: expect.stringMatching(/^gen-/),
+        topicId: 't1',
+        questionText: 'Q?',
+        correctAnswer: 'A',
+        choices: JSON.stringify(['A', 'B', 'C', 'D']),
+        origin: 'generated',
+        status: 'active',
+        promptVersion: GENERATE_EXERCISE_PROMPT_VERSION,
+      }),
       include: { topic: true },
     })
+  })
+})
+
+describe('generateExerciseForTopic validation', () => {
+  const args = { primaryTopicId: 't1', poolTopicIds: ['t1'], existingExerciseIds: [] as string[] }
+  const solverCalls = () => vi.mocked(generateObject).mock.calls.filter((c) => (c[0].prompt as string).includes('You are a student taking a quiz'))
+  const created = () => vi.mocked(prisma.exercise.create).mock.calls.map((c) => c[0].data as Record<string, unknown>)
+
+  it('sends the solver only what the student sees: no topic content, answer key or explanation', async () => {
+    setup({ content: 'SECRET-TOPIC-CONTENT' }, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: { ...generated.newExercise, correctAnswer: 'ANSWER-KEY-D', choices: ['A', 'B', 'C', 'ANSWER-KEY-D'], explanation: 'EXPLAIN-TEXT' } }, { answerable: true, issue: '', answer: ['ANSWER-KEY-D'] })
+    await generateExerciseForTopic(args)
+    const prompt = solverCalls()[0][0].prompt as string
+    expect(prompt).toContain('Q?')
+    expect(prompt).toContain('- A')
+    expect(prompt).not.toContain('SECRET-TOPIC-CONTENT')
+    expect(prompt).not.toContain('EXPLAIN-TEXT')
+    // the stored key is not marked anywhere: the choice that is the key is listed like the others
+    expect(prompt).not.toMatch(/Correct Answer|Official Explanation/)
+  })
+
+  it('stores a rejected row and retries when the blind solve disagrees, then returns the accepted question', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    vi.mocked(generateObject).mockReset()
+    vi.mocked(generateObject)
+      .mockResolvedValueOnce({ object: generated } as never)
+      .mockResolvedValueOnce({ object: { answerable: true, issue: '', answer: ['B'] } } as never)
+      .mockResolvedValueOnce({ object: generated } as never)
+      .mockResolvedValueOnce({ object: solvedRight } as never)
+    vi.mocked(prisma.exercise.create).mockResolvedValue({ id: 'gen-ok' } as never)
+
+    const res = await generateExerciseForTopic(args)
+
+    expect(res).toEqual({ id: 'gen-ok' })
+    const rows = created()
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ status: 'rejected', origin: 'generated', topicId: 't1', promptVersion: GENERATE_EXERCISE_PROMPT_VERSION })
+    expect(rows[0].reportedReason).toMatch(/^blind_solve\[.*\]: mismatch/)
+    expect(rows[1]).toMatchObject({ status: 'active' })
+  })
+
+  it('rejects a structurally invalid question without spending a blind solve', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: { ...generated.newExercise, choices: ['A', 'B'] } })
+    await expect(generateExerciseForTopic(args)).rejects.toMatchObject({ code: 'validation_failed' })
+    expect(solverCalls()).toHaveLength(0)
+    expect(created()[0]).toMatchObject({ status: 'rejected' })
+    expect(created()[0].reportedReason).toMatch(/^structural: choice_count/)
+  })
+
+  it('rejects a question the solver says cannot be answered from its own text (exam rules example)', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel(
+      { newExercise: { questionText: 'According to the exam rules, which materials are you allowed to bring to the final?', exerciseType: 'single_choice', choices: ['A calculator', 'Open notes', 'A laptop', 'Nothing'], correctAnswer: 'A calculator', explanation: 'The rules say so.' } },
+      { answerable: false, issue: 'The exam rules are not stated in the question.', answer: ['A calculator'] },
+    )
+    await expect(generateExerciseForTopic(args)).rejects.toMatchObject({ code: 'validation_failed' })
+    expect(created().every((r) => r.status === 'rejected')).toBe(true)
+    expect(created()[0].reportedReason).toContain('not_answerable')
+  })
+
+  it('uses at most MAX_GENERATION_ATTEMPTS generations and as many blind solves, then fails with a student-safe message', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel(generated, { answerable: true, issue: '', answer: ['C'] })
+    const err = await generateExerciseForTopic(args).catch((e) => e)
+    expect(err).toBeInstanceOf(GenerationError)
+    expect(err.userMessage).not.toMatch(/gemini|api|key/i)
+    expect(vi.mocked(generateObject)).toHaveBeenCalledTimes(MAX_GENERATION_ATTEMPTS * 2)
+    expect(created()).toHaveLength(MAX_GENERATION_ATTEMPTS)
+    expect(created().every((r) => r.status === 'rejected')).toBe(true)
+  })
+
+  it('stores one marker row, skips the blind solve and does not retry when the model says the content is logistics', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: { contentKind: 'logistics', logisticsReason: 'Exam rules and submission limits.', questionText: '', exerciseType: 'single_choice', choices: [], correctAnswer: '', explanation: '' } })
+    await expect(generateExerciseForTopic(args)).rejects.toMatchObject({ code: 'not_study_material' })
+    expect(vi.mocked(generateObject)).toHaveBeenCalledTimes(1)
+    expect(solverCalls()).toHaveLength(0)
+    expect(created()).toHaveLength(1)
+    expect(created()[0]).toMatchObject({
+      topicId: 't1',
+      status: 'rejected',
+      isGraded: false,
+      promptVersion: GENERATE_EXERCISE_PROMPT_VERSION,
+      reportedReason: `${NOT_STUDY_MATERIAL_PREFIX}: Exam rules and submission limits.`,
+    })
+  })
+
+  it('refuses a topic that already carries the marker before any model call', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockExerciseRows([], [{ topicId: 't1' }])
+    await expect(generateExerciseForTopic(args)).rejects.toMatchObject({ code: 'not_study_material' })
+    expect(generateObject).not.toHaveBeenCalled()
+  })
+
+  it('asks the model to judge the content first, and asks for the logistics fields in the schema', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    await generateExerciseForTopic(args)
+    expect(promptOf()).toContain('FIRST, JUDGE THE TARGET CONTENT')
+    expect(promptOf()).toMatch(/honor code/)
+    expect(generatedExerciseSchema.safeParse({ newExercise: { contentKind: 'logistics', logisticsReason: 'x', questionText: '', exerciseType: 'single_choice', choices: [], correctAnswer: '', explanation: '' } }).success).toBe(true)
+    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v4')
+  })
+
+  it('lets a solver error propagate and stores nothing for that attempt', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    vi.mocked(generateObject).mockReset()
+    vi.mocked(generateObject).mockResolvedValueOnce({ object: generated } as never).mockRejectedValueOnce(new Error('provider down'))
+    await expect(generateExerciseForTopic(args)).rejects.toThrow('provider down')
+    expect(prisma.exercise.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('rejected and reported rows are never read by generation', () => {
+  it('style examples, rigor examples and the ungraded-only test exclude rejected rows; selection reads only active ones', async () => {
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'cal1' }] as never)
+    await fetchLocalStyleExamples({ week: 'W1', courseId: 'c1', order: 1 }, ['t1'], [])
+    await fetchRigorExamples('c1', { ...defaultProfile({ title: 'C' }), calibrationModule: 'Final' })
+    const wheres = vi.mocked(prisma.exercise.findMany).mock.calls.map((c) => c[0]?.where as Record<string, unknown>)
+    expect(wheres.length).toBeGreaterThanOrEqual(2)
+    expect(wheres.every((w) => w.status === 'active')).toBe(true)
+
+    vi.mocked(prisma.exercise.findMany).mockClear()
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1', resourceType: null }] as never)
+    vi.mocked(prisma.$queryRaw).mockResolvedValue([] as never)
+    await classifyTopics(['t1'])
+    expect(vi.mocked(prisma.exercise.findMany).mock.calls.map((c) => c[0]?.where)).toContainEqual(expect.objectContaining({ status: { not: 'rejected' } }))
+  })
+
+  it('the already-asked block keeps the most recent 30 questions, 300 characters each', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    const ids = Array.from({ length: 45 }, (_, i) => `e${i + 1}`)
+    vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { id?: { in: string[] } } }) =>
+      args?.where?.id?.in ? args.where.id.in.map((id) => ({ id, topicId: 't1', questionText: `${id} ${'x'.repeat(500)}` })) : []) as never)
+    const { prompt } = await buildGenerationPrompt({ primaryTopicId: 't1', poolTopicIds: ['t1'], existingExerciseIds: ids })
+    const block = prompt.slice(prompt.indexOf('ALREADY present'), prompt.indexOf('CRITICAL DEDUPLICATION RULES'))
+    const entries = block.match(/Question \d+: .*/g) ?? []
+    expect(entries).toHaveLength(ALREADY_ASKED_LIMIT)
+    expect(entries[0]).toContain('e16 ')
+    expect(block).toContain('e45 ')
+    expect(block).not.toContain('e15 ')
+    expect(entries.every((e) => e.length <= 'Question 30: '.length + ALREADY_ASKED_CHARS + 3)).toBe(true)
   })
 })
 
@@ -202,13 +374,24 @@ describe('describeSibling and buildBucketContext', () => {
 describe('classifyTopics', () => {
   it('marks empty, ungraded-only and usable topics (a topic without exercises is usable)', async () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'ok' }, { id: 'survey' }, { id: 'noex' }] as never)
-    vi.mocked(prisma.exercise.findMany).mockResolvedValue([
+    mockExerciseRows([
       { topicId: 'ok', isGraded: true },
       { topicId: 'ok', isGraded: false },
       { topicId: 'survey', isGraded: false },
-    ] as never)
+    ])
     const m = await classifyTopics(['ok', 'survey', 'noex', 'blank'])
     expect(Object.fromEntries(m)).toEqual({ ok: 'ok', survey: 'ungraded_only', noex: 'ok', blank: 'missing' })
+  })
+
+  it('marks a topic with a not_study_material marker row as ineligible, ahead of the ungraded-only test', async () => {
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'welcome' }, { id: 'lecture' }] as never)
+    mockExerciseRows([{ topicId: 'lecture', isGraded: true }], [{ topicId: 'welcome' }])
+    const m = await classifyTopics(['welcome', 'lecture'])
+    expect(Object.fromEntries(m)).toEqual({ welcome: 'not_study_material', lecture: 'ok' })
+    expect(prisma.exercise.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      where: expect.objectContaining({ status: 'rejected', reportedReason: { startsWith: NOT_STUDY_MATERIAL_PREFIX } }),
+    }))
+    expect(await filterGeneratableTopicIds(['welcome', 'lecture'])).toEqual(['lecture'])
   })
 })
 

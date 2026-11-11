@@ -3,7 +3,9 @@ import { z } from 'zod'
 import type { Exercise, Topic } from '@prisma/client'
 import { textModel } from '@/lib/ai'
 import { prisma } from '@/lib/db'
-import { generateExercisePrompt } from '@/lib/prompts'
+import { generateExercisePrompt, GENERATE_EXERCISE_PROMPT_VERSION, BLIND_SOLVE_PROMPT_VERSION } from '@/lib/prompts'
+import { validateExerciseStructure, summarizeIssues } from '@/lib/exerciseValidation'
+import { blindSolve } from '@/services/blindSolve'
 import { pickQuestionType, type TutorProfile } from '@/lib/studyspace/profile'
 import { getCourseWithProfile } from '@/services/studyspaceService'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
@@ -45,7 +47,7 @@ export async function fetchRigorExamples(courseId: string, profile: TutorProfile
   const rigorExercises: Awaited<ReturnType<typeof prisma.exercise.findMany>> = []
   for (const chunk of chunkIds(ids)) {
     if (rigorExercises.length >= 3) break
-    rigorExercises.push(...(await prisma.exercise.findMany({ where: { topicId: { in: chunk } }, take: 3 - rigorExercises.length })))
+    rigorExercises.push(...(await prisma.exercise.findMany({ where: { topicId: { in: chunk }, status: 'active' }, take: 3 - rigorExercises.length })))
   }
   return rigorExercises.map(describeExercise).join('\n\n')
 }
@@ -69,7 +71,7 @@ export async function fetchLocalStyleExamples(
   // Exercises from the same module (generated ones included)
   let exercises = (
     await prisma.exercise.findMany({
-      where: { topic: { week: topicData.week, courseId: topicData.courseId } },
+      where: { topic: { week: topicData.week, courseId: topicData.courseId }, status: 'active' },
       take: STYLE_EXAMPLES_WANTED + existing.size,
       include: { topic: true },
     })
@@ -88,7 +90,7 @@ export async function fetchLocalStyleExamples(
     for (const chunk of chunkIds(nearest, STYLE_FALLBACK_TOPICS_PER_QUERY)) {
       if (exercises.length >= STYLE_EXAMPLES_WANTED) break
       const found = await prisma.exercise.findMany({
-        where: { topicId: { in: chunk } },
+        where: { topicId: { in: chunk }, status: 'active' },
         take: STYLE_EXAMPLES_WANTED + existing.size,
         include: { topic: true },
       })
@@ -109,10 +111,26 @@ export const SIBLING_SUMMARY_CAP = 1_000
 export const SIBLING_EXCERPT_CHARS = 600
 export const CALIBRATION_CONTEXT_CAP = 15_000
 
+/** "Already asked in this session" block of the generation prompt: the most recent questions, each cut to this length. */
+export const ALREADY_ASKED_LIMIT = 30
+export const ALREADY_ASKED_CHARS = 300
+
+function truncateForPrompt(text: string, max: number): string {
+  return text.length > max ? `${text.slice(0, max).trimEnd()}...` : text
+}
+
+/** Model attempts (generation, plus a blind solve each when the structure is valid) one question slot may use per call. */
+export const MAX_GENERATION_ATTEMPTS = 3
+/** Rejected questions of one topic in one session after which the topic is no longer targeted in that session. */
+export const TOPIC_REJECTION_LIMIT = 3
+/** Rejected questions of a whole session after which no further question is generated for it. */
+export const SESSION_REJECTION_LIMIT = 9
+const MAX_REASON_CHARS = 600
+
 /** Thrown for failures whose cause is known; `userMessage` is a plain sentence that is safe to show to the student. */
 export class GenerationError extends Error {
   constructor(
-    readonly code: 'topic_not_found' | 'no_content' | 'ungraded_only' | 'no_eligible_topic',
+    readonly code: 'topic_not_found' | 'no_content' | 'ungraded_only' | 'no_eligible_topic' | 'validation_failed' | 'not_study_material',
     readonly userMessage: string,
   ) {
     super(`${code}: ${userMessage}`)
@@ -120,7 +138,10 @@ export class GenerationError extends Error {
   }
 }
 
-type TopicEligibility = 'ok' | 'missing' | 'empty' | 'ungraded_only'
+type TopicEligibility = 'ok' | 'missing' | 'empty' | 'ungraded_only' | 'not_study_material'
+
+/** `reportedReason` prefix of the marker row that makes a topic ineligible: the model judged its content to be course logistics. */
+export const NOT_STUDY_MATERIAL_PREFIX = 'not_study_material'
 
 /** Bytes of a topic's content that are inspected to tell text from binary. */
 export const CONTENT_PREFIX_BYTES = 1000
@@ -155,6 +176,7 @@ export async function classifyTopics(topicIds: string[]): Promise<Map<string, To
   const hasContent = new Set<string>()
   const binary = new Set<string>()
   const exerciseRows: { topicId: string; isGraded: boolean }[] = []
+  const logistics = new Set<string>()
   for (const chunk of chunkIds(topicIds)) {
     for (const t of await prisma.topic.findMany({ where: { id: { in: chunk } }, select: { id: true, resourceType: true } })) {
       existing.set(t.id, t.resourceType)
@@ -171,7 +193,13 @@ export async function classifyTopics(topicIds: string[]): Promise<Map<string, To
       )
       for (const r of prefixes ?? []) if (looksLikeBinary(r.prefix)) binary.add(r.id)
     }
-    exerciseRows.push(...(await prisma.exercise.findMany({ where: { topicId: { in: chunk } }, select: { topicId: true, isGraded: true } })))
+    // Marker rows: an earlier generation judged the topic to be course logistics
+    const markers = await prisma.exercise.findMany({
+      where: { topicId: { in: chunk }, status: 'rejected', reportedReason: { startsWith: NOT_STUDY_MATERIAL_PREFIX } },
+      select: { topicId: true },
+    })
+    for (const m of markers ?? []) logistics.add(m.topicId)
+    exerciseRows.push(...(await prisma.exercise.findMany({ where: { topicId: { in: chunk }, status: { not: 'rejected' } }, select: { topicId: true, isGraded: true } })))
   }
   const hasExercises = new Set<string>()
   const hasGraded = new Set<string>()
@@ -182,6 +210,7 @@ export async function classifyTopics(topicIds: string[]): Promise<Map<string, To
   for (const id of topicIds) {
     if (!existing.has(id)) result.set(id, 'missing')
     else if (!hasContent.has(id) || isCrawlErrorResourceType(existing.get(id)) || binary.has(id)) result.set(id, 'empty')
+    else if (logistics.has(id)) result.set(id, 'not_study_material')
     else if (hasExercises.has(id) && !hasGraded.has(id)) result.set(id, 'ungraded_only')
     else result.set(id, 'ok')
   }
@@ -296,6 +325,9 @@ export async function buildGenerationPrompt(args: {
   if (eligibility === 'missing' || eligibility === undefined) {
     throw new GenerationError('topic_not_found', 'The topic for this question could not be found.')
   }
+  if (eligibility === 'not_study_material') {
+    throw new GenerationError('not_study_material', 'This topic holds course rules or administration rather than study material, so no question is generated from it.')
+  }
   if (eligibility === 'ungraded_only') {
     throw new GenerationError('ungraded_only', 'This topic only has ungraded material, so no question can be generated from it.')
   }
@@ -308,10 +340,13 @@ export async function buildGenerationPrompt(args: {
     throw new GenerationError('no_content', 'This topic has no study material to generate a question from.')
   }
 
-  const existingExercisesInSession: { topicId: string; questionText: string }[] = []
-  for (const chunk of chunkIds(existingExerciseIds)) {
-    existingExercisesInSession.push(...(await prisma.exercise.findMany({ where: { id: { in: chunk } }, select: { topicId: true, questionText: true } })))
-  }
+  // Only the most recent questions of the session go into the prompt, each cut short
+  const recentIds = existingExerciseIds.slice(-ALREADY_ASKED_LIMIT)
+  const recentRows = recentIds.length > 0
+    ? await prisma.exercise.findMany({ where: { id: { in: recentIds } }, select: { id: true, questionText: true } })
+    : []
+  const recentById = new Map(recentRows.map((r) => [r.id, r.questionText]))
+  const existingExercisesInSession = recentIds.flatMap((id) => (recentById.has(id) ? [recentById.get(id) as string] : []))
 
   const course = await getCourseWithProfile(topicData.courseId)
   const profile = course?.profile ?? LEGACY_VOICE_PROFILE
@@ -350,7 +385,7 @@ export async function buildGenerationPrompt(args: {
   const rigorExercisesContext = await fetchRigorExamples(topicData.courseId, profile)
 
   const alreadyAskedQuestionsText = existingExercisesInSession
-    .map((ex, idx) => `Question ${idx + 1}: ${ex.questionText}`)
+    .map((text, idx) => `Question ${idx + 1}: ${truncateForPrompt(text, ALREADY_ASKED_CHARS)}`)
     .join('\n\n')
 
   const prompt = generateExercisePrompt(profile, {
@@ -365,8 +400,56 @@ export async function buildGenerationPrompt(args: {
   return { prompt, bucketContext, topicData }
 }
 
+/** Structured output of the generation call. */
+export const generatedExerciseSchema = z.object({
+  newExercise: z.object({
+    // Decided first, before any question is written
+    contentKind: z.enum(['subject_matter', 'logistics']),
+    // One short sentence when contentKind is "logistics"; empty otherwise
+    logisticsReason: z.string(),
+    // With "logistics" these may be empty ("" and [])
+    questionText: z.string(),
+    exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
+    choices: z.array(z.string()),
+    correctAnswer: z.string(),
+    explanation: z.string(),
+  }),
+})
+
+/** Rejected generated questions per topic created at or after `since` (the start of a session). Chunked id lists. */
+export async function countRejectedSince(topicIds: string[], since: Date): Promise<Map<string, number>> {
+  const counts = new Map<string, number>()
+  for (const chunk of chunkIds(topicIds)) {
+    const rows = await prisma.exercise.findMany({
+      where: { topicId: { in: chunk }, status: 'rejected', createdAt: { gte: since } },
+      select: { topicId: true },
+    })
+    for (const r of rows ?? []) counts.set(r.topicId, (counts.get(r.topicId) ?? 0) + 1)
+  }
+  return counts
+}
+
+/** Why a candidate must not be shown, or null when it passes the structural checks and the blind solve. */
+async function rejectionReason(candidate: {
+  questionText: string
+  exerciseType: string
+  choices: string[]
+  correctAnswer: string
+  explanation: string
+}): Promise<string | null> {
+  const issues = validateExerciseStructure(candidate)
+  if (issues.length > 0) return `structural: ${summarizeIssues(issues)} | ${issues.map((i) => i.message).join(' ')}`
+  const solved = await blindSolve(candidate)
+  if (!solved.passed) return `blind_solve[${BLIND_SOLVE_PROMPT_VERSION}]: ${solved.reason}`
+  return null
+}
+
 /**
  * Generates and stores one exercise for a topic. Does not touch sessions.
+ *
+ * Every candidate is checked (structure, then a blind solve that sees only what the student sees). A rejected candidate is
+ * stored with status 'rejected' (reason in `reportedReason`) and never selected; the slot then tries again, up to
+ * MAX_GENERATION_ATTEMPTS times in total, and throws GenerationError('validation_failed') when none passed.
  * Throws GenerationError when the topic cannot be generated from (missing, no content, only ungraded material);
  * model and database errors propagate.
  *
@@ -379,32 +462,49 @@ export async function generateExerciseForTopic(args: {
   existingExerciseIds: string[]
   styleTopicIds?: string[]
 }): Promise<Exercise & { topic: Topic }> {
-  const { prompt, topicData } = await buildGenerationPrompt(args)
+  for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
+    // Rebuilt for each attempt: rejected rows count as existing exercises of the topic, so a retry reads another window
+    const { prompt, topicData } = await buildGenerationPrompt(args)
 
-  const { object } = await generateObject({
-    model: textModel(),
-    prompt,
-    schema: z.object({
-      newExercise: z.object({
-        questionText: z.string(),
-        exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
-        choices: z.array(z.string()),
-        correctAnswer: z.string(),
-        explanation: z.string(),
-      }),
-    }),
-  })
+    const { object } = await generateObject({
+      model: textModel(),
+      prompt,
+      schema: generatedExerciseSchema,
+    })
 
-  const genEx = object.newExercise
+    const { contentKind, logisticsReason, ...genEx } = object.newExercise
 
-  // Randomize choices to remove the model's position bias
-  let finalChoices = genEx.choices
-  if (genEx.exerciseType === 'single_choice' || genEx.exerciseType === 'multiple_choice' || genEx.exerciseType === 'dropdown') {
-    finalChoices = shuffleArray(genEx.choices)
-  }
+    if (contentKind === 'logistics') {
+      // Not study material: keep one marker row (never selected, never shown) so no later session targets this topic,
+      // and write no question, run no blind solve and make no retry.
+      const reason = (logisticsReason.trim() || 'course logistics').slice(0, 300)
+      await prisma.exercise.create({
+        data: {
+          id: `gen-${crypto.randomUUID()}`,
+          topicId: topicData.id,
+          questionText: '(marker: this topic is not study material)',
+          exerciseType: 'single_choice',
+          choices: '[]',
+          correctAnswer: '',
+          isGraded: false,
+          origin: 'generated',
+          status: 'rejected',
+          promptVersion: GENERATE_EXERCISE_PROMPT_VERSION,
+          reportedReason: `${NOT_STUDY_MATERIAL_PREFIX}: ${reason}`,
+        },
+      })
+      console.warn(`Topic "${topicData.title}" judged not to be study material: ${reason}`)
+      throw new GenerationError('not_study_material', 'This topic holds course rules or administration rather than study material, so no question is generated from it.')
+    }
 
-  return prisma.exercise.create({
-    data: {
+    // Randomize choices to remove the model's position bias
+    let finalChoices = genEx.choices
+    if (genEx.exerciseType === 'single_choice' || genEx.exerciseType === 'multiple_choice' || genEx.exerciseType === 'dropdown') {
+      finalChoices = shuffleArray(genEx.choices)
+    }
+
+    const rejection = await rejectionReason({ ...genEx, choices: finalChoices })
+    const data = {
       id: `gen-${crypto.randomUUID()}`,
       topicId: topicData.id,
       questionText: genEx.questionText,
@@ -412,7 +512,14 @@ export async function generateExerciseForTopic(args: {
       choices: JSON.stringify(finalChoices),
       correctAnswer: genEx.correctAnswer,
       explanation: genEx.explanation,
-    },
-    include: { topic: true },
-  })
+      origin: 'generated',
+      promptVersion: GENERATE_EXERCISE_PROMPT_VERSION,
+    }
+    if (!rejection) {
+      return prisma.exercise.create({ data: { ...data, status: 'active' }, include: { topic: true } })
+    }
+    console.warn(`Generated question rejected (attempt ${attempt}/${MAX_GENERATION_ATTEMPTS}): ${rejection.slice(0, 200)}`)
+    await prisma.exercise.create({ data: { ...data, status: 'rejected', reportedReason: rejection.slice(0, MAX_REASON_CHARS) } })
+  }
+  throw new GenerationError('validation_failed', 'A question was generated but it did not pass the quality checks. Please try again.')
 }

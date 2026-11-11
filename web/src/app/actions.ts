@@ -10,8 +10,7 @@ import { requireAuth } from '@/server/auth'
 import { buildVoiceContext } from '@/services/voiceContext'
 import { getCourseWithProfile, getProfileForTopic, getProfileForCourses } from '@/services/studyspaceService'
 import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
-import { generateExerciseForTopic, filterGeneratableTopicIds, chunkIds, GenerationError } from '@/services/exerciseGenerator'
-import type { Exercise, Topic } from '@prisma/client'
+import { generateNextForSession, type NextExerciseResult } from '@/services/sessionGeneration'
 import { submitExamForSession, type ExamSubmission } from '@/services/sessionService'
 import { gradeAnswer, logScore } from '@/lib/grading'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
@@ -811,12 +810,10 @@ export async function getAnalyticsData() {
   };
 }
 
-/** What the student sees when generation fails for a reason that is not one of the known GenerationErrors. */
-const GENERATION_FAILED_MESSAGE = 'The question generator is not available right now. Please try again in a moment.'
-
 /**
- * Generates one more question for the session. Never returns provider errors: the failure is logged here and the
- * student gets a short fixed sentence. Authentication errors are not caught (requireAuth runs before the try).
+ * Generates one more question for the session. The work lives in `generateNextForSession` (also used by the
+ * `POST /api/sessions/[sessionId]/generate-next` route, which the study interface calls so that a 20-40 second
+ * generation does not block the other server actions: Next.js dispatches server actions one at a time per client).
  */
 export async function generateNextExercise(
   sessionId: string,
@@ -824,62 +821,34 @@ export async function generateNextExercise(
   existingExerciseIds: string[],
   // Kept for callers; the number of questions still missing does not change what one call does
   missingCount: number = 1,
-): Promise<{ exercise: Exercise & { topic: Topic } } | { error: string }> {
+): Promise<NextExerciseResult> {
   void missingCount
   await requireAuth()
-  if (topicIds.length === 0) return { error: 'No topics are selected for this session.' }
+  return generateNextForSession(sessionId, topicIds, existingExerciseIds)
+}
 
+/** Reasons the student can give when reporting a question. */
+const REPORT_REASONS = ['wrong_answer', 'unclear', 'off_topic', 'other'] as const
+
+/**
+ * Marks a question as reported: it is no longer selected for future sessions. Logs and the sessions that already
+ * contain it are untouched, so the student still sees it (and its result) in the current and past sessions.
+ * Works for any origin. Returns false when the reason is unknown or the question cannot be reported.
+ */
+export async function reportExercise(exerciseId: string, reason: string): Promise<boolean> {
+  await requireAuth()
+  const cleaned = typeof reason === 'string' ? reason.trim() : ''
+  if (!exerciseId || !(REPORT_REASONS as readonly string[]).includes(cleaned)) return false
   try {
-    // Never target topics without content or with only ungraded material (surveys, participation items)
-    const eligibleTopicIds = await filterGeneratableTopicIds(topicIds)
-    if (eligibleTopicIds.length === 0) {
-      throw new GenerationError('no_eligible_topic', 'None of the selected topics has graded study material to generate questions from.')
-    }
-
-    // Find current representation of selected topics in the session to keep the questions balanced
-    const existingExercisesInSession: { topicId: string }[] = [];
-    for (const chunk of chunkIds(existingExerciseIds)) {
-      existingExercisesInSession.push(...(await prisma.exercise.findMany({
-        where: { id: { in: chunk } },
-        select: { topicId: true }
-      })));
-    }
-
-    const representedTopicIds = new Set(existingExercisesInSession.map(ex => ex.topicId));
-    const uncoveredTopicIds = eligibleTopicIds.filter(id => !representedTopicIds.has(id));
-
-    // If all selected topics are already represented, fall back to the full list of eligible topics
-    const targetPool = uncoveredTopicIds.length > 0 ? uncoveredTopicIds : eligibleTopicIds;
-
-    // Shuffle the pool to remove alphabetical or ordering bias in selection
-    const shuffledTargetPool = [...targetPool];
-    for (let i = shuffledTargetPool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffledTargetPool[i], shuffledTargetPool[j]] = [shuffledTargetPool[j], shuffledTargetPool[i]];
-    }
-
-    const newEx = await generateExerciseForTopic({
-      primaryTopicId: shuffledTargetPool[0],
-      poolTopicIds: targetPool,
-      existingExerciseIds,
-      styleTopicIds: topicIds,
-    });
-
-    // Update session
-    const session = await prisma.studySession.findUnique({ where: { id: sessionId } });
-    if (session) {
-      const currentIds = session.exerciseIds ? JSON.parse(session.exerciseIds) : [];
-      await prisma.studySession.update({
-        where: { id: sessionId },
-        data: { exerciseIds: JSON.stringify([...currentIds, newEx.id]) }
-      });
-    }
-
-    return { exercise: newEx };
-  } catch (e) {
-    // Full error on the server only; the provider message can contain request details
-    console.error("Failed to generate next exercise:", e);
-    return { error: e instanceof GenerationError ? e.userMessage : GENERATION_FAILED_MESSAGE };
+    const res = await prisma.exercise.updateMany({
+      // 'rejected' and 'retired' rows are never shown, so there is nothing to report on them
+      where: { id: exerciseId, status: { in: ['active', 'reported'] } },
+      data: { status: 'reported', reportedReason: cleaned },
+    })
+    return res.count > 0
+  } catch (error) {
+    console.error('Failed to report exercise:', error)
+    return false
   }
 }
 
@@ -1232,7 +1201,7 @@ export async function saveAndDeployStudyPlan(planData: any) {
     for (const sessionData of planData.sessions) {
       // Find matching exercises in the database for the given topicIds to seed this session
       const exercises = await prisma.exercise.findMany({
-        where: { topicId: { in: sessionData.topicIds } },
+        where: { topicId: { in: sessionData.topicIds }, status: 'active' },
         take: sessionData.questionCount
       });
 
@@ -1301,8 +1270,11 @@ export async function getTopicsWithPerformance() {
       include: { course: true }
     });
 
+    // Rejected questions were never shown, so they are not part of any total. Reported ones stay for the accuracy of
+    // what the student already answered, but are not part of the pool they can still cover.
     const exercises = await prisma.exercise.findMany({
-      select: { id: true, topicId: true }
+      where: { status: { not: 'rejected' } },
+      select: { id: true, topicId: true, status: true }
     });
 
     const logs = await prisma.exerciseLog.findMany({
@@ -1312,7 +1284,8 @@ export async function getTopicsWithPerformance() {
     // Compute metrics per topicId
     const topicMetrics = topics.map(t => {
       const topicExercises = exercises.filter(e => e.topicId === t.id);
-      const totalExercises = topicExercises.length;
+      const activeIds = new Set(topicExercises.filter(e => e.status === 'active').map(e => e.id));
+      const totalExercises = activeIds.size;
 
       const exerciseIds = topicExercises.map(e => e.id);
       const topicLogs = logs.filter(l => exerciseIds.includes(l.exerciseId));
@@ -1320,8 +1293,8 @@ export async function getTopicsWithPerformance() {
       const totalLogged = topicLogs.length;
       const correctCount = topicLogs.reduce((sum, l) => sum + logScore(l), 0);
 
-      // Uniquely completed exercises
-      const uniquelyCompleted = new Set(topicLogs.map(l => l.exerciseId)).size;
+      // Uniquely completed exercises of the pool that can still be covered
+      const uniquelyCompleted = new Set(topicLogs.filter(l => activeIds.has(l.exerciseId)).map(l => l.exerciseId)).size;
 
       const accuracy = totalLogged > 0 ? Math.round((correctCount / totalLogged) * 100) : null;
       const coverage = totalExercises > 0 ? Math.round((uniquelyCompleted / totalExercises) * 100) : 0;
@@ -1374,6 +1347,7 @@ export async function getTopicEvolutionData() {
 
     // Fetch all available exercises in the DB to count total pools for coverage calculation
     const allExercises = await prisma.exercise.findMany({
+      where: { status: 'active' },
       include: {
         topic: {
           include: { course: true }

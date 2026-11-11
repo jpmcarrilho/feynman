@@ -101,6 +101,10 @@ describe('getCourseArtifactsService', () => {
     expect(week.transcriptions).toHaveLength(1)
     expect(week.transcriptions[0].title).toBe('Transcripts Unit')
     expect(week.exercisesCount).toBe(1)
+    // Only imported, active questions are "ingested": generated, rejected and reported ones are not counted
+    expect(prisma.topic.findMany).toHaveBeenCalledWith(expect.objectContaining({
+      include: expect.objectContaining({ exercises: { where: { origin: 'imported', status: 'active' }, select: { id: true } } }),
+    }))
   })
 })
 
