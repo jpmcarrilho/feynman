@@ -159,6 +159,27 @@ describe('enrichExercise gate', () => {
     expect(generateObject).not.toHaveBeenCalled()
   })
 
+  it('enriches a question of an uploaded topic only with the explicit opt-in, grounded in the topic\'s own content', async () => {
+    const uploaded = { ...base, topic: { ...topic, sourceId: 'src-1', content: 'OWN TOPIC TEXT about double data entry.' } }
+    expect(await enrichExercise(uploaded)).toEqual({ status: 'skipped', calls: 0 })
+    expect(generateObject).not.toHaveBeenCalled()
+    mockModel([NOT_ANSWERABLE, CORRECT], REWRITE)
+    const outcome = await enrichExercise(uploaded, new CallBudget(8), { forUploadedContent: true })
+    expect(outcome.status).toBe('enriched')
+    const prompts = vi.mocked(generateObject).mock.calls.map((c) => (c[0] as { prompt: string }).prompt)
+    expect(prompts.find((p) => p.includes('Lecture Transcripts'))).toContain('OWN TOPIC TEXT')
+    // the course-wide lookups of session-start enrichment are not used
+    expect(prisma.topic.findMany).not.toHaveBeenCalled()
+  })
+
+  it('enrichBatch passes the opt-in through, and without it skips uploaded topics', async () => {
+    const uploaded = { ...base, topic: { ...topic, sourceId: 'src-1', content: 'OWN' } }
+    mockModel([CORRECT])
+    expect(await enrichBatch([uploaded])).toEqual([])
+    const outcomes = await enrichBatch([uploaded], { forUploadedContent: true, limit: 5 })
+    expect(outcomes.map((o) => o.status)).toEqual(['triaged-answerable'])
+  })
+
   it('caps the lecture context in the enrichment prompt at 30,000 characters', async () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'big', title: 'Big', content: 'x'.repeat(200_000) }] as never)
     mockModel([NOT_ANSWERABLE], base.questionText)

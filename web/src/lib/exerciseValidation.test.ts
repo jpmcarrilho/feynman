@@ -31,6 +31,7 @@ const dropdown: ValidatableExercise = {
 }
 
 const codes = (ex: ValidatableExercise) => validateExerciseStructure(ex).map((i) => i.code)
+const issueCodes = (ex: ValidatableExercise, opts?: { origin?: 'generated' | 'imported' }) => validateExerciseStructure(ex, opts).map((i) => i.code)
 const w = (base: ValidatableExercise, patch: Partial<ValidatableExercise>): ValidatableExercise => ({ ...base, ...patch })
 
 describe('validateExerciseStructure: well-formed questions pass', () => {
@@ -68,6 +69,21 @@ describe('validateExerciseStructure: common rules', () => {
 })
 
 describe('validateExerciseStructure: single choice', () => {
+  it('allows two options (true/false) only for imported questions, and never one or seven', () => {
+    const tf = w(single, { choices: ['True', 'False'], correctAnswer: 'True' })
+    expect(issueCodes(tf)).toContain('choice_count')
+    expect(issueCodes(tf, { origin: 'generated' })).toContain('choice_count')
+    expect(issueCodes(tf, { origin: 'imported' })).toEqual([])
+    expect(issueCodes(w(single, { choices: ['True'], correctAnswer: 'True' }), { origin: 'imported' })).toContain('choice_count')
+    expect(issueCodes(w(single, { choices: ['1', '2', '3', '4', '5', '7', '9'] }), { origin: 'imported' })).toContain('choice_count')
+    // the other rules still apply: the key must be one of the options, options must differ
+    expect(issueCodes(w(single, { choices: ['True', 'False'], correctAnswer: 'Maybe' }), { origin: 'imported' })).toContain('answer_not_in_choices')
+    expect(issueCodes(w(single, { choices: ['True', 'True'], correctAnswer: 'True' }), { origin: 'imported' })).toContain('duplicate_choices')
+  })
+  it('keeps the multiple choice and dropdown minimums for imported questions', () => {
+    expect(issueCodes(w(multi, { choices: ['2', '4'] }), { origin: 'imported' })).toContain('choice_count')
+    expect(issueCodes(w(dropdown, { choices: ['one half', 'one third'] }), { origin: 'imported' })).toContain('choice_count')
+  })
   it('needs 3 to 6 choices', () => {
     expect(codes(w(single, { choices: ['7', '9'] }))).toContain('choice_count')
     expect(codes(w(single, { choices: ['1', '2', '3', '4', '5', '7', '9'] }))).toContain('choice_count')

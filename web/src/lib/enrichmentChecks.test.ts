@@ -23,6 +23,16 @@ describe('isEnrichmentCandidate', () => {
   ])('skips %s', (_name, patch) => {
     expect(isEnrichmentCandidate({ ...base, ...patch })).toBe(false)
   })
+  it('lets uploaded topics through only with the explicit forUploadedContent opt-in, and nothing else', () => {
+    const uploaded = { ...base, topic: { sourceId: 'src-1' } }
+    expect(isEnrichmentCandidate(uploaded)).toBe(false)
+    expect(isEnrichmentCandidate(uploaded, {})).toBe(false)
+    expect(isEnrichmentCandidate(uploaded, { forUploadedContent: true })).toBe(true)
+    // the opt-in does not relax any other rule
+    expect(isEnrichmentCandidate({ ...uploaded, origin: 'generated' }, { forUploadedContent: true })).toBe(false)
+    expect(isEnrichmentCandidate({ ...uploaded, isGraded: false }, { forUploadedContent: true })).toBe(false)
+    expect(isEnrichmentCandidate({ ...uploaded, enrichedAt: new Date() }, { forUploadedContent: true })).toBe(false)
+  })
 })
 
 describe('correctOptionTexts', () => {

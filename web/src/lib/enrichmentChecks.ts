@@ -24,15 +24,16 @@ export interface EnrichableExercise {
 
 /**
  * Only imported, graded, active questions of built-in (non-uploaded) topics that were never enriched are enriched at
- * session start. Generated questions are written with their context already; uploaded topics are enriched in the
- * upload pipeline (T22).
+ * session start. Generated questions are written with their context already; uploaded topics are only enriched by the
+ * upload pipeline, which opts in with `forUploadedContent` (off by default there too, see importQuestions.ts).
  */
-export function isEnrichmentCandidate(ex: EnrichableExercise): boolean {
+export function isEnrichmentCandidate(ex: EnrichableExercise, opts: { forUploadedContent?: boolean } = {}): boolean {
   if (ex.enrichedAt) return false
   if (ex.origin === 'generated') return false
   if (ex.status != null && ex.status !== 'active') return false
   if (ex.isGraded === false) return false
-  if (ex.topic?.sourceId) return false
+  // Only the upload pipeline's explicit opt-in lets uploaded topics through; session-start enrichment never passes it.
+  if (ex.topic?.sourceId && !opts.forUploadedContent) return false
   return true
 }
 

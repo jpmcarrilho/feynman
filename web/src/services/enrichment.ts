@@ -31,6 +31,14 @@ import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextS
  *   the solver disagreed with the key, 17 not answerable; 3 rewrites kept, 14 discarded (5 unchanged, 7 still not
  *   answerable, 1 wrong answer, 1 invalid). Of the 3 kept, 1 was a plain addition of missing setup, 1 replaced the
  *   question's scenario with a different one found in the context, 1 added setup that hints at the answer.
+ * - Imported questions of an uploaded file (T22, `forUploadedContent`, context = the question's own topic text capped at
+ *   30,000 characters; 80 questions sampled from 143 imported from the edX exports of three JPAL102x weeks, real model,
+ *   scratch copy): two runs gave 121 to 127 calls (1.5 to 1.6 per question); 37 to 39 answerable and correct, 13 to 14
+ *   answerable but the solver disagreed with the key, 28 to 29 not answerable as written; 7 to 8 rewrites kept, 20 to 22
+ *   discarded (unchanged 8 to 11, still not answerable 5 to 10, answer leak 2 to 3, invalid or wrong answer 1 to 2). Of
+ *   the 8 kept in the last run, 1 only removed a "Quiz 3" header, 3 added setup tables or numbers that came from the same
+ *   file, and 4 described a figure or data the question points at in words taken from the context (unverifiable
+ *   against the real figure). The pipeline therefore leaves it off (`ENRICH_IMPORTED_QUESTIONS=1` turns it on).
  * Known blind spots of the gate: a rewrite can substitute a different scenario from the context, and it can hint at
  * the answer without repeating any option, so neither the leak check nor the solver rejects it.
  */
@@ -38,6 +46,15 @@ import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextS
 /** True only when the environment variable ENRICH_IN_BACKGROUND is exactly "1". Read at call time. */
 export function isBackgroundEnrichmentEnabled(): boolean {
   return process.env.ENRICH_IN_BACKGROUND === '1'
+}
+
+/** Options of the explicit upload-pipeline entry. Session start never passes them. */
+export interface EnrichOptions {
+  /**
+   * Allow questions of uploaded topics (`Topic.sourceId` set) and ground the rewrite in the question's own topic text
+   * (capped by the prompt builder) instead of preceding lectures of the course.
+   */
+  forUploadedContent?: boolean
 }
 
 /** Model calls started per session start. */
@@ -53,7 +70,7 @@ export interface EnrichableRow extends EnrichableExercise {
   correctAnswer: string
   explanation?: string | null
   originalQuestionText?: string | null
-  topic?: { id?: string; courseId: string; week: string | null; order: number; className?: string | null; sourceId?: string | null } | null
+  topic?: { id?: string; courseId: string; week: string | null; order: number; className?: string | null; sourceId?: string | null; content?: string | null } | null
 }
 
 export type EnrichmentOutcome =
@@ -124,8 +141,12 @@ function logOutcome(id: string, label: string) {
  * `originalQuestionText` is written once with the first text change and never overwritten; writes only apply to a row
  * whose `enrichedAt` is still null.
  */
-export async function enrichExercise(exercise: EnrichableRow, budget: CallBudget = new CallBudget(ENRICH_MAX_CALLS_PER_BATCH)): Promise<EnrichmentOutcome> {
-  if (!isEnrichmentCandidate(exercise) || !exercise.topic) return { status: 'skipped', calls: 0 }
+export async function enrichExercise(
+  exercise: EnrichableRow,
+  budget: CallBudget = new CallBudget(ENRICH_MAX_CALLS_PER_BATCH),
+  opts: EnrichOptions = {},
+): Promise<EnrichmentOutcome> {
+  if (!isEnrichmentCandidate(exercise, opts) || !exercise.topic) return { status: 'skipped', calls: 0 }
   if (!budget.take(1)) return { status: 'deferred', calls: 0 }
   let calls = 1
   const markDone = (data: Record<string, unknown> = {}) =>
@@ -152,7 +173,8 @@ export async function enrichExercise(exercise: EnrichableRow, budget: CallBudget
       return { status: 'enrichment-rejected', calls, reason }
     }
 
-    const contextText = await loadContext(exercise.topic, exercise.questionText)
+    const ownContent = exercise.topic.content
+    const contextText = opts.forUploadedContent && ownContent ? ownContent : await loadContext(exercise.topic, exercise.questionText)
     const course = await getCourseWithProfile(exercise.topic.courseId)
     const prompt = enrichExercisePrompt(course?.profile ?? LEGACY_VOICE_PROFILE, { contextText, exercise, choices, courseCode: course?.code })
     const { object } = await generateObject({ model: textModel(), schema: z.object({ enrichedQuestionText: z.string() }), prompt })
@@ -189,12 +211,12 @@ export async function enrichExercise(exercise: EnrichableRow, budget: CallBudget
  */
 export async function enrichBatch(
   exercises: EnrichableRow[],
-  opts: { limit?: number; concurrency?: number; maxCalls?: number } = {},
+  opts: { limit?: number; concurrency?: number; maxCalls?: number } & EnrichOptions = {},
 ): Promise<EnrichmentOutcome[]> {
   const limit = opts.limit ?? ENRICH_MAX_PER_SESSION_START
   const concurrency = opts.concurrency ?? ENRICH_CONCURRENCY
   const budget = new CallBudget(opts.maxCalls ?? ENRICH_MAX_CALLS_PER_BATCH)
-  const queue = exercises.filter((e) => isEnrichmentCandidate(e) && !inFlight.has(e.id)).slice(0, limit)
+  const queue = exercises.filter((e) => isEnrichmentCandidate(e, opts) && !inFlight.has(e.id)).slice(0, limit)
   queue.forEach((e) => inFlight.add(e.id))
   const outcomes: EnrichmentOutcome[] = new Array(queue.length)
   let next = 0
@@ -202,7 +224,7 @@ export async function enrichBatch(
     while (next < queue.length) {
       const i = next++
       try {
-        outcomes[i] = await enrichExercise(queue[i], budget)
+        outcomes[i] = await enrichExercise(queue[i], budget, opts)
       } finally {
         inFlight.delete(queue[i].id)
       }

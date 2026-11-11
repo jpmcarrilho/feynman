@@ -38,6 +38,14 @@ export const CHOICE_LIMITS = {
   dropdown: { min: 3, max: 5 },
 } as const
 
+/** Where a question comes from. Generated questions keep the strict choice counts; imported ones come from the student's own material. */
+export type ValidationOrigin = 'generated' | 'imported'
+export interface ValidationOptions {
+  origin?: ValidationOrigin
+}
+/** Single choice with a stated answer may have two options (true/false) when the question was imported. */
+export const IMPORTED_SINGLE_CHOICE_MIN = 2
+
 export const DROPDOWN_PLACEHOLDER = '[Dropdown 1]'
 
 // --- LaTeX ------------------------------------------------------------------------------------------------------
@@ -117,7 +125,7 @@ const PLAIN_NUMBER = /^[+-]?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i
 // --- validation -------------------------------------------------------------------------------------------------
 
 /** All structural problems of a question; an empty list means it is acceptable. */
-export function validateExerciseStructure(ex: ValidatableExercise): ValidationIssue[] {
+export function validateExerciseStructure(ex: ValidatableExercise, opts: ValidationOptions = {}): ValidationIssue[] {
   const issues: ValidationIssue[] = []
   const add = (code: string, message: string) => issues.push({ code, message })
 
@@ -154,7 +162,8 @@ export function validateExerciseStructure(ex: ValidatableExercise): ValidationIs
 
   switch (type) {
     case 'single_choice': {
-      const { min, max } = CHOICE_LIMITS.single_choice
+      const { max } = CHOICE_LIMITS.single_choice
+      const min = opts.origin === 'imported' ? IMPORTED_SINGLE_CHOICE_MIN : CHOICE_LIMITS.single_choice.min
       if (choices.length < min || choices.length > max) add('choice_count', `Single choice needs ${min}-${max} choices, has ${choices.length}.`)
       if (hasDuplicates(choices)) add('duplicate_choices', 'Two choices are the same.')
       const matches = choices.filter((c) => c.trim() === answer.trim())
