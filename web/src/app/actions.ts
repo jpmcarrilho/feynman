@@ -6,16 +6,15 @@ import { prisma } from '@/lib/db'
 import { createSessionSummary } from '@/services/summaryService'
 import { getCourseArtifactsService, generateWeekSummaryService } from '@/services/artifactsService'
 import { z } from 'zod'
-import fs from 'fs'
-import path from 'path'
 import { requireAuth } from '@/server/auth'
 import { buildVoiceContext } from '@/services/voiceContext'
 import { getCourseWithProfile, getProfileForTopic, getProfileForCourses } from '@/services/studyspaceService'
+import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
+import { generateExerciseForTopic } from '@/services/exerciseGenerator'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import {
   explainMistakePrompt,
   enrichExercisePrompt,
-  generateExercisePrompt,
   examDiagnosisPrompt,
   globalDiagnosisPrompt,
   plannerChatPrompt,
@@ -137,114 +136,28 @@ export async function getTopics() {
   })
 }
 
+/** Transcript text that precedes a lecture/class, by class name. Thin wrapper over getPrecedingTopicsContext. */
 export async function getPreviousLectureTranscripts(courseId: string, currentClassName: string): Promise<string | null> {
   await requireAuth()
   try {
-    const course = await prisma.course.findUnique({
-      where: { id: courseId }
-    });
-    if (!course) return null;
-
-    const courseCode = course.code;
-    const outlinePath = path.join(process.cwd(), '..', 'MIT_Learn_Courses', `${courseCode}_outline.json`);
-    
-    if (!fs.existsSync(outlinePath)) return null;
-
-    const outline = JSON.parse(fs.readFileSync(outlinePath, 'utf8'));
-
-    // Find the section and index of the current class
-    let targetSection: any = null;
-    let currentLinkIndex = -1;
-
-    for (const section of outline) {
-      const idx = section.links.findIndex((l: any) => l.text === currentClassName);
-      if (idx !== -1) {
-        targetSection = section;
-        currentLinkIndex = idx;
-        break;
-      }
-    }
-
-    if (!targetSection || currentLinkIndex === -1) return null;
-
-    // Search backwards for the first preceding class that contains a transcript in the DB
-    for (let i = currentLinkIndex - 1; i >= 0; i--) {
-      const precedingClassName = targetSection.links[i].text;
-      
-      // Fetch any Transcript topics under this class
-      const transcripts = await prisma.topic.findMany({
-        where: {
-          courseId,
-          className: precedingClassName,
-          resourceType: 'Transcript .txt'
-        }
-      });
-
-      if (transcripts.length > 0) {
-        const transcriptText = transcripts
-          .map(t => `Topic: ${t.title}\nTranscript:\n${t.content || ''}`)
-          .join('\n\n');
-        
-        if (transcriptText.trim().length > 50) {
-          return transcriptText;
-        }
-      }
-    }
+    const anchor = await prisma.topic.findFirst({
+      where: { courseId, className: currentClassName },
+      orderBy: { order: 'asc' },
+      select: { id: true, courseId: true, week: true, order: true, className: true },
+    })
+    if (!anchor) return null
+    // Walk back from the start of the class, so the class itself is not part of its own "preceding" context
+    return await getPrecedingTopicsContext(anchor)
   } catch (error) {
-    console.error("Error fetching previous lecture transcripts:", error);
+    console.error("Error fetching previous lecture transcripts:", error)
+    return null
   }
-  return null;
 }
 
+/** Context from the topics of the course that match the text (see searchTopics); the calibration module is left out. */
 export async function getGlobalCourseContext(courseId: string, text: string): Promise<string> {
   await requireAuth()
-  const academicKeywords = [
-    "ferraz", "finan", "olken", "jones", "acemoglu", "robinson", "johnson", "nichter", "larreguy", 
-    "hsieh", "chavez", "marshall", "trucco", "nunn", "wantchekon", "fujiwara", "duflo", "banerjee", 
-    "kremer", "miguel", "glewwe", "balsakhi", "gobifo", "deworming", "mita", "maisanta", "audits", 
-    "corruption", "weigh station", "checkpoints", "re-election", "property rights", "titling", 
-    "vote-buying", "turnout buying", "media", "social media", "reciprocity", "trust game", "jonesolken", 
-    "ajr", "dell", "maternal", "coercion", "intimidation", "clientelism"
-  ];
-
-  const matchedKeywords: string[] = [];
-  const lowercaseText = text.toLowerCase();
-  for (const keyword of academicKeywords) {
-    if (lowercaseText.includes(keyword)) {
-      matchedKeywords.push(keyword);
-    }
-  }
-
-  if (matchedKeywords.length === 0) return "";
-
-  // Query topics in the database that match these keywords in their title or content
-  const orConditions = matchedKeywords.flatMap(kw => [
-    { title: { contains: kw } },
-    { content: { contains: kw } }
-  ]);
-
-  const matchedTopics = await prisma.topic.findMany({
-    where: {
-      courseId,
-      OR: orConditions,
-      NOT: [
-        { week: { contains: "comprehensive_review" } },
-        { week: { contains: "comprehensive review" } }
-      ]
-    },
-    select: { title: true, content: true, week: true, resourceType: true },
-    take: 10
-  });
-
-  const formattedContext = matchedTopics.map(t => {
-    let contentText = t.content || '';
-    if (contentText.length > 50000) {
-      contentText = contentText.slice(0, 50000) + '... [TRUNCATED]';
-    }
-    return `[Source: ${t.week} - ${t.title} (${t.resourceType})]\n${contentText}`;
-  }).join('\n\n=========================================\n\n');
-
-  return formattedContext;
+  return getGlobalContext(courseId, text)
 }
 
 export async function getGlobalCourseContextForExercises(courseId: string, exercises: any[]): Promise<string> {
@@ -273,11 +186,11 @@ export async function enrichExerciseWithContext(exercise: any) {
     if (!topicData) return exercise;
 
     // 1. Fetch preceding lecture transcript context if it exists (highest local fidelity)
-    let contextText = await getPreviousLectureTranscripts(topicData.courseId, topicData.className);
+    let contextText = await getPrecedingTopicsContext(topicData);
 
-    // 2. If no preceding lecture transcript is found, fallback to global course-wide keyword search
+    // 2. If no preceding lecture transcript is found, fall back to a course-wide search over topic content
     if (!contextText) {
-      contextText = await getGlobalCourseContext(topicData.courseId, exercise.questionText);
+      contextText = await getGlobalContext(topicData.courseId, exercise.questionText);
     }
 
     // 3. Fallback to surrounding week topics
@@ -360,19 +273,22 @@ export async function createStudySession(
   let selected: any[] = []
   let missingCount = 0;
 
-  // Check if we are selecting from a comprehensive review topic
+  // Check if we are selecting from a calibration module (the profile's calibrationModule, e.g. a comprehensive review)
   let isComprehensiveReview = false;
   let comprehensiveCourseId: string | null = null;
   if (topicIds.length > 0) {
     const selectedTopicsData = await prisma.topic.findMany({
       where: { id: { in: topicIds } }
     });
-    isComprehensiveReview = selectedTopicsData.some(t => 
-      t.week?.toLowerCase().includes('comprehensive_review') || 
-      t.week?.toLowerCase().includes('comprehensive review')
-    );
-    if (isComprehensiveReview && selectedTopicsData.length > 0) {
-      comprehensiveCourseId = selectedTopicsData[0].courseId;
+    const { courses } = await getProfileForCourses(selectedTopicsData.map(t => t.courseId));
+    const calibrationByCourse = new Map(courses.map(c => [c.id, c.calibrationModule]));
+    const calibrationTopic = selectedTopicsData.find(t => {
+      const module = calibrationByCourse.get(t.courseId);
+      return !!module && t.week === module;
+    });
+    isComprehensiveReview = !!calibrationTopic;
+    if (calibrationTopic) {
+      comprehensiveCourseId = calibrationTopic.courseId;
     }
   }
 
@@ -843,240 +759,37 @@ export async function getAnalyticsData() {
   };
 }
 
-function shuffleArray<T>(array: T[]): T[] {
-  const shuffled = [...array];
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled;
-}
-
-function determineTargetQuestionType(week: string | null, existingCount: number): 'single_choice' | 'multiple_choice' | 'numeric' | 'dropdown' {
-  const isQuantitativeWeek = 
-    week?.toLowerCase().includes('week_06') || 
-    week?.toLowerCase().includes('week 6') || 
-    week?.toLowerCase().includes('week_09') || 
-    week?.toLowerCase().includes('week 9') || 
-    week?.toLowerCase().includes('week_03') || 
-    week?.toLowerCase().includes('week 3');
-
-  if (isQuantitativeWeek) {
-    // Quantitative weeks benefit heavily from numeric answers and multi-select formula proofs
-    const quantTypes: Array<'numeric' | 'multiple_choice' | 'single_choice' | 'dropdown'> = [
-      'numeric',
-      'multiple_choice',
-      'single_choice',
-      'numeric',
-      'multiple_choice',
-      'dropdown'
-    ];
-    return quantTypes[existingCount % quantTypes.length];
-  } else {
-    // Qualitative/operational weeks should completely avoid numeric, relying on scenario case-studies and fill-ins
-    const qualTypes: Array<'single_choice' | 'dropdown' | 'multiple_choice'> = [
-      'single_choice',
-      'dropdown',
-      'single_choice',
-      'multiple_choice',
-      'dropdown'
-    ];
-    return qualTypes[existingCount % qualTypes.length];
-  }
-}
-
-async function fetchRigorExamples(courseId: string): Promise<string> {
-  // Find the Comprehensive Review topic under this course to get rigor style standards
-  const compReviewTopics = await prisma.topic.findMany({
-    where: {
-      courseId,
-      OR: [
-        { week: { contains: "comprehensive_review" } },
-        { week: { contains: "comprehensive review" } }
-      ]
-    },
-    select: { id: true }
-  });
-
-  const compReviewTopicIds = compReviewTopics.map(t => t.id);
-  
-  let rigorExercises: any[] = [];
-  if (compReviewTopicIds.length > 0) {
-    rigorExercises = await prisma.exercise.findMany({
-      where: { topicId: { in: compReviewTopicIds } },
-      take: 3
-    });
-  }
-
-  return rigorExercises.map(ex => {
-    return `Type: ${ex.exerciseType}\nQuestion: ${ex.questionText}\nChoices: ${ex.choices}\nCorrect Answer: ${ex.correctAnswer}`;
-  }).join('\n\n');
-}
-
-async function fetchLocalStyleExamples(topicData: any, topicIds: string[], existingIds: string[]): Promise<any[]> {
-  // Fetch exercises from the same week in the database (including generated ones since user allowed them)
-  let exercises = await prisma.exercise.findMany({
-    where: { 
-      topic: { week: topicData.week, courseId: topicData.courseId }, 
-      id: { notIn: existingIds }
-    },
-    take: 5,
-    include: { topic: true }
-  });
-
-  // Fallback to fetching from all selected topicIds if we don't have enough in this week
-  if (exercises.length < 3) {
-    const fallbackExercises = await prisma.exercise.findMany({
-      where: { 
-        topicId: { in: topicIds }, 
-        id: { notIn: existingIds }
-      },
-      take: 5 - exercises.length,
-      include: { topic: true }
-    });
-    exercises = [...exercises, ...fallbackExercises];
-  }
-
-  return exercises;
-}
-
-async function compileGroundingContext(topicData: any, bucketTopics: any[], localStyleExercises: any[]): Promise<string> {
-  let bucketContext = bucketTopics.map(t => {
-    let text = t.content || '';
-    if (text.length > 100000) text = text.substring(0, 100000) + '...';
-    return `Unit/Topic: ${t.title}\nContent:\n${text}`;
-  }).join('\n\n');
-
-  // For comprehensive reviews, fetch global course context matching papers/keywords in style examples
-  const isCompReview = 
-    topicData.week?.toLowerCase().includes('comprehensive_review') || 
-    topicData.week?.toLowerCase().includes('comprehensive review');
-
-  if (isCompReview) {
-    const globalContext = await getGlobalCourseContextForExercises(topicData.courseId, localStyleExercises);
-    if (globalContext) {
-      bucketContext = `${bucketContext}\n\n=========================================\n\nADDITIONAL GROUNDING CONTEXT FROM PRECEDING LECTURES/SLIDES:\n\n${globalContext}`;
-    }
-  }
-
-  return bucketContext;
-}
-
 export async function generateNextExercise(sessionId: string, topicIds: string[], existingExerciseIds: string[], missingCount: number = 1) {
   await requireAuth()
   if (topicIds.length === 0) return null;
 
   try {
-    // 1. Find current representation of selected topics in the session to ensure proportional balance
+    // Find current representation of selected topics in the session to keep the questions balanced
     const existingExercisesInSession = await prisma.exercise.findMany({
       where: { id: { in: existingExerciseIds } },
-      select: { topicId: true, questionText: true }
+      select: { topicId: true }
     });
 
     const representedTopicIds = new Set(existingExercisesInSession.map(ex => ex.topicId));
     const uncoveredTopicIds = topicIds.filter(id => !representedTopicIds.has(id));
 
-    // If all selected topics are already represented, fallback to the full list of topicIds
+    // If all selected topics are already represented, fall back to the full list of topicIds
     const targetPool = uncoveredTopicIds.length > 0 ? uncoveredTopicIds : topicIds;
 
-    // Shuffle targetPool to randomize starting order and eliminate alphabetical or week-sorting bias in selection
+    // Shuffle the pool to remove alphabetical or ordering bias in selection
     const shuffledTargetPool = [...targetPool];
     for (let i = shuffledTargetPool.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [shuffledTargetPool[i], shuffledTargetPool[j]] = [shuffledTargetPool[j], shuffledTargetPool[i]];
     }
 
-    // Identify primaryTopicId first
-    const primaryTopicId = shuffledTargetPool[0];
-    const topicData = await prisma.topic.findUnique({ where: { id: primaryTopicId } });
-    if (!topicData) return null;
-
-    // Fetch local style examples belonging to this target topic's week (can use previously generated ones)
-    const existingExercises = await fetchLocalStyleExamples(topicData, topicIds, existingExerciseIds);
-    const existingExercisesContext = existingExercises.map(ex => {
-      return `Type: ${ex.exerciseType}\nQuestion: ${ex.questionText}\nChoices: ${ex.choices}\nCorrect Answer: ${ex.correctAnswer}`;
-    }).join('\n\n');
-
-    // 2. Determine target question type adaptively based on the week signature
-    const targetType = determineTargetQuestionType(topicData.week, existingExerciseIds.length);
-
-    // 3. To provide more context from the same week to enhance the question, we group topics of the same week
-    const sameWeekTopics = await prisma.topic.findMany({
-      where: { 
-        courseId: topicData.courseId,
-        week: topicData.week
-      }
+    const newEx = await generateExerciseForTopic({
+      primaryTopicId: shuffledTargetPool[0],
+      poolTopicIds: targetPool,
+      existingExerciseIds,
+      styleTopicIds: topicIds,
     });
-    const sameWeekTopicIdSet = new Set(sameWeekTopics.map(t => t.id));
-    
-    // We filter targetPool for topics from the same week to form our grounding bucket
-    const bucketTopicIds = targetPool.filter(id => sameWeekTopicIdSet.has(id));
-    
-    // If no same-week topics are in targetPool (unlikely), default to just the primary topic
-    if (bucketTopicIds.length === 0) {
-      bucketTopicIds.push(primaryTopicId);
-    }
-
-    const bucketTopics = await prisma.topic.findMany({
-      where: { id: { in: bucketTopicIds } }
-    });
-
-    // 4. Compile core topic bucket context & global course-wide context
-    const bucketContext = await compileGroundingContext(topicData, bucketTopics, existingExercises);
-
-    // 5. Fetch Comprehensive Review style standards for difficulty/rigor calibration
-    const rigorExercisesContext = await fetchRigorExamples(topicData.courseId);
-
-    // 6. Format existing questions in the active session for Gemini's deduplication context
-    const alreadyAskedQuestionsText = existingExercisesInSession
-      .map((ex, idx) => `Question ${idx + 1}: ${ex.questionText}`)
-      .join('\n\n');
-
-    const course = await getCourseWithProfile(topicData.courseId);
-    const profile = course?.profile ?? LEGACY_VOICE_PROFILE;
-
-    const { object } = await generateObject({
-      model: textModel(),
-      prompt: generateExercisePrompt(profile, {
-        topic: { title: topicData.title, week: topicData.week, isQuantitative: topicData.isQuantitative },
-        courseCode: course?.code,
-        bucketContext,
-        rigorExamples: rigorExercisesContext,
-        styleExamples: existingExercisesContext,
-        alreadyAsked: alreadyAskedQuestionsText,
-        targetType,
-      }),
-      schema: z.object({
-        newExercise: z.object({
-          questionText: z.string(),
-          exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
-          choices: z.array(z.string()),
-          correctAnswer: z.string(),
-          explanation: z.string()
-        })
-      })
-    });
-
-    const genEx = object.newExercise;
-
-    // Explicitly randomize choices to eliminate LLM position bias
-    let finalChoices = genEx.choices;
-    if (genEx.exerciseType === 'single_choice' || genEx.exerciseType === 'multiple_choice' || genEx.exerciseType === 'dropdown') {
-      finalChoices = shuffleArray(genEx.choices);
-    }
-
-    const newEx = await prisma.exercise.create({
-      data: {
-        id: `gen-${crypto.randomUUID()}`,
-        topicId: primaryTopicId,
-        questionText: genEx.questionText,
-        exerciseType: genEx.exerciseType,
-        choices: JSON.stringify(finalChoices),
-        correctAnswer: genEx.correctAnswer,
-        explanation: genEx.explanation
-      },
-      include: { topic: true }
-    });
+    if (!newEx) return null;
 
     // Update session
     const session = await prisma.studySession.findUnique({ where: { id: sessionId } });

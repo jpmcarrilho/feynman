@@ -2,6 +2,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
+import { defaultProfile } from '@/lib/studyspace/profile'
 
 // Auth: requireAuth always resolves in these tests
 vi.mock('@/server/auth', () => ({
@@ -26,6 +27,7 @@ vi.mock('@/lib/db', () => ({
     },
     topic: {
       findUnique: vi.fn(),
+      findFirst: vi.fn(),
       findMany: vi.fn(),
     },
     exercise: {
@@ -55,22 +57,6 @@ vi.mock('@/lib/db', () => ({
       deleteMany: vi.fn(),
     },
   },
-}))
-
-// Mock fs to simulate outlines on disk
-vi.mock('fs', () => ({
-  default: {
-    existsSync: vi.fn(() => true),
-    readFileSync: vi.fn(() => JSON.stringify([
-      {
-        sectionTitle: 'Section 1',
-        links: [
-          { text: 'Previous Lecture Topic' },
-          { text: 'Current Exercise Topic' }
-        ]
-      }
-    ])),
-  }
 }))
 
 let randomSpy: any;
@@ -213,30 +199,30 @@ describe('needsContextEnrichment helper', () => {
 })
 
 describe('getPreviousLectureTranscripts action', () => {
-  it('searches backwards in outline and returns preceding transcript text', async () => {
-    vi.mocked(prisma.course.findUnique).mockResolvedValueOnce({ code: 'JPAL102x' } as any)
+  it('walks back from the first topic of the class (by order) and returns the preceding transcript text', async () => {
+    vi.mocked(prisma.topic.findFirst).mockResolvedValueOnce({ id: 't-cur', courseId: 'course-1', week: 'W1', order: 50, className: 'Current Exercise Topic' } as any)
     vi.mocked(prisma.topic.findMany).mockResolvedValueOnce([
-      { id: 't-prev', title: 'Prev Video Title', content: 'Here is the transcript for context.' }
+      { id: 't-prev', title: 'Prev Video Title', content: 'Here is the transcript for context.', week: 'W1', className: 'Previous Lecture Topic', order: 40 }
     ] as any)
 
     const result = await getPreviousLectureTranscripts('course-1', 'Current Exercise Topic')
 
-    expect(prisma.course.findUnique).toHaveBeenCalledWith({ where: { id: 'course-1' } })
-    expect(prisma.topic.findMany).toHaveBeenCalledWith({
-      where: {
-        courseId: 'course-1',
-        className: 'Previous Lecture Topic',
-        resourceType: 'Transcript .txt'
-      }
-    })
+    expect(prisma.topic.findFirst).toHaveBeenCalledWith(expect.objectContaining({
+      where: { courseId: 'course-1', className: 'Current Exercise Topic' },
+      orderBy: { order: 'asc' },
+    }))
+    expect(result).toBe('Topic: Prev Video Title\nTranscript:\nHere is the transcript for context.')
+  })
 
-    expect(result).toContain('Here is the transcript for context.')
+  it('returns null when the class is unknown', async () => {
+    vi.mocked(prisma.topic.findFirst).mockResolvedValueOnce(null)
+    expect(await getPreviousLectureTranscripts('course-1', 'Nope')).toBeNull()
   })
 })
 
 describe('enrichExerciseWithContext action', () => {
   it('calls generateObject and updates exercise with enriched marker', async () => {
-    const mockTopic = { id: 'topic-1', title: 'Current Topic', courseId: 'course-1', week: 'week-1', className: 'Current Exercise Topic' }
+    const mockTopic = { id: 'topic-1', title: 'Current Topic', courseId: 'course-1', week: 'week-1', className: 'Current Exercise Topic', order: 5 }
     const mockExercise = {
       id: 'ex-1',
       topicId: 'topic-1',
@@ -244,10 +230,10 @@ describe('enrichExerciseWithContext action', () => {
       topic: mockTopic
     }
 
-    vi.mocked(prisma.course.findUnique).mockResolvedValueOnce({ code: 'JPAL102x' } as any)
     vi.mocked(prisma.topic.findMany).mockResolvedValueOnce([
-      { id: 't-prev', title: 'Prev Video Title', content: 'Here is the transcript for context.' }
+      { id: 't-prev', title: 'Prev Video Title', content: 'Here is the transcript for context.', week: 'week-1', className: 'Previous Lecture Topic', order: 1 }
     ] as any)
+    vi.mocked(prisma.course.findUnique).mockResolvedValueOnce({ id: 'course-1', code: 'JPAL102x', title: 'JPAL', profile: null } as any)
 
     const mockEnrichedText = 'Which step is missing in the data entry double entry verification process?'
     vi.mocked(generateObject).mockResolvedValueOnce({
@@ -257,6 +243,7 @@ describe('enrichExerciseWithContext action', () => {
     const result = await enrichExerciseWithContext(mockExercise)
 
     expect(generateObject).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(generateObject).mock.calls[0][0].prompt).toContain('Here is the transcript for context.')
     expect(prisma.exercise.update).toHaveBeenCalledWith({
       where: { id: 'ex-1' },
       data: {
@@ -279,7 +266,7 @@ describe('enrichExerciseWithContext action', () => {
       topic: { id: 'topic-1', courseId: 'course-1', className: 'Current Exercise Topic' }
     }
 
-    vi.mocked(prisma.course.findUnique).mockRejectedValueOnce(new Error('DB Error'))
+    vi.mocked(prisma.topic.findMany).mockRejectedValueOnce(new Error('DB Error'))
 
     const result = await enrichExerciseWithContext(mockExercise)
     expect(result).toEqual(mockExercise)
@@ -407,6 +394,38 @@ describe('payload trimming', () => {
     expect(clientArgs).not.toHaveProperty('select.topic.select.content')
     expect(clientArgs).toHaveProperty('select.questionText', true)
     expect(res.exercises).toEqual([{ id: 'e1', topic: { id: 't1' } }])
+  })
+})
+
+describe('createStudySession calibration module', () => {
+  const profileJson = (calibrationModule: string | null) => JSON.stringify({ ...defaultProfile({ title: 'C' }), calibrationModule })
+
+  it('draws candidates from the whole course when a selected topic is in the profile calibrationModule', async () => {
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'cal', courseId: 'c1', week: 'Final review', course: { code: 'x' } }] as never)
+    vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'c1', code: 'x', title: 'C', profile: profileJson('Final review') } as never)
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
+
+    await createStudySession(['cal'], 5, 'study', null, 50)
+
+    expect(prisma.exercise.findMany).toHaveBeenCalledWith({
+      where: { topic: { courseId: 'c1' }, isGraded: true, status: 'active' },
+      include: { topic: true },
+    })
+  })
+
+  it('keeps the selected topics when the profile has no calibrationModule, even for a week named like a review', async () => {
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1', courseId: 'c1', week: 'Week_13_Comprehensive_Review', course: { code: 'x' } }] as never)
+    vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'c1', code: 'x', title: 'C', profile: profileJson(null) } as never)
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
+
+    await createStudySession(['t1'], 5, 'study', null, 50)
+
+    expect(prisma.exercise.findMany).toHaveBeenCalledWith({
+      where: { topicId: { in: ['t1'] }, isGraded: true, status: 'active' },
+      include: { topic: true },
+    })
   })
 })
 
