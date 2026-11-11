@@ -48,7 +48,7 @@ describe('getCourseArtifacts action', () => {
   it('correctly maps courses and topics into weeks structure', async () => {
     // 1. Mock Database response
     const mockCourses = [
-      { id: 'course-1', code: '14.750x', title: 'Political Economy', description: null }
+      { id: 'course-1', code: '14.750x', title: 'Political Economy', description: null, profile: null, profileSuggestion: null, goal: null, starterStatus: null, createdAt: new Date(0) }
     ]
     const mockTopics = [
       {
@@ -111,7 +111,7 @@ describe('generateWeekSummaryAction action', () => {
 
   it('generates a new Feynman study guide summary when it does not exist', async () => {
     // 1. Mock DB and fs
-    const mockCourse = { id: 'course-1', code: '14.750x', title: 'Political Economy', description: null }
+    const mockCourse = { id: 'course-1', code: '14.750x', title: 'Political Economy', description: null, profile: null, profileSuggestion: null, goal: null, starterStatus: null, createdAt: new Date(0) }
     const mockTopics = [
       { id: 'topic-1', courseId: 'course-1', week: 'Week_01', className: 'Intro', title: 'Concept', content: 'Very long content '.repeat(2000) } // >15k characters to test truncation
     ]
@@ -140,7 +140,7 @@ describe('generateWeekSummaryAction action', () => {
   })
 
   it('serves existing Feynman study guide if it exists on disk', async () => {
-    const mockCourse = { id: 'course-1', code: '14.750x', title: 'Political Economy', description: null }
+    const mockCourse = { id: 'course-1', code: '14.750x', title: 'Political Economy', description: null, profile: null, profileSuggestion: null, goal: null, starterStatus: null, createdAt: new Date(0) }
     vi.mocked(prisma.course.findUnique).mockResolvedValueOnce(mockCourse)
     
     // Summary file exists
