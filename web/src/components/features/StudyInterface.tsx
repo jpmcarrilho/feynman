@@ -19,6 +19,7 @@ import {
   getVoiceContextForExercise,
   generateNextExercise,
   deleteStudySession,
+  cancelStudySession,
   generateSessionSummary,
   generateExamDiagnosis,
   generateStructuredStudyPlan,
@@ -95,6 +96,8 @@ const safeRemoveItem = (key: string) => {
     sessionStorage.removeItem(key);
   } catch (e) {}
 };
+
+const EXAM_DIAGNOSIS_FILE = 'inline:exam-diagnosis.md'
 
 export function StudyInterface() {
   const [topics, setTopics] = useState<any[]>([])
@@ -545,7 +548,8 @@ Adhere strictly to these teaching guidelines:
   }
 
   useEffect(() => {
-    if (activeFile && !activeFile.toLowerCase().endsWith('.pdf')) {
+    // Inline documents (for example the exam diagnosis) carry their own content and are never fetched
+    if (activeFile && !activeFile.startsWith('inline:') && !activeFile.toLowerCase().endsWith('.pdf')) {
       setFileLoading(true);
       fetch(`/api/file?path=${encodeURIComponent(activeFile)}`)
         .then(res => res.text())
@@ -767,6 +771,9 @@ Adhere strictly to these teaching guidelines:
       const reportMarkdown = await generateExamDiagnosis(session.id);
       if (reportMarkdown) {
         // Automatically open inside Visualizer
+        // The ".md" suffix makes the visualizer render it as markdown; "inline:" keeps the fetch effect away
+        setActiveFile(EXAM_DIAGNOSIS_FILE);
+        setFileLoading(false);
         setFileContent(reportMarkdown);
         setActiveFileHighlight(null);
         setActiveFilePage(null);
@@ -838,6 +845,29 @@ Adhere strictly to these teaching guidelines:
       return () => clearInterval(interval);
     }
   }, [session, timeLeft]);
+
+  const handleCancelExam = async () => {
+    if (!session) return
+    const ok = window.confirm('Cancel this exam? Your answers will be discarded and no score will be recorded.')
+    if (!ok) return
+    setIsLoading(true)
+    try {
+      await cancelStudySession(session.id)
+      setHistories(await getSessionHistory())
+    } catch (e) {
+      console.error('Failed to cancel exam:', e)
+    } finally {
+      setIsLoading(false)
+    }
+    setSession(null)
+    setExercises([])
+    setCurrentIndex(0)
+    liveAPI.setMessages([])
+    setDraftAnswers({})
+    setFlaggedIds([])
+    setTimeLeft(null)
+    safeRemoveItem('dedp_active_session')
+  }
 
   const handleFinishSession = async () => {
     if (session) {
@@ -1226,7 +1256,7 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
                 <Button
                   variant="ghost"
                   className="text-lecture-red hover:text-lecture-red hover:bg-lecture-red/10 border border-transparent hover:border-lecture-red/20 font-medium h-9 px-3 text-xs rounded-lg"
-                  onClick={handleFinishSession}
+                  onClick={session.mode === 'exam' ? handleCancelExam : handleFinishSession}
                 >
                   {session.mode === 'exam' ? 'Cancel Exam' : 'End Session'}
                 </Button>
@@ -1553,6 +1583,7 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   {activePlan.sessions.map((s: any) => {
                     const isCompleted = s.status === 'completed';
+                    const isCancelled = s.status === 'cancelled';
                     const hasStarted = s.logs.length > 0;
                     
                     return (
@@ -1573,6 +1604,10 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
                               <span className="text-[10px] font-bold text-green-600 flex items-center gap-1">
                                 <CheckCircle className="w-3.5 h-3.5 text-green-500" /> Completed
                               </span>
+                            ) : isCancelled ? (
+                              <span className="text-[10px] font-semibold text-muted-foreground">
+                                Cancelled
+                              </span>
                             ) : hasStarted ? (
                               <span className="text-[10px] font-bold text-blue-600 animate-pulse">
                                 In Progress ({s.logs.length} logged)
@@ -1592,7 +1627,7 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
                             {s.timeLimit ? `${s.timeLimit / 60} min timer` : 'Self-paced'} • {s.sourcingMix}% AI
                           </span>
                           
-                          {!isCompleted && (
+                          {!isCompleted && !isCancelled && (
                             <Button 
                               onClick={async () => {
                                 setIsLoading(true);

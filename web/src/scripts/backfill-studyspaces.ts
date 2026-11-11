@@ -308,9 +308,12 @@ async function stepGraded() {
   rows.sort((a, b) => a.rules.join().localeCompare(b.rules.join()) || a.title.localeCompare(b.title) || a.id.localeCompare(b.id))
   const clean = (s: string) => s.replace(/[\t\r\n]+/g, ' ').trim()
   const tsv = ['id\ttopicTitle\tquestion160\trules', ...rows.map((r) => [r.id, clean(r.title), clean(r.text).slice(0, 160), r.rules.join(',')].join('\t'))].join('\n') + '\n'
-  fs.mkdirSync(path.dirname(REVIEW_FILE), { recursive: true })
-  fs.writeFileSync(REVIEW_FILE, tsv)
-  log(`   candidates: ${rows.length} (written to ${REVIEW_FILE})`)
+  // With --apply-graded the review file is the approved input and must not be regenerated.
+  if (!APPLY_GRADED) {
+    fs.mkdirSync(path.dirname(REVIEW_FILE), { recursive: true })
+    fs.writeFileSync(REVIEW_FILE, tsv)
+  }
+  log(`   candidates: ${rows.length}${APPLY_GRADED ? ` (review file ${REVIEW_FILE} read, not rewritten)` : ` (written to ${REVIEW_FILE})`}`)
   for (const r of GRADED_RULES) log(`     rule ${r}: ${perRule[r]}`)
   log(`   exercises excluded by today's createStudySession text filter: ${excludedByOldFilter}`)
   if (APPLY_GRADED) {

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession, saveChatLog } from './actions'
+import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 
@@ -35,8 +35,14 @@ vi.mock('@/lib/db', () => ({
     },
     studyPlan: {
       findMany: vi.fn(),
+      delete: vi.fn(),
     },
+    sessionExercise: {
+      deleteMany: vi.fn(),
+    },
+    $transaction: vi.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
     studySession: {
+      deleteMany: vi.fn(),
       findMany: vi.fn(),
       create: vi.fn(),
       findUnique: vi.fn(),
@@ -44,6 +50,7 @@ vi.mock('@/lib/db', () => ({
       delete: vi.fn(),
     },
     exerciseLog: {
+      create: vi.fn(),
       findMany: vi.fn(),
       deleteMany: vi.fn(),
     },
@@ -234,10 +241,16 @@ describe('enrichExerciseWithContext action', () => {
     expect(generateObject).toHaveBeenCalledTimes(1)
     expect(prisma.exercise.update).toHaveBeenCalledWith({
       where: { id: 'ex-1' },
-      data: { questionText: `<!-- enriched -->\n${mockEnrichedText}` }
+      data: {
+        questionText: mockEnrichedText,
+        enrichedAt: expect.any(Date),
+        originalQuestionText: mockExercise.questionText
+      }
     })
 
-    expect(result.questionText).toBe(`<!-- enriched -->\n${mockEnrichedText}`)
+    // No in-band marker: enrichment is tracked by the enrichedAt column
+    expect(result.questionText).toBe(mockEnrichedText)
+    expect(result.originalQuestionText).toBe(mockExercise.questionText)
   })
 
   it('gracefully falls back on errors', async () => {
@@ -263,6 +276,9 @@ describe('deleteStudySession action', () => {
     const result = await deleteStudySession('session-1')
 
     expect(prisma.exerciseLog.deleteMany).toHaveBeenCalledWith({
+      where: { sessionId: 'session-1' }
+    })
+    expect(prisma.sessionExercise.deleteMany).toHaveBeenCalledWith({
       where: { sessionId: 'session-1' }
     })
     expect(prisma.studySession.delete).toHaveBeenCalledWith({
@@ -387,5 +403,74 @@ describe('saveChatLog', () => {
     ])
     const data = (vi.mocked(prisma.studySession.update).mock.calls[0][0] as any).data
     expect(JSON.parse(data.chatLog).map((m: any) => m.id)).toEqual(['2', '3', '4'])
+  })
+})
+
+describe('deleteStudyPlan', () => {
+  it('deletes logs, items, sessions and then the plan inside one transaction', async () => {
+    vi.clearAllMocks()
+    const order: string[] = []
+    vi.mocked(prisma.exerciseLog.deleteMany).mockImplementationOnce((() => { order.push('logs'); return Promise.resolve({ count: 1 }) }) as never)
+    vi.mocked(prisma.sessionExercise.deleteMany).mockImplementationOnce((() => { order.push('items'); return Promise.resolve({ count: 1 }) }) as never)
+    vi.mocked(prisma.studySession.deleteMany).mockImplementationOnce((() => { order.push('sessions'); return Promise.resolve({ count: 1 }) }) as never)
+    vi.mocked(prisma.studyPlan.delete).mockImplementationOnce((() => { order.push('plan'); return Promise.resolve({ id: 'p1' }) }) as never)
+
+    expect(await deleteStudyPlan('p1')).toBe(true)
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1)
+    expect(vi.mocked(prisma.$transaction).mock.calls[0][0]).toHaveLength(4)
+    expect(order).toEqual(['logs', 'items', 'sessions', 'plan'])
+    expect(prisma.exerciseLog.deleteMany).toHaveBeenCalledWith({ where: { session: { studyPlanId: 'p1' } } })
+    expect(prisma.studySession.deleteMany).toHaveBeenCalledWith({ where: { studyPlanId: 'p1' } })
+    expect(prisma.studyPlan.delete).toHaveBeenCalledWith({ where: { id: 'p1' } })
+  })
+})
+
+describe('createStudySession graded filter', () => {
+  it('queries only graded, active exercises', async () => {
+    vi.clearAllMocks()
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.create).mockResolvedValue({ id: 's1' } as never)
+
+    await createStudySession(['t1'], 1, 'study', null, 0)
+    await createStudySession([], 1, 'study', null, 0)
+
+    const first = vi.mocked(prisma.exercise.findMany).mock.calls[0][0] as { where: unknown }
+    const second = vi.mocked(prisma.exercise.findMany).mock.calls[1][0] as { where?: unknown; data?: Record<string, unknown> }
+    expect(first.where).toMatchObject({ topicId: { in: ['t1'] }, isGraded: true, status: 'active' })
+    expect(second.where).toMatchObject({ isGraded: true, status: 'active' })
+  })
+})
+
+describe('logAnswer', () => {
+  it('swallows a unique violation (P2002) so the first attempt wins', async () => {
+    vi.mocked(prisma.exerciseLog.create).mockRejectedValueOnce(Object.assign(new Error('Unique constraint'), { code: 'P2002' }))
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await expect(logAnswer('s1', 'e1', true, 30, 'A')).resolves.toBeUndefined()
+    expect(err).not.toHaveBeenCalled()
+    err.mockRestore()
+  })
+
+  it('still reports other errors (logged, not thrown)', async () => {
+    vi.mocked(prisma.exerciseLog.create).mockRejectedValueOnce(Object.assign(new Error('FK failed'), { code: 'P2003' }))
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await logAnswer('s1', 'e1', true, 30, 'A')
+    expect(err).toHaveBeenCalled()
+    err.mockRestore()
+  })
+})
+
+describe('cancelStudySession', () => {
+  it('marks the session cancelled with an end time and writes no logs', async () => {
+    vi.clearAllMocks()
+    vi.mocked(prisma.studySession.update).mockResolvedValueOnce({ id: 's1', status: 'cancelled' } as never)
+    await cancelStudySession('s1')
+    const arg = vi.mocked(prisma.studySession.update).mock.calls[0][0] as { where: unknown; data: Record<string, unknown> }
+    expect(arg.where).toEqual({ id: 's1' })
+    expect(arg.data.status).toBe('cancelled')
+    expect(arg.data.endTime).toBeInstanceOf(Date)
+    expect(prisma.exerciseLog.create).not.toHaveBeenCalled()
   })
 })

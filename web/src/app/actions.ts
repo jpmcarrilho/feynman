@@ -360,17 +360,23 @@ JSON Schema:
     });
 
     if (object?.enrichedQuestionText) {
-      const enrichedText = `<!-- enriched -->\n${object.enrichedQuestionText}`;
-      
-      // Persist in DB so we never have to do this again for this exercise
+      const enrichedText = object.enrichedQuestionText;
+      const enrichedAt = new Date();
+      // Keep the pre-enrichment wording the first time an exercise is enriched
+      const originalQuestionText = exercise.originalQuestionText ?? exercise.questionText;
+
+      // Persist in DB so we never have to do this again for this exercise.
+      // enrichedAt marks it as done; no in-band marker is written into the text.
       await prisma.exercise.update({
         where: { id: exercise.id },
-        data: { questionText: enrichedText }
+        data: { questionText: enrichedText, enrichedAt, originalQuestionText }
       });
 
       return {
         ...exercise,
-        questionText: enrichedText
+        questionText: enrichedText,
+        enrichedAt,
+        originalQuestionText
       };
     }
   } catch (error) {
@@ -421,38 +427,23 @@ export async function createStudySession(
       // For a comprehensive review session, automatically expand the candidate pool 
       // to include ALL exercises from the entire course to prevent clustered, repetitive questions!
       candidateExercises = await prisma.exercise.findMany({
-        where: { topic: { courseId: comprehensiveCourseId } },
+        where: { topic: { courseId: comprehensiveCourseId }, isGraded: true, status: 'active' },
         include: { topic: true }
       });
     } else {
       candidateExercises = await prisma.exercise.findMany({
-        where: { topicId: { in: topicIds } },
+        where: { topicId: { in: topicIds }, isGraded: true, status: 'active' },
         include: { topic: true }
       });
     }
   } else {
     candidateExercises = await prisma.exercise.findMany({
+      where: { isGraded: true, status: 'active' },
       include: { topic: true }
     });
   }
 
-  // Filter out any surveys, feedback forms, or ungraded discussion/demographic questions
-  candidateExercises = candidateExercises.filter(ex => {
-    const qText = ex.questionText.toLowerCase();
-    const tTitle = (ex.topic?.title || "").toLowerCase();
-    const isSurvey = 
-      qText.includes("survey") || 
-      qText.includes("ungraded") || 
-      qText.includes("feedback") || 
-      qText.includes("time spent") || 
-      qText.includes("hours per week") || 
-      qText.includes("how many hours did you spend") ||
-      tTitle.includes("survey") || 
-      tTitle.includes("ungraded") || 
-      tTitle.includes("required participation") ||
-      tTitle.includes("feedback");
-    return !isSurvey;
-  });
+  // Surveys, feedback forms and other ungraded items are excluded by `isGraded: true` in the queries above.
 
   if (candidateExercises.length > 0) {
     // 1. Fetch user accuracy and coverage stats per exercise to group candidates individually
@@ -612,6 +603,8 @@ export async function logAnswer(sessionId: string, exerciseId: string, isCorrect
       }
     })
   } catch (error: any) {
+    // First attempt wins: a second log for the same (sessionId, exerciseId) violates the unique index
+    if (error?.code === 'P2002') return
     console.error("Failed to log answer (likely stale session):", error.message)
   }
 }
@@ -644,6 +637,23 @@ export async function finishStudySession(sessionId: string) {
     })
   } catch (error: any) {
     console.error("Failed to finish study session:", error.message)
+    return null
+  }
+}
+
+export async function cancelStudySession(sessionId: string) {
+  await requireAuth()
+  try {
+    // No logs are written: a cancelled exam has no score
+    return await prisma.studySession.update({
+      where: { id: sessionId },
+      data: {
+        status: 'cancelled',
+        endTime: new Date()
+      }
+    })
+  } catch (error) {
+    console.error("Failed to cancel study session:", error instanceof Error ? error.message : error)
     return null
   }
 }
@@ -714,6 +724,7 @@ export async function getSessionWithExercises(sessionId: string) {
 export async function getAnalyticsData() {
   await requireAuth()
   const sessions = await prisma.studySession.findMany({
+    where: { status: { not: 'cancelled' } },
     include: { logs: { include: { exercise: { include: { topic: { include: { course: true } } } } } } }
   });
 
@@ -1181,14 +1192,12 @@ Follow these rules strictly based on the target type:
 export async function deleteStudySession(sessionId: string) {
   await requireAuth()
   try {
-    // Delete logs first to avoid foreign key constraint violations
-    await prisma.exerciseLog.deleteMany({
-      where: { sessionId }
-    });
-    // Delete session
-    await prisma.studySession.delete({
-      where: { id: sessionId }
-    });
+    // Delete dependents first, explicitly, so this works whether or not foreign keys are enforced
+    await prisma.$transaction([
+      prisma.exerciseLog.deleteMany({ where: { sessionId } }),
+      prisma.sessionExercise.deleteMany({ where: { sessionId } }),
+      prisma.studySession.delete({ where: { id: sessionId } }),
+    ]);
     return true;
   } catch (error) {
     console.error("Failed to delete study session:", error);
@@ -1740,10 +1749,13 @@ export async function getStudyPlans() {
 export async function deleteStudyPlan(planId: string) {
   await requireAuth()
   try {
-    // Cascading deletion handles related StudySessions and ExerciseLogs automatically
-    await prisma.studyPlan.delete({
-      where: { id: planId }
-    });
+    // Explicit order (logs and items, sessions, plan) so it works whether or not foreign keys are enforced
+    await prisma.$transaction([
+      prisma.exerciseLog.deleteMany({ where: { session: { studyPlanId: planId } } }),
+      prisma.sessionExercise.deleteMany({ where: { session: { studyPlanId: planId } } }),
+      prisma.studySession.deleteMany({ where: { studyPlanId: planId } }),
+      prisma.studyPlan.delete({ where: { id: planId } }),
+    ]);
     return true;
   } catch (error) {
     console.error("Failed to delete study plan:", error);

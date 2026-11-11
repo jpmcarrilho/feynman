@@ -45,9 +45,9 @@ export function SessionHistoryList({
               </div>
             )}
             <div className="mt-1 flex justify-between text-charcoal-graphite/60">
-              <span>Score: {correct}/{total}</span>
-              <span className={h.status === 'active' ? 'text-lecture-red font-semibold' : isActiveSession ? 'text-fountain-ink' : 'text-fountain-ink/80'}>
-                {h.status}
+              <span>{h.status === 'cancelled' ? 'No score' : `Score: ${correct}/${total}`}</span>
+              <span className={h.status === 'active' ? 'text-lecture-red font-semibold' : h.status === 'cancelled' ? 'text-charcoal-graphite/50' : isActiveSession ? 'text-fountain-ink' : 'text-fountain-ink/80'}>
+                {h.status === 'cancelled' ? 'Cancelled' : h.status}
               </span>
             </div>
             <Button
