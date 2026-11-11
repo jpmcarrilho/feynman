@@ -10,6 +10,7 @@ import { getSessionDetail, getSessionResults } from '@/app/actions'
 import type { SessionResultItem } from '@/services/sessionService'
 import { LocalDate } from './LocalDate'
 import { sessionHeadline, formatScore } from '@/lib/grading'
+import { AnswerText } from './AnswerText'
 
 interface ChatMessage {
   role: string;
@@ -108,9 +109,9 @@ export function SessionResultsDialog({
                   <div className="pl-6 space-y-0.5 text-xs">
                     {item.log ? (
                       <>
-                        <p className="text-muted-foreground"><span className="font-semibold text-foreground/70">Your Answer:</span> {item.log.userAnswer || 'Skipped'}</p>
+                        <div className="text-muted-foreground"><span className="font-semibold text-foreground/70">Your Answer:</span> <AnswerText exercise={item} answer={item.log.userAnswer} empty="Skipped" /></div>
                         {!item.log.isCorrect && (
-                          <p className="text-green-600 dark:text-green-500"><span className="font-semibold">Correct Answer:</span> {item.correctAnswer}</p>
+                          <div className="text-green-600 dark:text-green-500"><span className="font-semibold">Correct Answer:</span> <AnswerText exercise={item} answer={item.correctAnswer} /></div>
                         )}
                       </>
                     ) : (

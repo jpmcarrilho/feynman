@@ -187,7 +187,22 @@ export function useLiveAPI(systemInstructionText: string, onUserSpeech?: (source
     }
   }, [])
 
+  // The attempt in flight, if any. Connecting is idempotent: a second call while one is being set up (Enter pressed in the
+  // text box during "Connecting...", a double click) gets the same promise and opens no second socket and mints no second token.
+  const pendingConnectRef = useRef<Promise<void> | null>(null)
   const connect = (audioEnabled: boolean = true): Promise<void> => {
+    if (pendingConnectRef.current) return pendingConnectRef.current
+    // Already connected: nothing to set up
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return Promise.resolve()
+    const attempt = openConnection(audioEnabled)
+    pendingConnectRef.current = attempt
+    // A failed attempt clears the slot too, so a later call can try again
+    const clear = () => { if (pendingConnectRef.current === attempt) pendingConnectRef.current = null }
+    attempt.then(clear, clear)
+    return attempt
+  }
+
+  const openConnection = (audioEnabled: boolean): Promise<void> => {
     return new Promise(async (resolve, reject) => {
       setIsConnecting(true)
       setError(null)
@@ -319,6 +334,9 @@ export function useLiveAPI(systemInstructionText: string, onUserSpeech?: (source
           console.log("Live API WS Closed:", event.code, event.reason)
           // the close event of an old connection must not tear down a newer one
           if (wsRef.current && wsRef.current !== ws) return
+          // Still our current socket: the server or the network ended the call (the student's own End Call clears wsRef first).
+          // Say so, otherwise the panel just goes back to "Start Voice Tutor" with no explanation.
+          if (wsRef.current === ws) setError('The tutor call ended. Start the voice tutor again to continue.')
           disconnect()
         }
 

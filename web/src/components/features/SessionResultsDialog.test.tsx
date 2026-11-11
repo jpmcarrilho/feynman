@@ -69,4 +69,18 @@ describe('SessionResultsDialog', () => {
     render(<Dialog open><SessionResultsDialog selectedHistory={data} onLoadSession={() => {}} isLoading={false} /></Dialog>)
     expect(screen.getByText(/Score:/).parentElement).toHaveTextContent(`${expected.replace('/', ' / ')} (`)
   })
+
+  it('shows multi-select and dropdown answers as readable lines, never as raw JSON', async () => {
+    actions.getSessionResults.mockResolvedValue([
+      { position: 0, exerciseId: 'm', questionText: 'Pick primes', exerciseType: 'multiple_choice', choices: '["2","3","4"]', correctAnswer: '["2","3"]', log: { isCorrect: false, score: 0.5, userAnswer: '["2","4"]' } },
+      { position: 1, exerciseId: 'd', questionText: 'Fill in', exerciseType: 'dropdown', choices: '["[Dropdown 1] hot","[Dropdown 2] cold"]', correctAnswer: '["[Dropdown 1] hot","[Dropdown 2] cold"]', log: { isCorrect: false, score: 0, userAnswer: '{"[Dropdown 1]":"warm"}' } },
+    ])
+    render(<Dialog open><SessionResultsDialog selectedHistory={{ ...history, logs: [] }} onLoadSession={() => {}} isLoading={false} /></Dialog>)
+    await waitFor(() => expect(screen.getByText(/Q1: Pick primes/)).toBeInTheDocument())
+    const body = document.body.textContent || ''
+    expect(body).not.toMatch(/\[\s*"|\{\s*"|\[Dropdown/)
+    expect(screen.getAllByTestId('answer-list').length).toBeGreaterThanOrEqual(2)
+    expect(body).toContain('Blank 1: hot')
+    expect(body).toContain('Blank 2: cold')
+  })
 })

@@ -12,6 +12,8 @@ interface SessionTimerProps {
   active?: boolean
   /** Server clock minus client clock in ms (from the session state), so elapsed time follows the server's startTime. */
   serverOffsetMs?: number
+  /** One inline figure ("Elapsed: m:ss", or "Duration: m:ss" once over) for a compact header: no target, no progress bar. */
+  compact?: boolean
 }
 
 export const formatClock = (totalSeconds: number) => {
@@ -31,7 +33,7 @@ export function secondsBetween(startMs: number, endMs: number): number {
  * device shows the same value. A session that is over shows its actual duration as a fixed value, or nothing when
  * the end time is unknown.
  */
-export function SessionTimer({ durationSeconds, startTime, endTime = null, active = true, serverOffsetMs = 0 }: SessionTimerProps) {
+export function SessionTimer({ durationSeconds, startTime, endTime = null, active = true, serverOffsetMs = 0, compact = false }: SessionTimerProps) {
   const [elapsed, setElapsed] = useState(0)
 
   useEffect(() => {
@@ -46,12 +48,15 @@ export function SessionTimer({ durationSeconds, startTime, endTime = null, activ
   if (!active) {
     if (!endTime) return null
     const total = secondsBetween(new Date(startTime).getTime(), new Date(endTime).getTime())
+    if (compact) return <span className="shrink-0 text-xs font-medium tabular-nums text-muted-foreground">Duration: {formatClock(total)}</span>
     return (
       <div className="w-full text-sm font-medium text-muted-foreground">
         <span>Duration: {formatClock(total)}</span>
       </div>
     )
   }
+
+  if (compact) return <span className="shrink-0 text-xs font-medium tabular-nums text-muted-foreground">Elapsed: {formatClock(elapsed)}</span>
 
   const progress = Math.min((elapsed / durationSeconds) * 100, 100)
 

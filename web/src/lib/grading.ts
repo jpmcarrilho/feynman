@@ -77,15 +77,26 @@ export function resolveExerciseType(ex: Pick<GradableExercise, 'exerciseType' | 
   return ex.exerciseType
 }
 
+/**
+ * "Select an option" (with or without a "[Dropdown n]" / "[Blank n]" prefix) is the prompt of a dropdown, not an answer.
+ * Some imported questions carry it as a real choice; it is never shown as an option, never counts as an answer and is
+ * never accepted by the grader.
+ */
+export function isPlaceholderChoice(text: unknown): boolean {
+  return /^(?:\[\s*(?:dropdown|blank)\s*\d+\s*\]\s*)?select\s+an\s+option\.?$/i.test(String(text ?? '').trim())
+}
+
+const isEmptyOrPlaceholder = (v: unknown) => !String(v ?? '').trim() || isPlaceholderChoice(v)
+
 function isBlankAnswer(userAnswer: string): boolean {
   const t = userAnswer.trim()
   if (!t) return true
   const parsed = tryParseJson(t)
-  if (Array.isArray(parsed)) return parsed.every((v) => !String(v ?? '').trim())
+  if (Array.isArray(parsed)) return parsed.every(isEmptyOrPlaceholder)
   if (parsed && typeof parsed === 'object') {
-    return Object.values(parsed as Record<string, unknown>).every((v) => !String(v ?? '').trim())
+    return Object.values(parsed as Record<string, unknown>).every(isEmptyOrPlaceholder)
   }
-  return false
+  return isPlaceholderChoice(t)
 }
 
 const ZERO: GradeResult = { score: 0, isCorrect: false }
@@ -214,7 +225,8 @@ function userBlanks(userAnswer: string, expectedCount: number): BlankEntry[] {
     const pieces = expectedCount > 1 ? userAnswer.split('|') : [userAnswer]
     entries = pieces.map((p) => toBlankEntry(p))
   }
-  return entries.filter((e) => e.value !== '')
+  // A placeholder is not an answer
+  return entries.filter((e) => e.value !== '' && !isPlaceholderChoice(e.value))
 }
 
 function gradeDropdown(ex: GradableExercise, userAnswer: string): GradeResult {
@@ -263,6 +275,43 @@ export function gradeAnswer(ex: GradableExercise, userAnswer: string | null | un
     default:
       return gradeSingle(ex, answer)
   }
+}
+
+// --- showing an answer ----------------------------------------------------------------------------------------
+
+/**
+ * An answer (the student's or the key) as lines a person reads, built on the same parsing the grader uses:
+ *  - multi-select: one line per option text;
+ *  - dropdown: the chosen option without its "[Dropdown n]" prefix, blank by blank ("Blank 1: ...") when there are several;
+ *  - numeric and single choice: the value as is.
+ * Lines may contain Markdown / LaTeX (they are option texts). An empty answer gives no lines.
+ */
+export function answerDisplayLines(ex: Pick<GradableExercise, 'exerciseType' | 'choices' | 'questionText'>, answer: string | null | undefined): string[] {
+  const raw = typeof answer === 'string' ? answer.trim() : ''
+  if (!raw) return []
+  const type = resolveExerciseType(ex)
+  const parsed = tryParseJson(raw)
+
+  const blank = (text: string, index: number | null) => {
+    const m = text.trim().match(BLANK_PREFIX)
+    return { index: m ? Number(m[1]) : index, body: restoreLatexBackslashes(m ? text.trim().replace(BLANK_PREFIX, '') : text).trim() }
+  }
+  const asBlanks = (entries: { index: number | null; body: string }[]): string[] => {
+    const kept = entries.filter((e) => e.body !== '' && !isPlaceholderChoice(e.body))
+    return kept.map((e) => (kept.length > 1 && e.index !== null ? `Blank ${e.index}: ${e.body}` : e.body))
+  }
+
+  if (Array.isArray(parsed)) {
+    const items = parsed.map((v) => String(v ?? ''))
+    if (type === 'dropdown') return asBlanks(items.map((t) => blank(t, null)))
+    return items.map((t) => restoreLatexBackslashes(t).trim()).filter((t) => t && !isPlaceholderChoice(t))
+  }
+  if (parsed && typeof parsed === 'object') {
+    return asBlanks(Object.entries(parsed as Record<string, unknown>).map(([k, v]) => blank(String(v ?? ''), keyToIndex(k))))
+  }
+  if (type === 'dropdown' && raw.includes('|')) return asBlanks(raw.split('|').map((t) => blank(t, null)))
+  if (type === 'dropdown') return asBlanks([blank(raw, null)])
+  return [restoreLatexBackslashes(raw)]
 }
 
 // --- session totals (one definition for every display) ---------------------------------------------------------

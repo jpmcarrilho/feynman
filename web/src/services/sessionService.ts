@@ -669,6 +669,9 @@ export type SessionResultItem = {
   position: number
   exerciseId: string
   questionText: string
+  /** Type and choices, so an answer can be shown the way the card shows it (see answerDisplayLines). */
+  exerciseType: string
+  choices: string
   correctAnswer: string
   /** null: the question was never answered (no log). */
   log: { isCorrect: boolean; score: number; userAnswer: string | null } | null
@@ -683,7 +686,7 @@ export async function getSessionResultsFor(sessionId: string): Promise<SessionRe
     prisma.sessionExercise.findMany({
       where: { sessionId },
       orderBy: { position: 'asc' },
-      select: { position: true, exercise: { select: { id: true, questionText: true, correctAnswer: true } } },
+      select: { position: true, exercise: { select: { id: true, questionText: true, exerciseType: true, choices: true, correctAnswer: true } } },
     }),
     prisma.exerciseLog.findMany({ where: { sessionId }, select: { exerciseId: true, isCorrect: true, score: true, userAnswer: true } }),
   ])
@@ -694,6 +697,8 @@ export async function getSessionResultsFor(sessionId: string): Promise<SessionRe
       position: i.position,
       exerciseId: i.exercise.id,
       questionText: i.exercise.questionText,
+      exerciseType: i.exercise.exerciseType,
+      choices: i.exercise.choices,
       correctAnswer: i.exercise.correctAnswer,
       log: log ? { isCorrect: log.isCorrect, score: logScore(log), userAnswer: log.userAnswer } : null,
     }

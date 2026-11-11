@@ -142,4 +142,103 @@ describe('VoiceHub Component', () => {
       expect(sendContext).not.toHaveBeenCalled()
     })
   })
+  describe('links in tutor replies', () => {
+    const withMessages = (text: string) => ({ ...defaultLiveAPI, messages: [{ id: 'm1', role: 'model', text }] })
+
+    it('turns a bracketed title followed by a bare file path into a link handled by the viewer', () => {
+      const onViewFile = vi.fn()
+      render(<VoiceHub liveAPI={withMessages('Have a look at\n[Lecture 2 slides]\n/api/files/topic/abc123#page=4')} onViewFile={onViewFile} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Lecture 2 slides' }))
+      expect(onViewFile).toHaveBeenCalledWith('/api/files/topic/abc123#page=4')
+    })
+
+    it('leaves paths that are not the app\'s own file routes as plain text', () => {
+      render(<VoiceHub liveAPI={withMessages('See /api/file?path=/etc/passwd and /api/files/topic/')} onViewFile={vi.fn()} />)
+      expect(screen.queryByRole('button', { name: /Open document/ })).not.toBeInTheDocument()
+      expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    })
+  })
+
+  describe('parent-held draft and close button', () => {
+    it('shows and edits the draft given by the parent, so a typed message survives the panel being re-created', () => {
+      const onDraftChange = vi.fn()
+      const { rerender } = render(<VoiceHub liveAPI={defaultLiveAPI} draft="half a thought" onDraftChange={onDraftChange} />)
+      const input = screen.getByPlaceholderText('Type a message to start chatting...') as HTMLInputElement
+      expect(input.value).toBe('half a thought')
+      fireEvent.change(input, { target: { value: 'more' } })
+      expect(onDraftChange).toHaveBeenCalledWith('more')
+      rerender(<VoiceHub liveAPI={defaultLiveAPI} draft="more" onDraftChange={onDraftChange} />)
+      expect((screen.getByPlaceholderText('Type a message to start chatting...') as HTMLInputElement).value).toBe('more')
+    })
+
+    it('renders a Close tutor button only when onClose is given', () => {
+      const onClose = vi.fn()
+      const { rerender } = render(<VoiceHub liveAPI={defaultLiveAPI} />)
+      expect(screen.queryByRole('button', { name: 'Close tutor' })).not.toBeInTheDocument()
+      rerender(<VoiceHub liveAPI={defaultLiveAPI} onClose={onClose} />)
+      fireEvent.click(screen.getByRole('button', { name: 'Close tutor' }))
+      expect(onClose).toHaveBeenCalled()
+    })
+  })
+
+  it('messages typed while connecting are parked together, not dropped and not sent directly', () => {
+    mockConnect.mockReset()
+    mockSendText.mockReset()
+    mockConnect.mockReturnValue(new Promise(() => {})) // stays "connecting"
+    const pendingMessageRef = { current: null as string | null }
+    const api = { ...defaultLiveAPI, isConnecting: true, setMuted: vi.fn() }
+    render(<VoiceHub liveAPI={api} pendingMessageRef={pendingMessageRef} />)
+    const input = screen.getByPlaceholderText('Type a message to start chatting...')
+    fireEvent.change(input, { target: { value: 'first' } })
+    fireEvent.submit(input.closest('form')!)
+    fireEvent.change(input, { target: { value: 'second' } })
+    fireEvent.submit(input.closest('form')!)
+    expect(pendingMessageRef.current).toBe('first\nsecond')
+    expect(mockSendText).not.toHaveBeenCalled()
+  })
+
+  describe('Return while the tutor is connecting', () => {
+    const PH = 'Type a message to start chatting...'
+
+    it('the send button stays enabled while connecting, so Enter in the box submits (a disabled submit button blocks it)', () => {
+      render(<VoiceHub liveAPI={{ ...defaultLiveAPI, isConnecting: true, setMuted: vi.fn() }} />)
+      const send = screen.getByRole('button', { name: 'Send message' })
+      expect(send).toBeDisabled() // nothing typed yet
+      fireEvent.change(screen.getByPlaceholderText(PH), { target: { value: 'second message' } })
+      expect(send).toBeEnabled()
+    })
+
+    it('accepts the message: clears the box, shows it as pending in the chat, sends it nowhere yet, and drops the bubble once connected', () => {
+      mockConnect.mockReset()
+      mockSendText.mockReset()
+      mockConnect.mockReturnValue(new Promise(() => {}))
+      const pendingMessageRef = { current: null as string | null }
+      const api = { ...defaultLiveAPI, isConnecting: true, setMuted: vi.fn() }
+      const { rerender } = render(<VoiceHub liveAPI={api} pendingMessageRef={pendingMessageRef} />)
+      const input = screen.getByPlaceholderText(PH) as HTMLInputElement
+      fireEvent.change(input, { target: { value: 'second message' } })
+      fireEvent.submit(input.closest('form')!)
+      expect(input.value).toBe('')
+      expect(screen.getByTestId('pending-message')).toHaveTextContent('second message')
+      expect(screen.getByTestId('pending-message')).toHaveTextContent('Sending when the tutor is connected')
+      expect(pendingMessageRef.current).toBe('second message')
+      expect(mockSendText).not.toHaveBeenCalled()
+
+      rerender(<VoiceHub liveAPI={{ ...api, isConnecting: false, isConnected: true }} pendingMessageRef={pendingMessageRef} />)
+      expect(screen.queryByTestId('pending-message')).not.toBeInTheDocument()
+    })
+
+    it('puts the parked text back in the box when the attempt fails', async () => {
+      mockConnect.mockReset()
+      mockConnect.mockRejectedValue(new Error('no'))
+      const pendingMessageRef = { current: null as string | null }
+      render(<VoiceHub liveAPI={{ ...defaultLiveAPI, setMuted: vi.fn() }} pendingMessageRef={pendingMessageRef} />)
+      const input = screen.getByPlaceholderText(PH) as HTMLInputElement
+      fireEvent.change(input, { target: { value: 'keep me' } })
+      fireEvent.submit(input.closest('form')!)
+      await waitFor(() => expect(input.value).toBe('keep me'))
+      expect(pendingMessageRef.current).toBeNull()
+      expect(screen.queryByTestId('pending-message')).not.toBeInTheDocument()
+    })
+  })
 })

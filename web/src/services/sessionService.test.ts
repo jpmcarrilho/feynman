@@ -686,8 +686,8 @@ describe('logAnswerForSession', () => {
 describe('getSessionResultsFor', () => {
   it('returns every question in position order, with null for the unanswered one and no topic content', async () => {
     db.sessionExercise.findMany.mockResolvedValue([
-      { position: 0, exercise: { id: 'a', questionText: 'QA', correctAnswer: 'A' } },
-      { position: 1, exercise: { id: 'b', questionText: 'QB', correctAnswer: 'B' } },
+      { position: 0, exercise: { id: 'a', questionText: 'QA', exerciseType: 'multiple_choice', choices: '["A","B"]', correctAnswer: '["A"]' } },
+      { position: 1, exercise: { id: 'b', questionText: 'QB', exerciseType: 'single_choice', choices: '["A","B"]', correctAnswer: 'B' } },
     ])
     db.exerciseLog.findMany.mockResolvedValue([{ exerciseId: 'a', isCorrect: false, score: 0.5, userAnswer: 'X' }])
     const r = await getSessionResultsFor('s')
@@ -697,6 +697,8 @@ describe('getSessionResultsFor', () => {
     ])
     const sel = db.sessionExercise.findMany.mock.calls[0][0]
     expect(sel.orderBy).toEqual({ position: 'asc' })
-    expect(sel.select.exercise.select).toEqual({ id: true, questionText: true, correctAnswer: true })
+    expect(sel.select.exercise.select).toEqual({ id: true, questionText: true, exerciseType: true, choices: true, correctAnswer: true })
+    // the type and choices travel with each item so an answer can be shown as the card shows it
+    expect(r[0]).toMatchObject({ exerciseType: 'multiple_choice', choices: '["A","B"]', correctAnswer: '["A"]' })
   })
 })

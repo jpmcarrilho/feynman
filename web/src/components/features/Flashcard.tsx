@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
@@ -10,7 +10,9 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
-import { gradeAnswer, resolveExerciseType } from '@/lib/grading'
+import { gradeAnswer, resolveExerciseType, formatScore, isPlaceholderChoice } from '@/lib/grading'
+import { scrollableTableComponents } from './markdownComponents'
+import { AnswerText } from './AnswerText'
 
 const preprocessLaTeX = (text: string | null | undefined) => {
   if (!text) return '';
@@ -28,7 +30,13 @@ interface FlashcardProps {
   initialSelectedChoice?: string | null
   hasBeenAnswered?: boolean
   isExamMode?: boolean
+  /**
+   * Study mode: called once, when the student confirms ("Check answer"). Exam mode: called on every change of the answer
+   * (a draft); an empty `userAnswer` means the answer was cleared.
+   */
   onAnswer: (isCorrect: boolean, userAnswer: string) => void
+  /** What the server stored for this answer. When it arrives it replaces the result computed here (same grader, so normally equal). */
+  result?: { score: number; isCorrect: boolean } | null
   onRequestExplanation?: (userAnswer: string) => void
   /** Reports the question; resolves true when it was recorded. When omitted the card has no report control. */
   onReport?: (reason: ReportReason) => Promise<boolean>
@@ -45,7 +53,29 @@ const REPORT_OPTIONS: { value: ReportReason; label: string }[] = [
   { value: 'other', label: 'Something else' },
 ]
 
-export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, onRequestExplanation, onReport, reported = false }: FlashcardProps) {
+function Md({ text, className, as: Tag = 'div' }: { text: string; className: string; as?: 'div' | 'span' }) {
+  return (
+    <Tag className={className}>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={scrollableTableComponents}>{preprocessLaTeX(text)}</ReactMarkdown>
+    </Tag>
+  )
+}
+
+// Phone (below sm): a comfortable reading size (17 px) with headings inside the question scaled to match; sm and up unchanged (text-xl)
+const QUESTION_PROSE = 'prose dark:prose-invert max-w-none min-w-0 break-words text-xl leading-relaxed max-sm:text-[1.0625rem]! max-sm:leading-normal max-sm:[&_h1]:text-xl max-sm:[&_h2]:text-lg max-sm:[&_h3]:text-base max-sm:[&_h4]:text-base max-sm:[&_p]:my-2'
+const CHOICE_PROSE = 'prose dark:prose-invert max-w-none min-w-0 text-sm break-words'
+const CONFIRM_BUTTON = 'w-full max-xl:h-11 bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium'
+
+/** On phones the confirm button stays at the bottom of the panel while a long list of options scrolls (the panel ends above the band reserved for the floating Tutor button). */
+function ConfirmBar({ children }: { children: ReactNode }) {
+  return (
+    <div className="mt-4 max-xl:sticky max-xl:bottom-0 max-xl:z-10 max-xl:-mx-4 max-xl:border-t max-xl:border-charcoal-graphite/10 max-xl:bg-card/95 max-xl:px-4 max-xl:py-3 max-xl:backdrop-blur-sm">
+      {children}
+    </div>
+  )
+}
+
+export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, result, onRequestExplanation, onReport, reported = false }: FlashcardProps) {
   // The same type resolution and grading the server uses (src/lib/grading.ts)
   const effectiveExerciseType = resolveExerciseType({ exerciseType, choices, questionText })
   const grade = (userAnswer: string) =>
@@ -104,37 +134,56 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
     }
   }
 
+  /** The answer as it is stored and graded: '' when nothing is chosen. */
+  const answerString = (values: { selected?: string | null; multi?: string[]; numeric?: string; dropdown?: Record<string, string> } = {}): string => {
+    if (effectiveExerciseType === 'single_choice') return (values.selected !== undefined ? values.selected : selected) || ''
+    if (effectiveExerciseType === 'multiple_choice') {
+      const multi = values.multi ?? multiSelected
+      return multi.length > 0 ? JSON.stringify(multi) : ''
+    }
+    if (effectiveExerciseType === 'numeric') return values.numeric ?? numericValue
+    if (effectiveExerciseType === 'dropdown') {
+      const dd = values.dropdown ?? dropdownValues
+      return Object.values(dd).some(Boolean) ? JSON.stringify(dd) : ''
+    }
+    return ''
+  }
+
+  // Exam: every change of the answer is a draft, saved by the parent (no button); an empty string clears it.
+  const saveDraft = (answer: string) => {
+    if (isExamMode) onAnswer(grade(answer).isCorrect, answer)
+  }
+
+  /** Study mode: the student confirms the selection. Nothing is committed before this. */
   const handleSubmit = () => {
-    if (showResult) return
-    if (!isExamMode) {
-      setShowResult(true)
-    }
-
-    let answerStr = '';
-
-    if (effectiveExerciseType === 'single_choice') {
-      answerStr = selected || '';
-    } else if (effectiveExerciseType === 'multiple_choice') {
-      answerStr = JSON.stringify(multiSelected);
-    } else if (effectiveExerciseType === 'numeric') {
-      answerStr = numericValue;
-    } else if (effectiveExerciseType === 'dropdown') {
-      answerStr = JSON.stringify(dropdownValues);
-    }
-
+    if (showResult || isExamMode) return
+    const answerStr = answerString()
+    if (answerStr === '') return
+    setShowResult(true)
     onAnswer(grade(answerStr).isCorrect, answerStr)
   }
 
   const handleSelectSingle = (choice: string) => {
-    if (isExamMode) {
-      setSelected(choice)
-      onAnswer(grade(choice).isCorrect, choice)
-    } else {
-      if (showResult) return
-      setSelected(choice)
-      setShowResult(true)
-      onAnswer(grade(choice).isCorrect, choice)
-    }
+    if (showResult) return
+    setSelected(choice)
+    saveDraft(choice)
+  }
+
+  const toggleMulti = (choice: string, checked: boolean) => {
+    const next = checked ? [...multiSelected, choice] : multiSelected.filter(c => c !== choice)
+    setMultiSelected(next)
+    saveDraft(answerString({ multi: next }))
+  }
+
+  const changeNumeric = (value: string) => {
+    setNumericValue(value)
+    saveDraft(value)
+  }
+
+  const changeDropdown = (placeholder: string, value: string) => {
+    const next = { ...dropdownValues, [placeholder]: value }
+    setDropdownValues(next)
+    saveDraft(answerString({ dropdown: next }))
   }
 
   const handleExplainMistake = () => {
@@ -150,12 +199,21 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
     }
   }
 
+  // The result shown after confirming: what the server stored when it is known, else the same grader run here
+  const committedAnswer = showResult ? answerString() : ''
+  const shownResult = showResult ? (result ?? grade(committedAnswer)) : null
+  const answered = committedAnswer !== ''
+  const fullyCorrect = !!shownResult && shownResult.isCorrect
+  const partial = !!shownResult && !shownResult.isCorrect && shownResult.score > 0
+  const resultText = !shownResult ? '' : !answered ? 'Not answered' : fullyCorrect ? 'Correct' : partial ? `Partially correct: ${formatScore(shownResult.score)} of 1` : 'Incorrect'
+  const resultColor = fullyCorrect ? 'border-green-400 bg-green-100/60 text-green-900' : partial ? 'border-amber-400 bg-amber-100/60 text-amber-900' : 'border-lecture-red/40 bg-lecture-red/10 text-lecture-red'
+
   const renderQuestionText = () => {
     if (effectiveExerciseType === 'dropdown') {
       const parts = adjustedQuestionText.split(/(\[BLANK\]|\[Dropdown \d+\])/g);
       
       if (parts.length === 1) {
-        return <div className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(adjustedQuestionText)}</ReactMarkdown></div>;
+        return <Md text={adjustedQuestionText} className={QUESTION_PROSE} />;
       }
 
       return (
@@ -163,22 +221,25 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           {parts.map((part, index) => {
             const isPlaceholder = part === '[BLANK]' || /^\[Dropdown \d+\]$/.test(part);
             if (!isPlaceholder) {
-              return <span key={index} className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(part)}</ReactMarkdown></span>;
+              return <Md key={index} as="span" text={part} className={QUESTION_PROSE} />;
             }
 
             const relevantChoices = choices.filter(c => {
                if (part !== '[BLANK]') return c.startsWith(part);
                return true;
-            }).map(c => part !== '[BLANK]' ? c.replace(part, '').trim() : c);
+            }).map(c => part !== '[BLANK]' ? c.replace(part, '').trim() : c)
+              // "Select an option" stored as a real choice is the prompt, not an answer: only the placeholder <option> below shows it
+              .filter(c => !isPlaceholderChoice(c));
 
-            const finalChoices = relevantChoices.length > 0 ? relevantChoices : choices;
+            const finalChoices = relevantChoices.length > 0 ? relevantChoices : choices.filter(c => !isPlaceholderChoice(c));
 
             return (
               <select 
                 key={index}
-                className="flex h-10 rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50"
+                aria-label={part === '[BLANK]' ? 'Answer' : `Answer for ${part.slice(1, -1)}`}
+                className="flex h-11 max-w-full rounded-md border border-input bg-transparent px-3 py-2 text-base shadow-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring disabled:opacity-50 sm:h-10 sm:text-sm"
                 value={dropdownValues[part] || ''}
-                onChange={(e) => setDropdownValues({...dropdownValues, [part]: e.target.value})}
+                onChange={(e) => changeDropdown(part, e.target.value)}
                 disabled={showResult}
               >
                 <option value="">Select an option</option>
@@ -191,119 +252,130 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
         </span>
       )
     }
-    return <div className="prose dark:prose-invert max-w-none text-xl leading-relaxed"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(adjustedQuestionText)}</ReactMarkdown></div>;
+    return <Md text={adjustedQuestionText} className={QUESTION_PROSE} />;
   }
 
   return (
-    <Card className="w-full max-w-2xl mx-auto shadow-md border border-charcoal-graphite/10 bg-card">
+    <Card className="w-full max-w-2xl min-w-0 mx-auto overflow-visible max-sm:[--card-spacing:--spacing(3)] shadow-md border border-charcoal-graphite/10 bg-card">
       <CardHeader>
-        <div className="w-full">{renderQuestionText()}</div>
+        <div className="w-full min-w-0">{renderQuestionText()}</div>
       </CardHeader>
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 max-sm:space-y-3 min-w-0">
         
         {effectiveExerciseType === 'single_choice' && (
           <div className="grid gap-3">
-            {choices.map((choice, idx) => {
-              let variant: 'default' | 'outline' | 'secondary' | 'destructive' = 'outline'
-              let extraClasses = ''
-              
-              const isMatch = choice.trim() === correctAnswer.trim()
-              const isSelected = choice.trim() === (selected || '').trim()
+            <div role="group" aria-label="Answer options" className="grid gap-3 max-sm:gap-2">
+              {choices.map((choice, idx) => {
+                let variant: 'default' | 'outline' | 'secondary' | 'destructive' = 'outline'
+                let extraClasses = ''
+                
+                const isMatch = choice.trim() === correctAnswer.trim()
+                const isSelected = choice.trim() === (selected || '').trim()
 
-              if (showResult) {
-                if (isMatch) {
-                  variant = 'outline' 
-                  extraClasses = 'bg-green-100/60 hover:bg-green-100/60 text-green-900 border-green-400 font-semibold shadow-sm'
+                if (showResult) {
+                  if (isMatch) {
+                    variant = 'outline' 
+                    extraClasses = 'bg-green-100/60 hover:bg-green-100/60 text-green-900 border-green-400 font-semibold shadow-sm'
+                  } else if (isSelected) {
+                    variant = 'outline'
+                    extraClasses = 'bg-lecture-red/10 hover:bg-lecture-red/10 text-lecture-red border-lecture-red/40'
+                  } else {
+                    extraClasses = 'border-charcoal-graphite/5 text-charcoal-graphite/40'
+                  }
                 } else if (isSelected) {
                   variant = 'outline'
-                  extraClasses = 'bg-lecture-red/10 hover:bg-lecture-red/10 text-lecture-red border-lecture-red/40'
+                  extraClasses = 'bg-fountain-ink/15 text-fountain-ink border-fountain-ink font-semibold shadow-sm'
                 } else {
-                  extraClasses = 'border-charcoal-graphite/5 text-charcoal-graphite/40'
+                  extraClasses = 'hover:bg-fountain-ink/5 border-charcoal-graphite/15 text-charcoal-graphite/90'
                 }
-              } else if (isSelected) {
-                variant = 'outline'
-                extraClasses = 'bg-fountain-ink/15 text-fountain-ink border-fountain-ink font-semibold shadow-sm'
-              } else {
-                extraClasses = 'hover:bg-fountain-ink/5 border-charcoal-graphite/15 text-charcoal-graphite/90'
-              }
 
-              return (
-                <Button
-                  key={idx}
-                  variant={variant}
-                  className={`justify-start h-auto py-3 px-4 text-left whitespace-normal transition-all duration-200 ${extraClasses}`}
-                  onClick={() => handleSelectSingle(choice)}
-                  disabled={showResult}
-                >
-                  <div className="prose dark:prose-invert max-w-none text-sm break-words"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(choice)}</ReactMarkdown></div>
+                return (
+                  <Button
+                    key={idx}
+                    variant={variant}
+                    aria-pressed={isSelected}
+                    className={`justify-start h-auto min-h-11 min-w-0 py-3 max-sm:py-2.5 px-4 text-left whitespace-normal transition-all duration-200 ${extraClasses}`}
+                    onClick={() => handleSelectSingle(choice)}
+                    disabled={showResult}
+                  >
+                    <Md text={choice} className={CHOICE_PROSE} />
+                  </Button>
+                )
+              })}
+            </div>
+            {!showResult && !isExamMode && (
+              <ConfirmBar>
+                <Button className={CONFIRM_BUTTON} onClick={handleSubmit} disabled={!selected}>
+                  Check answer
                 </Button>
-              )
-            })}
+              </ConfirmBar>
+            )}
           </div>
         )}
 
         {effectiveExerciseType === 'multiple_choice' && (
           <div className="grid gap-3">
-            {choices.map((choice, idx) => {
-              let isCorrectChoice = false;
-              try {
-                isCorrectChoice = JSON.parse(correctAnswer).includes(choice);
-              } catch (e) {
-                isCorrectChoice = choice === correctAnswer;
-              }
+            <div role="group" aria-label="Answer options (select all that apply)" className="grid gap-3 max-sm:gap-2">
+              {choices.map((choice, idx) => {
+                let isCorrectChoice = false;
+                try {
+                  isCorrectChoice = JSON.parse(correctAnswer).includes(choice);
+                } catch (e) {
+                  isCorrectChoice = choice === correctAnswer;
+                }
 
-              const isChecked = multiSelected.includes(choice);
-              
-              let bgColor = 'border-charcoal-graphite/10 hover:bg-fountain-ink/5 text-charcoal-graphite/90';
-              if (showResult) {
-                if (isCorrectChoice) bgColor = 'bg-green-100/60 border-green-400 text-green-900 font-medium';
-                else if (isChecked && !isCorrectChoice) bgColor = 'bg-lecture-red/10 border-lecture-red/40 text-lecture-red';
-                else bgColor = 'border-charcoal-graphite/5 text-charcoal-graphite/40';
-              } else if (isChecked) {
-                bgColor = 'bg-fountain-ink/10 border-fountain-ink text-fountain-ink font-semibold';
-              }
+                const isChecked = multiSelected.includes(choice);
+                
+                let bgColor = 'border-charcoal-graphite/10 hover:bg-fountain-ink/5 text-charcoal-graphite/90';
+                if (showResult) {
+                  if (isCorrectChoice) bgColor = 'bg-green-100/60 border-green-400 text-green-900 font-medium';
+                  else if (isChecked && !isCorrectChoice) bgColor = 'bg-lecture-red/10 border-lecture-red/40 text-lecture-red';
+                  else bgColor = 'border-charcoal-graphite/5 text-charcoal-graphite/40';
+                } else if (isChecked) {
+                  bgColor = 'bg-fountain-ink/10 border-fountain-ink text-fountain-ink font-semibold';
+                }
 
-              return (
-                <div key={idx} className={`flex items-start space-x-3 p-3 rounded-md border transition-all duration-200 ${bgColor}`}>
-                  <Checkbox 
-                    id={`choice-${idx}`}
-                    checked={isChecked}
-                    disabled={showResult}
-                    onCheckedChange={(checked) => {
-                      if (checked) setMultiSelected([...multiSelected, choice]);
-                      else setMultiSelected(multiSelected.filter(c => c !== choice));
-                    }}
-                    className="mt-1 data-[state=checked]:bg-fountain-ink data-[state=checked]:border-fountain-ink"
-                  />
-                  <label htmlFor={`choice-${idx}`} className="cursor-pointer flex-1 break-words min-w-0">
-                    <div className="prose dark:prose-invert max-w-none text-sm font-medium leading-tight"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(choice)}</ReactMarkdown></div>
-                  </label>
-                </div>
-              )
-            })}
-            {!showResult && (
-              <Button className="mt-4 w-full bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={multiSelected.length === 0}>
-                {isExamMode ? 'Save Answer' : 'Submit Answer'}
-              </Button>
+                return (
+                  <div key={idx} className={`flex items-center space-x-3 px-3 min-h-11 rounded-md border transition-all duration-200 ${bgColor}`}>
+                    <Checkbox 
+                      id={`choice-${idx}`}
+                      checked={isChecked}
+                      disabled={showResult}
+                      onCheckedChange={(checked) => toggleMulti(choice, !!checked)}
+                      className="size-5 data-[state=checked]:bg-fountain-ink data-[state=checked]:border-fountain-ink"
+                    />
+                    <label htmlFor={`choice-${idx}`} className="cursor-pointer flex-1 break-words min-w-0 py-3">
+                      <Md text={choice} className="prose dark:prose-invert max-w-none min-w-0 text-sm font-medium leading-tight" />
+                    </label>
+                  </div>
+                )
+              })}
+            </div>
+            {!showResult && !isExamMode && (
+              <ConfirmBar>
+                <Button className={CONFIRM_BUTTON} onClick={handleSubmit} disabled={multiSelected.length === 0}>
+                  Check answer
+                </Button>
+              </ConfirmBar>
             )}
           </div>
         )}
 
         {effectiveExerciseType === 'numeric' && (
-          <div className="flex flex-col gap-4">
+          <form
+            className="flex flex-col gap-4"
+            // Enter in the number field confirms the answer (study mode); in an exam the answer is already saved as a draft
+            onSubmit={(e) => { e.preventDefault(); handleSubmit() }}
+          >
             <Input 
               type="number" 
+              inputMode="decimal"
+              aria-label="Your answer"
               placeholder="Enter a number" 
               value={numericValue}
-              onChange={(e) => {
-                setNumericValue(e.target.value);
-                if (isExamMode) {
-                  // For numeric, we can also auto-save on change so they don't absolutely have to click the button, but still provide the button
-                  onAnswer(grade(e.target.value).isCorrect, e.target.value);
-                }
-              }}
+              onChange={(e) => changeNumeric(e.target.value)}
               disabled={showResult}
-              className={`transition-all duration-200 focus-visible:ring-fountain-ink ${
+              className={`max-xl:h-11 transition-all duration-200 focus-visible:ring-fountain-ink ${
                 showResult 
                   ? grade(numericValue).isCorrect
                     ? 'border-green-400 bg-green-100/30 text-green-900 font-semibold' 
@@ -311,36 +383,47 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
                   : 'border-charcoal-graphite/20 bg-transparent'
               }`}
             />
-            {!showResult && (
-              <Button className="bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={!numericValue}>
-                {isExamMode ? 'Save Answer' : 'Submit Answer'}
-              </Button>
+            {!showResult && !isExamMode && (
+              <ConfirmBar>
+                <Button type="submit" className={CONFIRM_BUTTON} disabled={!numericValue}>
+                  Check answer
+                </Button>
+              </ConfirmBar>
             )}
             {showResult && (
               <div className="text-sm font-medium">
-                Correct Answer: <span className="text-green-600 font-semibold">{correctAnswer}</span>
+                Correct Answer: <span className="text-green-600 font-semibold"><AnswerText exercise={{ exerciseType, choices, questionText }} answer={correctAnswer} /></span>
               </div>
             )}
-          </div>
+          </form>
         )}
 
         {effectiveExerciseType === 'dropdown' && (
           <div className="flex flex-col gap-4">
-            {!showResult && (
-              <Button className="bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium" onClick={handleSubmit} disabled={Object.values(dropdownValues).filter(Boolean).length === 0}>
-                {isExamMode ? 'Save Answer' : 'Submit Answer'}
-              </Button>
+            {!showResult && !isExamMode && (
+              <ConfirmBar>
+                <Button className={CONFIRM_BUTTON} onClick={handleSubmit} disabled={Object.values(dropdownValues).filter(Boolean).length === 0}>
+                  Check answer
+                </Button>
+              </ConfirmBar>
             )}
             {showResult && (
               <div className="text-sm font-medium">
-                Correct Answer: <span className="text-green-600 font-semibold">{correctAnswer}</span>
+                Correct Answer: <span className="text-green-600 font-semibold"><AnswerText exercise={{ exerciseType, choices, questionText }} answer={correctAnswer} /></span>
               </div>
             )}
           </div>
         )}
 
+        {/* Announced to screen readers when it fills in; always mounted so the announcement is made */}
+        <div role="status" aria-live="polite" data-testid="answer-result" style={shownResult ? undefined : { margin: 0 }}>
+          {shownResult && (
+            <div className={`rounded-md border px-3 py-2 text-sm font-semibold ${resultColor}`}>{resultText}</div>
+          )}
+        </div>
+
         {isExamMode && (selected || multiSelected.length > 0 || numericValue || Object.values(dropdownValues).filter(Boolean).length > 0) && (
-          <div className="text-xs text-fountain-ink bg-fountain-ink/10 px-3 py-1.5 rounded-md border border-fountain-ink/20 font-medium flex items-center gap-1.5 w-fit">
+          <div role="status" aria-live="polite" className="text-xs text-fountain-ink bg-fountain-ink/10 px-3 py-1.5 rounded-md border border-fountain-ink/20 font-medium flex items-center gap-1.5 w-fit max-w-full">
             <span>✓ Answer saved as draft. You can change this anytime before submitting.</span>
           </div>
         )}
@@ -351,7 +434,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           {reportState === 'done' ? (
             <span>Reported &mdash; it won&apos;t be shown again.</span>
           ) : !reportOpen ? (
-            <button type="button" className="underline-offset-2 hover:underline hover:text-charcoal-graphite/80" onClick={() => setReportOpen(true)}>
+            <button type="button" className="min-h-11 underline-offset-2 hover:underline hover:text-charcoal-graphite/80 xl:min-h-0" onClick={() => setReportOpen(true)}>
               Report question
             </button>
           ) : (
@@ -381,15 +464,15 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           {explanation && (
             <div className="text-sm w-full">
               <strong className="text-charcoal-graphite font-display italic text-base block mb-2">Professor's Explanation:</strong>
-              <div className="mt-2 prose dark:prose-invert max-w-none text-sm break-words leading-relaxed text-charcoal-graphite/85"><ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]}>{preprocessLaTeX(explanation)}</ReactMarkdown></div>
+              <Md text={explanation} className="mt-2 prose dark:prose-invert max-w-none min-w-0 text-sm break-words leading-relaxed text-charcoal-graphite/85" />
             </div>
           )}
           
-          {onRequestExplanation && !hasRequestedHelp && (
+          {onRequestExplanation && !hasRequestedHelp && answered && !!shownResult && !shownResult.isCorrect && (
             <Button 
               variant="outline" 
               onClick={handleExplainMistake}
-              className="mt-2 text-fountain-ink border-fountain-ink/30 hover:bg-fountain-ink/5"
+              className="mt-2 max-xl:h-11 text-fountain-ink border-fountain-ink/30 hover:bg-fountain-ink/5"
             >
               Ask Voice Tutor to Explain My Mistake
             </Button>
@@ -397,7 +480,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
 
           {hasRequestedHelp && (
             <div className="text-sm text-fountain-ink italic font-medium mt-2 animate-pulse">
-              Asking Tutor... Check the chat sidebar.
+              Asking Tutor... See the tutor panel.
             </div>
           )}
         </CardFooter>

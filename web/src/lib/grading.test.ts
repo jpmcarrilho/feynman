@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { gradeAnswer, resolveExerciseType, logScore, sessionScore, sessionHeadline, formatScore, type GradableExercise } from './grading'
+import { gradeAnswer, resolveExerciseType, logScore, sessionScore, sessionHeadline, formatScore, answerDisplayLines, isPlaceholderChoice, type GradableExercise } from './grading'
 
 const arr = (...xs: string[]) => JSON.stringify(xs)
 
@@ -200,5 +200,51 @@ describe('sessionHeadline (shared by the history list and the results dialog)', 
 
   it('without a question count (legacy rows) it falls back to the answered count', () => {
     expect(sessionHeadline({ mode: 'study', logs: [log(1), log(0)] })).toMatchObject({ total: 2, notAnswered: 0 })
+  })
+})
+
+describe('answerDisplayLines', () => {
+  const multi = { exerciseType: 'multiple_choice', choices: ['a', 'b', 'c'], questionText: 'q' }
+  const dd = { exerciseType: 'dropdown', choices: ['[Dropdown 1] x', '[Dropdown 1] y', '[Dropdown 2] z'], questionText: 'q [Dropdown 1] [Dropdown 2]' }
+
+  it('lists the options of a multi-select answer instead of raw JSON', () => {
+    expect(answerDisplayLines(multi, JSON.stringify(['Option $x^2$', 'b']))).toEqual(['Option $x^2$', 'b'])
+  })
+  it('shows a dropdown answer without the [Dropdown n] prefix, blank by blank when there are several', () => {
+    expect(answerDisplayLines(dd, JSON.stringify({ '[Dropdown 1]': 'x', '[Dropdown 2]': 'z' }))).toEqual(['Blank 1: x', 'Blank 2: z'])
+    expect(answerDisplayLines(dd, JSON.stringify(['[Dropdown 1] diverging', '[Dropdown 2] increasing']))).toEqual(['Blank 1: diverging', 'Blank 2: increasing'])
+    expect(answerDisplayLines(dd, '[Dropdown 1] success | [Dropdown 2] outcomes')).toEqual(['Blank 1: success', 'Blank 2: outcomes'])
+    expect(answerDisplayLines({ ...dd, choices: ['[Dropdown 1] x'] }, JSON.stringify({ '[Dropdown 1]': 'x' }))).toEqual(['x'])
+  })
+  it('keeps numeric and single-choice values as they are and gives nothing for an empty answer', () => {
+    expect(answerDisplayLines({ exerciseType: 'numeric', choices: [], questionText: 'q' }, '0.25')).toEqual(['0.25'])
+    expect(answerDisplayLines({ exerciseType: 'single_choice', choices: ['p', 'q'], questionText: 'q' }, 'Paris')).toEqual(['Paris'])
+    expect(answerDisplayLines(multi, '')).toEqual([])
+    expect(answerDisplayLines(multi, null)).toEqual([])
+  })
+})
+
+describe('the "Select an option" placeholder stored as a choice', () => {
+  const choices = ['[Dropdown 1] Select an option', '[Dropdown 1] First stage', '[Dropdown 1] Reduced form']
+  const ex: GradableExercise = { exerciseType: 'dropdown', choices, correctAnswer: '[Dropdown 1] First stage', questionText: 'It is [Dropdown 1].' }
+
+  it('is recognized with or without a prefix, case-insensitively, and nothing else is', () => {
+    for (const t of ['Select an option', 'select AN option', '[Dropdown 2] Select an option', '[Blank 1]  Select an option.']) expect(isPlaceholderChoice(t)).toBe(true)
+    for (const t of ['First stage', 'Select the option that', '', null, undefined]) expect(isPlaceholderChoice(t)).toBe(false)
+  })
+
+  it('is never accepted as an answer, even when the key is the placeholder itself', () => {
+    expect(gradeAnswer(ex, JSON.stringify({ '[Dropdown 1]': 'Select an option' }))).toEqual({ score: 0, isCorrect: false })
+    expect(gradeAnswer(ex, JSON.stringify({ '[Dropdown 1]': '[Dropdown 1] Select an option' }))).toEqual({ score: 0, isCorrect: false })
+    expect(gradeAnswer(ex, JSON.stringify({ '[Dropdown 1]': 'First stage' }))).toEqual({ score: 1, isCorrect: true })
+    const broken = { ...ex, correctAnswer: JSON.stringify(['[Dropdown 1] Select an option']) }
+    expect(gradeAnswer(broken, JSON.stringify({ '[Dropdown 1]': 'Select an option' }))).toEqual({ score: 0, isCorrect: false })
+    expect(gradeAnswer(broken, JSON.stringify({ '[Dropdown 1]': 'First stage' }))).toEqual({ score: 0, isCorrect: false })
+  })
+
+  it('does not show up in a displayed answer', () => {
+    expect(answerDisplayLines(ex, JSON.stringify({ '[Dropdown 1]': 'Select an option' }))).toEqual([])
+    expect(answerDisplayLines(ex, JSON.stringify(['[Dropdown 1] Select an option']))).toEqual([])
+    expect(answerDisplayLines(ex, JSON.stringify({ '[Dropdown 1]': 'First stage' }))).toEqual(['First stage'])
   })
 })

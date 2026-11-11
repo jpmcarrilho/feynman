@@ -7,6 +7,7 @@ import { SessionTimer } from './SessionTimer'
 import { generateWithRetry } from '@/lib/generationRetry'
 import { requestNextExercise } from '@/lib/generationClient'
 import { VoiceHub } from './VoiceHub'
+import { TutorSheet } from './TutorSheet'
 import Link from 'next/link'
 import { Dialog } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -42,6 +43,7 @@ import {
 import {
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
   PlusCircle,
   History,
   Loader2,
@@ -56,7 +58,8 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  PanelRightOpen
+  PanelRightOpen,
+  MessageCircle
 } from 'lucide-react'
 import { useLiveAPI } from '@/hooks/useLiveAPI'
 import {
@@ -65,7 +68,9 @@ import {
   voicePlannerContextMessage,
   voiceDashboardContextMessage,
 } from '@/lib/prompts'
-import { formatScore, sessionScore } from '@/lib/grading'
+import { formatScore, sessionScore, logScore, answerDisplayLines } from '@/lib/grading'
+import { topicSourceLabel } from '@/lib/topicLabel'
+import { plannerSuggestions, moduleLabelsOf } from '@/lib/plannerSuggestions'
 import type { TutorChatMode, TutorProfile } from '@/lib/studyspace/profile'
 import { getChatMode, setChatMode, subscribeChatMode, migrateLegacyChatMode } from '@/lib/studyspace/chatMode'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
@@ -220,6 +225,16 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
   const [isGeneratingPlan, setIsGeneratingPlan] = useState(false)
   const [isDeployingPlan, setIsDeployingPlan] = useState(false)
   const [activeTab, setActiveTab] = useState<string>('study')
+  // Below xl the tutor is a bottom sheet opened by a floating button. Open/closed is only a view state: the connection, the
+  // chat and the mode live in this component (liveAPI, chat, the mode store), so none of them depends on the sheet.
+  const [tutorOpen, setTutorOpen] = useState(false)
+  const tutorButtonRef = useRef<HTMLButtonElement>(null)
+  // Below xl the active exam shows one compact row (time, answered count, Submit); the question map and the secondary actions open on request
+  const [examPanelOpen, setExamPanelOpen] = useState(false)
+  // The same for a study session: one compact row, everything else behind a toggle (collapsed by default)
+  const [studyPanelOpen, setStudyPanelOpen] = useState(false)
+  // The message being typed in the tutor's text box, kept here so it survives the panel being re-created (sheet closed, window resized across xl)
+  const [tutorDraft, setTutorDraft] = useState('')
 
   // Dedicated conversational planner chat states
   const [plannerChat, setPlannerChat] = useState<Array<{ role: 'user' | 'assistant', content: string }>>([])
@@ -297,6 +312,13 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
   // true from the xl breakpoint up; below it the tutor tab and the file viewer take the whole screen
   const wideLayout = useSyncExternalStore(subscribeWideLayout, getWideLayout, () => true)
   const [pageVisible, setPageVisible] = useState(true)
+  // The sheet exists only below xl; crossing to the sidebar layout closes it (the sidebar then holds the one VoiceHub)
+  const tutorSheetOpen = tutorOpen && !wideLayout
+  const [layoutWasWide, setLayoutWasWide] = useState(wideLayout)
+  if (layoutWasWide !== wideLayout) {
+    setLayoutWasWide(wideLayout)
+    if (wideLayout) setTutorOpen(false)
+  }
   // study cards answered at the click (the clock stays stopped even before the log reaches the screen)
   const closedCardsRef = useRef(new Set<string>())
   // the card the tutor's help would count for right now (null: nothing to record), kept current by an effect
@@ -474,6 +496,8 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
     if (session?.status === 'active' && currentExercise) {
       cardTimer.run(null)
       persistTime(session.id, currentExercise.id, session.mode)
+      // A draft still waiting out its debounce (a number being typed) is sent now, before the position write
+      void writer.flush()
     }
     setCurrentIndex(index)
     if (session?.status === 'active') {
@@ -493,7 +517,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
         setPlannerChat([
           {
             role: 'assistant',
-            content: "Welcome to your AI Curriculum Planner Workspace! I am your Socratic Academic Advisor.\n\nHow should we structure your timeline? Tell me your available daily hours (e.g. 'I want 3 sessions a day, 2 hours each, from Tuesday to Friday'), or click on one of the suggested pre-ideas below to design your curriculum!"
+            content: "Welcome to your AI Curriculum Planner Workspace! I am your Socratic Academic Advisor.\n\nHow should we structure your timeline? Tell me your available daily hours (e.g. 'I want 3 sessions a day, 2 hours each, from Tuesday to Friday'), or use one of the suggested pre-ideas below, if there are any, to design your curriculum!"
           }
         ]);
       }
@@ -756,6 +780,8 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
   }
 
   const handleViewFile = (href: string, title?: string) => {
+    // The viewer covers the screen below xl: put the tutor sheet away so the file is what the student sees
+    setTutorOpen(false)
     // Accepts every file link form: topic/source/summary links and the legacy /api/file?path= links of saved logs
     const link = parseFileLink(href, window.location.origin);
     if (!link) {
@@ -1025,6 +1051,8 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
     ;(async () => {
       try {
         let remaining = missingCount
+        // Questions the session holds, counting those this loop appended
+        let held = latestRef.current.itemCount
         while (remaining > 0 && !cancelled()) {
           const outcome = await generateWithRetry(
             () => requestNextExercise<Record<string, unknown> & { id: string }>(sessionId, courseId ? { courseId } : {}, controller.signal),
@@ -1040,12 +1068,18 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
             return
           }
           if ('error' in outcome) {
+            // A session that can never get a question and has none: nothing to lose, so end it and say why on the start screen
+            if (outcome.retryable === false && held === 0) {
+              void endEmptySession(sessionId, outcome.error)
+              return
+            }
             // Stop here; the banner offers Retry. No timer restarts the loop.
             setGenerationError(outcome.error)
             setGenerationRetryable(outcome.retryable !== false)
             return
           }
           remaining -= 1
+          held += 1
           setExercises(prev => (prev.some((e: any) => e.id === outcome.exercise.id) ? prev : [...prev, outcome.exercise]))
           setMissingCount(prev => Math.max(0, prev - 1))
         }
@@ -1056,6 +1090,32 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
   }, [sessionId, sessionEnded, missingCount, generationError, exercises]);
 
   useEffect(() => { finishExamRef.current = handleFinishExam })
+
+  /**
+   * Generation ended with an error that asking again cannot fix and the session has no questions at all: end it on the
+   * server (a study session is completed, an exam cancelled; with no answers neither loses anything and an empty one is
+   * not listed in History), go back to the start screen and show the message there. If the server could not end it, the
+   * banner of a session with missing questions is shown instead.
+   */
+  const endEmptySession = async (sid: string, message: string) => {
+    let ended = false
+    try {
+      await writer.flush()
+      ended = sessionModeRef.current === 'exam' ? await cancelStudySession(sid) : await finishStudySession(sid)
+    } catch (e) {
+      console.error('Failed to end the empty session:', e)
+    }
+    if (sessionIdRef.current !== sid) return
+    if (!ended) {
+      setGenerationError(message)
+      setGenerationRetryable(false)
+      return
+    }
+    clearSessionView()
+    setActiveTab('study')
+    setNotice(`${message} The session was closed because it had no questions.`)
+    void refreshHistories()
+  }
 
   const handleCancelExam = async () => {
     if (!session) return
@@ -1119,6 +1179,9 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
   }
 
   const currentLog = session?.logs?.find((l: any) => l.exerciseId === currentExercise?.id)
+  // Exam questions with a saved (non-empty) draft
+  const answeredCount = Object.values(draftAnswers).filter(Boolean).length
+  const suggestions = useMemo(() => plannerSuggestions(moduleLabelsOf(topics)), [topics])
 
   // --- Visible time and tutor help for the question on screen ---------------------------------------------------
   // The clock of a question runs only while ALL of these hold: its session is active, the Study tab is showing, the
@@ -1127,7 +1190,8 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
   // it only does when it is in full-width mode.
   const currentCardKey = session && currentExercise ? cardKey(session.id, currentExercise.id) : null
   const viewerCoversCard = !!activeFile && (!wideLayout || isVisualizerFullWidth)
-  const cardCovered = isDiagnosisLoading || isModalOpen || !!selectedHistory || viewerCoversCard
+  // The tutor sheet counts as leaving the card: time spent in the tutor is not time on the card (T18)
+  const cardCovered = isDiagnosisLoading || isModalOpen || !!selectedHistory || viewerCoversCard || tutorSheetOpen
   const examCard = session?.mode === 'exam'
   const cardSessionActive = session?.status === 'active'
   useEffect(() => {
@@ -1171,10 +1235,12 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
     if (session && currentExercise) {
       if (session.mode === 'exam') {
         // A draft, not a commit: kept on screen and on the server (typing in a numeric field is sent after a pause)
-        setDraftAnswers(prev => ({
-          ...prev,
-          [currentExercise.id]: userAnswer
-        }));
+        // An empty answer (everything unticked, field emptied) clears the draft, so it no longer counts as answered
+        const draftExerciseId: string = currentExercise.id
+        setDraftAnswers(prev => {
+          if (userAnswer === '') return Object.fromEntries(Object.entries(prev).filter(([id]) => id !== draftExerciseId))
+          return { ...prev, [draftExerciseId]: userAnswer }
+        });
         persistDraft(session.id, currentExercise.id, userAnswer === '' ? null : userAnswer, currentExercise.exerciseType === 'numeric')
       } else {
         // The server grades with the same gradeAnswer the flashcard just used; its result is what is stored
@@ -1299,8 +1365,13 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
 
   const handleRequestExplanation = (userAnswer: string) => {
     if (!currentExercise) return
+    if (!wideLayout) setTutorOpen(true) // the reply shows in the tutor sheet
     markAssisted() // (the control appears after the answer, when nothing is recorded any more; kept for any earlier use)
-    const msg = `I selected "${userAnswer}", but the correct answer is "${currentExercise.correctAnswer}". Can you explain why I am wrong?`
+    // The answers as a person reads them (not the stored JSON)
+    const shape = { exerciseType: currentExercise.exerciseType || 'single_choice', choices: parsedChoices, questionText: currentExercise.questionText }
+    const chosen = answerDisplayLines(shape, userAnswer).join('; ') || userAnswer
+    const key = answerDisplayLines(shape, currentExercise.correctAnswer).join('; ') || currentExercise.correctAnswer
+    const msg = `I selected "${chosen}", but the correct answer is "${key}". Can you explain why I am wrong?`
 
     if (!liveAPI.isConnected) {
       // Connect first (text-only); the context effect sends the message right after the context
@@ -1359,7 +1430,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
   }
 
   return (
-    <div className="flex w-full h-screen overflow-hidden bg-background font-sans relative">
+    <div className="flex w-full h-dvh overflow-hidden bg-background font-sans relative">
 
       {/* LEFT SIDEBAR - 20vw / 64px / 0px (Desktop only) */}
       <div className={`hidden xl:flex h-full border-r flex-col bg-card text-charcoal-graphite shrink-0 transition-all duration-300 ease-in-out border-charcoal-graphite/10 relative z-30 ${
@@ -1445,24 +1516,24 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
       <Tabs
         value={activeTab}
         onValueChange={setActiveTab}
-        className={`flex-1 flex flex-col transition-all duration-300 ease-in-out bg-background w-full ${getMainWidthClass()}`}
+        className={`flex-1 flex flex-col min-w-0 max-xl:pb-[calc(4.5rem+env(safe-area-inset-bottom))] transition-all duration-300 ease-in-out bg-background w-full ${getMainWidthClass()}`}
       >
         <div className="pt-4 pb-4 px-4 sm:px-8 border-b border-charcoal-graphite/10 transition-all duration-300 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 xl:pl-8">
           {/* Way back to the list, and which studyspace this is */}
           <div className="flex items-center gap-3 min-w-0 select-none">
-            <Link href="/spaces" className="shrink-0 text-xs sm:text-sm font-semibold text-fountain-ink hover:underline">&larr; Studyspaces</Link>
+            <Link href="/spaces" className="shrink-0 inline-flex items-center max-xl:min-h-11 text-xs sm:text-sm font-semibold text-fountain-ink hover:underline">&larr; Studyspaces</Link>
             <span className="font-display text-lg sm:text-xl italic font-bold tracking-tight text-charcoal-graphite truncate" title={courseTitle}>{courseTitle}</span>
           </div>
 
           {/* Tabs row */}
-          <div className="flex items-center gap-4 w-full sm:w-auto">
-            <TabsList className="bg-muted border border-charcoal-graphite/5 p-1 rounded-lg w-full sm:w-auto flex justify-around">
-              <TabsTrigger value="study" className="flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Study</TabsTrigger>
-              <TabsTrigger value="plan" className="flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Study Plan</TabsTrigger>
-              <TabsTrigger value="resources" className="flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Resources</TabsTrigger>
-              <TabsTrigger value="chat" className="xl:hidden flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Tutor</TabsTrigger>
-              <TabsTrigger value="history" className="xl:hidden flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">History</TabsTrigger>
-              <TabsTrigger value="analytics" className="flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Analytics</TabsTrigger>
+          <div className="flex items-center gap-4 w-full sm:w-auto sm:shrink-0 min-w-0 max-w-full">
+            {/* Five tabs below xl: they fit, or the strip scrolls sideways; no label is clipped (whitespace-nowrap, never narrower than its text) */}
+            <TabsList className="bg-muted border border-charcoal-graphite/5 p-1 rounded-lg w-full sm:w-auto max-w-full flex justify-around overflow-x-auto xl:overflow-visible max-xl:h-12! max-xl:p-0.5 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+              <TabsTrigger value="study" className="max-xl:h-11! max-xl:px-3.5 flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Study</TabsTrigger>
+              <TabsTrigger value="plan" className="max-xl:h-11! max-xl:px-3.5 flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Study Plan</TabsTrigger>
+              <TabsTrigger value="resources" className="max-xl:h-11! max-xl:px-3.5 flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Resources</TabsTrigger>
+              <TabsTrigger value="history" className="max-xl:h-11! max-xl:px-3.5 xl:hidden flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">History</TabsTrigger>
+              <TabsTrigger value="analytics" className="max-xl:h-11! max-xl:px-3.5 flex-1 sm:flex-initial data-[state=active]:bg-sketchbook-cream data-[state=active]:text-charcoal-graphite font-semibold text-xs sm:text-sm">Analytics</TabsTrigger>
             </TabsList>
           </div>
         </div>
@@ -1476,12 +1547,43 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
 
         <TabsContent value="study" className="flex-1 overflow-y-auto p-4 sm:p-8 m-0 min-w-0">
           {session ? (
-            <div className="w-full max-w-3xl mx-auto space-y-6 pb-12 min-w-0">
+            <div className="w-full max-w-3xl mx-auto space-y-3 xl:space-y-6 pb-12 min-w-0">
+
+              {/* STUDY, below xl: one compact row (question n of m, where it comes from, elapsed time) and a toggle for the rest */}
+              {session.mode !== 'exam' && (
+                <div data-testid="study-compact-row" className="xl:hidden flex min-h-11 items-center gap-2 rounded-xl border border-charcoal-graphite/10 bg-card pl-3 pr-1 shadow-sm">
+                  <span className="shrink-0 text-sm font-semibold text-charcoal-graphite">
+                    <span className="sr-only">Question {currentIndex + 1} of {exercises.length + missingCount}</span>
+                    <span aria-hidden="true">{currentIndex + 1}/{exercises.length + missingCount}</span>
+                  </span>
+                  {stillGenerating && <span className="shrink-0 animate-pulse" role="img" aria-label="Generating more questions"><FeynmanLogo variant="thinking" size={14} /></span>}
+                  <span className="min-w-0 flex-1 truncate text-xs font-semibold text-fountain-ink" title={currentExercise ? topicSourceLabel(currentExercise.topic) : undefined}>
+                    {currentExercise ? topicSourceLabel(currentExercise.topic) : ''}
+                  </span>
+                  <SessionTimer compact durationSeconds={session.timeLimit ?? sessionDuration} startTime={session.startTime} endTime={session.endTime} active={session.status === 'active'} serverOffsetMs={clockOffsetMs} />
+                  <button
+                    type="button"
+                    onClick={() => setStudyPanelOpen((o) => !o)}
+                    aria-expanded={studyPanelOpen}
+                    aria-controls="study-panel"
+                    aria-label={studyPanelOpen ? 'Hide session options' : 'Session options'}
+                    className="flex size-11 shrink-0 items-center justify-center rounded-lg text-charcoal-graphite/70 outline-none hover:bg-muted focus-visible:ring-3 focus-visible:ring-ring/50"
+                  >
+                    <ChevronDown className={`size-5 transition-transform ${studyPanelOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+                  </button>
+                </div>
+              )}
+              {session.mode !== 'exam' && studyPanelOpen && (
+                <div id="study-panel" className="xl:hidden space-y-1 rounded-xl border border-charcoal-graphite/10 bg-card p-3 text-xs text-charcoal-graphite/80 shadow-sm">
+                  {currentExercise && <p className="font-semibold text-fountain-ink break-words">{topicSourceLabel(currentExercise.topic)}</p>}
+                  <p>Question {currentIndex + 1} of {exercises.length + missingCount}{stillGenerating ? ` - generating ${missingCount} more...` : ''}</p>
+                </div>
+              )}
 
               {/* Actions Row: Create Session, Session Summary, and End Session (Above elapsed time) */}
-              <div className="flex flex-wrap items-center gap-3 bg-card p-4 rounded-xl border border-charcoal-graphite/10 shadow-sm justify-between">
+              <div className={`flex flex-wrap items-center gap-3 bg-card p-4 rounded-xl border border-charcoal-graphite/10 shadow-sm justify-between ${(session.mode === 'exam' ? session.status === 'active' && !examPanelOpen : !studyPanelOpen) ? 'max-xl:hidden' : ''}`}>
                 <div className="flex flex-wrap items-center gap-2">
-                  <Button type="button" onClick={openSessionDialog} className="flex gap-1.5 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-9 px-3 text-xs rounded-lg animate-sketch-draw">
+                  <Button type="button" onClick={openSessionDialog} className="flex gap-1.5 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-9 max-xl:h-11 px-3 text-xs rounded-lg animate-sketch-draw">
                       <PlusCircle className="w-4 h-4" />
                       <span>New Session</span>
                     </Button>
@@ -1489,7 +1591,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                   {session.mode !== 'exam' && (
                     <Button
                       variant="outline"
-                      className="text-fountain-ink border-fountain-ink/30 hover:bg-fountain-ink/5 font-medium flex items-center gap-1.5 shadow-sm h-9 px-3 text-xs rounded-lg"
+                      className="text-fountain-ink border-fountain-ink/30 hover:bg-fountain-ink/5 font-medium flex items-center gap-1.5 shadow-sm h-9 max-xl:h-11 px-3 text-xs rounded-lg"
                       onClick={handleGenerateSummary}
                       disabled={isGeneratingSummary}
                     >
@@ -1505,7 +1607,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
 
                 <Button
                   variant="ghost"
-                  className="text-lecture-red hover:text-lecture-red hover:bg-lecture-red/10 border border-transparent hover:border-lecture-red/20 font-medium h-9 px-3 text-xs rounded-lg"
+                  className="text-lecture-red hover:text-lecture-red hover:bg-lecture-red/10 border border-transparent hover:border-lecture-red/20 font-medium h-9 max-xl:h-11 px-3 text-xs rounded-lg"
                   onClick={session.mode === 'exam' ? (session.status === 'active' ? handleCancelExam : handleCloseReview) : handleFinishSession}
                 >
                   {session.mode === 'exam' ? (session.status === 'active' ? 'Cancel Exam' : 'Close') : 'End Session'}
@@ -1525,7 +1627,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                   <span className="text-xs text-charcoal-graphite/60">Reviewing your answers</span>
                 </div>
               ) : session.mode === 'exam' ? (
-                <div className={`p-4 rounded-xl border shadow-md flex justify-between items-center transition-all duration-300 font-sans ${
+                <div className={`p-4 max-xl:p-3 rounded-xl border shadow-md flex max-xl:flex-wrap justify-between items-center max-xl:gap-y-2 transition-all duration-300 font-sans ${
                   timeLeft !== null && timeLeft < 300 
                     ? 'bg-lecture-red/10 border-lecture-red text-lecture-red animate-pulse'
                     : 'bg-card border-charcoal-graphite/10 text-charcoal-graphite'
@@ -1548,28 +1650,43 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                     onClick={() => {
                       if (typeof window !== 'undefined') {
                         const totalQs = exercises.length;
-                        const answeredQs = Object.keys(draftAnswers).length;
+                        const answeredQs = answeredCount;
                         const ok = window.confirm(`Are you sure you want to submit your exam paper?\n\nProgress: ${answeredQs} of ${totalQs} questions answered.`);
                         if (ok) {
                           handleFinishExam();
                         }
                       }
                     }}
-                    className="bg-lecture-red hover:bg-lecture-red/90 text-white font-semibold text-sm shadow-sm h-10 px-4 rounded-lg"
+                    className="bg-lecture-red hover:bg-lecture-red/90 text-white font-semibold text-sm shadow-sm h-10 max-xl:h-11 px-4 rounded-lg"
                   >
                     Submit Exam Paper
                   </Button>
+                  {/* Below xl: how far along, and the way to the question map and the secondary actions (collapsed by default) */}
+                  <div className="xl:hidden w-full flex items-center justify-between gap-2 text-xs font-semibold text-charcoal-graphite/70">
+                    <span aria-live="polite">{answeredCount} of {exercises.length} answered</span>
+                    <button
+                      type="button"
+                      onClick={() => setExamPanelOpen((o) => !o)}
+                      aria-expanded={examPanelOpen}
+                      aria-controls="exam-panel"
+                      className="min-h-11 rounded-md px-3 text-xs font-semibold text-fountain-ink hover:bg-fountain-ink/10 outline-none focus-visible:ring-3 focus-visible:ring-ring/50"
+                    >
+                      {examPanelOpen ? 'Hide question map' : 'Question map & actions'}
+                    </button>
+                  </div>
                 </div>
               ) : (
-                <SessionTimer durationSeconds={session.timeLimit ?? sessionDuration} startTime={session.startTime} endTime={session.endTime} active={session.status === 'active'} serverOffsetMs={clockOffsetMs} />
+                <div className={studyPanelOpen ? '' : 'max-xl:hidden'}>
+                  <SessionTimer durationSeconds={session.timeLimit ?? sessionDuration} startTime={session.startTime} endTime={session.endTime} active={session.status === 'active'} serverOffsetMs={clockOffsetMs} />
+                </div>
               )}
 
               {/* EXAM HUD: Complete Navigation Map Grid */}
               {session.mode === 'exam' && session.status === 'active' && exercises.length > 0 && (
-                <div className="bg-card p-4 sm:p-5 rounded-xl border border-charcoal-graphite/10 shadow-sm space-y-4 font-sans">
+                <div id="exam-panel" className={`bg-card p-4 sm:p-5 rounded-xl border border-charcoal-graphite/10 shadow-sm space-y-4 font-sans ${examPanelOpen ? '' : 'max-xl:hidden'}`}>
                   <div className="flex justify-between items-center text-xs font-semibold text-charcoal-graphite/60 uppercase tracking-wider pb-2 border-b border-charcoal-graphite/10">
                     <span>Exam Navigation Map</span>
-                    <span className="text-fountain-ink font-bold">{Object.keys(draftAnswers).length} of {exercises.length} Answered</span>
+                    <span className="text-fountain-ink font-bold">{answeredCount} of {exercises.length} Answered</span>
                   </div>
                   <div className="flex flex-wrap gap-2.5">
                     {exercises.map((ex, idx) => {
@@ -1592,7 +1709,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                           type="button"
                           variant="outline"
                           onClick={() => goToIndex(idx)}
-                          className={`w-10 h-10 p-0 text-sm font-medium rounded-md transition-all duration-200 relative ${btnClass}`}
+                          className={`w-10 h-10 max-xl:w-11 max-xl:h-11 p-0 text-sm font-medium rounded-md transition-all duration-200 relative ${btnClass}`}
                         >
                           {idx + 1}
                           {isFlagged && <span className="absolute -top-1 -right-1 text-[8px] bg-amber-500 text-white w-3.5 h-3.5 rounded-full flex items-center justify-center font-bold">⚑</span>}
@@ -1637,7 +1754,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
 
               {!isDiagnosisLoading && currentExercise ? (
                 <div className="space-y-4">
-                  <div className="flex justify-between items-center text-sm font-medium text-charcoal-graphite bg-card p-3 rounded-lg border border-charcoal-graphite/10 shadow-sm">
+                  <div className={`flex flex-wrap justify-between items-center gap-x-4 gap-y-1 text-sm font-medium text-charcoal-graphite bg-card p-3 rounded-lg border border-charcoal-graphite/10 shadow-sm ${session.mode !== 'exam' ? 'max-xl:hidden' : ''}`}>
                     <div className="flex items-center gap-4">
                       <span>Question {currentIndex + 1} of {exercises.length + missingCount}</span>
                       {stillGenerating && (
@@ -1647,18 +1764,19 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                         </span>
                       )}
                     </div>
-                    <span className="font-semibold text-fountain-ink truncate max-w-[120px] sm:max-w-none">{currentExercise.topic?.course?.code || ''} - {currentExercise.topic?.title}</span>
+                    {/* Where the question comes from (module and class or lecture), not the source topic title ("Question 6") */}
+                    <span className="font-semibold text-fountain-ink min-w-0 break-words" title={topicSourceLabel(currentExercise.topic)}>{topicSourceLabel(currentExercise.topic)}</span>
                   </div>
 
                   {/* Interactive Arrow Navigation Bar */}
-                  <div className="flex justify-between items-center w-full select-none gap-2">
+                  <div data-testid="top-nav" className={`flex justify-between items-center w-full select-none gap-2 ${session.mode !== 'exam' ? 'max-xl:hidden' : ''}`}>
                     <Button
                       type="button"
                       variant="outline"
                       size="sm"
                       onClick={() => goToIndex(Math.max(0, currentIndex - 1))}
                       disabled={currentIndex === 0}
-                      className="flex-1 max-w-[120px] h-9 gap-1 font-semibold text-xs border border-charcoal-graphite/10 hover:bg-muted rounded-lg shrink-0"
+                      className="flex-1 max-w-[120px] h-9 max-xl:h-11 gap-1 font-semibold text-xs border border-charcoal-graphite/10 hover:bg-muted rounded-lg shrink-0"
                     >
                       <ChevronLeft className="w-3.5 h-3.5" />
                       Prev
@@ -1671,7 +1789,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                         variant="outline"
                         size="sm"
                         onClick={() => toggleFlag(currentExercise.id)}
-                        className={`h-9 px-4 gap-1.5 font-semibold text-xs border rounded-lg shrink-0 transition-all duration-200 ${
+                        className={`h-9 max-xl:h-11 px-4 gap-1.5 font-semibold text-xs border rounded-lg shrink-0 transition-all duration-200 ${
                           flaggedIds.includes(currentExercise.id)
                             ? 'bg-amber-100 text-amber-800 border-amber-400 font-bold hover:bg-amber-150'
                             : 'border-charcoal-graphite/10 hover:bg-muted text-charcoal-graphite/80'
@@ -1694,7 +1812,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                             handleCloseReview()
                           } else if (session.mode === 'exam') {
                             const totalQs = exercises.length;
-                            const answeredQs = Object.keys(draftAnswers).length;
+                            const answeredQs = answeredCount;
                             const ok = window.confirm(`You have reached the end of the exam.\n\nProgress: ${answeredQs} of ${totalQs} questions answered. Submit now?`);
                             if (ok) handleFinishExam();
                           } else {
@@ -1705,7 +1823,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                         }
                       }}
                       disabled={currentIndex === exercises.length - 1 && stillGenerating}
-                      className="flex-1 max-w-[120px] h-9 gap-1 font-semibold text-xs border border-charcoal-graphite/10 hover:bg-muted rounded-lg shrink-0"
+                      className="flex-1 max-w-[120px] h-9 max-xl:h-11 gap-1 font-semibold text-xs border border-charcoal-graphite/10 hover:bg-muted rounded-lg shrink-0"
                     >
                       Next
                       <ChevronRight className="w-3.5 h-3.5" />
@@ -1723,6 +1841,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                     hasBeenAnswered={session.status !== 'active' ? true : (session.mode === 'exam' ? false : !!currentLog)}
                     isExamMode={session.mode === 'exam' && session.status === 'active'}
                     onAnswer={handleAnswer}
+                    result={currentLog ? { score: logScore(currentLog), isCorrect: !!currentLog.isCorrect } : null}
                     onRequestExplanation={handleRequestExplanation}
                     reported={currentExercise.status === 'reported'}
                     onReport={async (reason) => {
@@ -1736,6 +1855,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                   <div className="flex justify-between pt-6">
                     <Button
                       variant="outline"
+                      className="max-xl:h-11"
                       onClick={() => goToIndex(Math.max(0, currentIndex - 1))}
                       disabled={currentIndex === 0}
                     >
@@ -1743,6 +1863,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                       Previous
                     </Button>
                     <Button
+                      className="max-xl:h-11"
                       variant={currentIndex === exercises.length - 1 && !stillGenerating ? "default" : "outline"}
                       disabled={currentIndex === exercises.length - 1 && stillGenerating}
                       onClick={() => {
@@ -1751,7 +1872,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                             handleCloseReview()
                           } else if (session.mode === 'exam') {
                             const totalQs = exercises.length;
-                            const answeredQs = Object.keys(draftAnswers).length;
+                            const answeredQs = answeredCount;
                             const ok = window.confirm(`Ready to submit exam?\n\nProgress: ${answeredQs} of ${totalQs} questions answered.`);
                             if (ok) handleFinishExam();
                           } else {
@@ -1935,7 +2056,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                 </span>
                 <h2 className="text-xl font-bold font-display italic text-charcoal-graphite">AI Curriculum Planner</h2>
                 <p className="text-xs sm:text-sm text-muted-foreground leading-relaxed">
-                  Design a personalized, multi-day Socratic Study Syllabus based on your exact strengths, weaknesses, and preferred available hours. Discuss with the professor below, or click a suggested pre-idea to generate your study timeline.
+                  Design a personalized, multi-day Socratic Study Syllabus based on your exact strengths, weaknesses, and preferred available hours. Discuss with the professor below, or use a suggested pre-idea to start your study timeline.
                 </p>
               </div>
 
@@ -1965,39 +2086,26 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                   )}
                 </div>
 
-                {/* Pre-ideas suggested prompts list */}
-                <div className="space-y-2 shrink-0 pt-2 border-t border-charcoal-graphite/5">
-                  <span className="text-[10px] font-bold text-charcoal-graphite/50 uppercase tracking-wider block">Suggested Pre-Ideas:</span>
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <button
-                      type="button"
-                      disabled={isPlannerChatLoading}
-                      onClick={() => handleSendPlannerMessage("I have 6 hours a day. Build me a high-intensity 4-day sprint targeting my weak areas: Sampling and Leaders.")}
-                      className="text-left p-2.5 rounded-lg border border-bongo-gold/25 bg-bongo-gold/5 hover:bg-bongo-gold/15 text-[10px] sm:text-xs leading-snug font-medium text-charcoal-graphite transition-colors duration-150"
-                    >
-                      📅 <strong>4-Day Peak Prep</strong><br />
-                      Focus on Sampling & Leaders
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isPlannerChatLoading}
-                      onClick={() => handleSendPlannerMessage("I want to study 4 hours a day, focusing on logistics and research integrity. Let's do timed exams on Friday.")}
-                      className="text-left p-2.5 rounded-lg border border-bongo-gold/25 bg-bongo-gold/5 hover:bg-bongo-gold/15 text-[10px] sm:text-xs leading-snug font-medium text-charcoal-graphite transition-colors duration-150"
-                    >
-                      ⏱️ <strong>5-Day Intense Sprint</strong><br />
-                      Focus on Logistics & Ethics
-                    </button>
-                    <button
-                      type="button"
-                      disabled={isPlannerChatLoading}
-                      onClick={() => handleSendPlannerMessage("Create a complete conceptual review study plan. Cover OLS regressions, Voting theory, and Measurement Networks.")}
-                      className="text-left p-2.5 rounded-lg border border-bongo-gold/25 bg-bongo-gold/5 hover:bg-bongo-gold/15 text-[10px] sm:text-xs leading-snug font-medium text-charcoal-graphite transition-colors duration-150"
-                    >
-                      📖 <strong>Conceptual Review</strong><br />
-                      Cover OLS, Voting, & Networks
-                    </button>
+                {/* Pre-ideas: generic study-planning starters filled with module names of this studyspace (none without modules) */}
+                {suggestions.length > 0 && (
+                  <div className="space-y-2 shrink-0 pt-2 border-t border-charcoal-graphite/5">
+                    <span className="text-[10px] font-bold text-charcoal-graphite/50 uppercase tracking-wider block">Suggested Pre-Ideas:</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      {suggestions.map((sg) => (
+                        <button
+                          key={sg.id}
+                          type="button"
+                          disabled={isPlannerChatLoading}
+                          onClick={() => handleSendPlannerMessage(sg.prompt)}
+                          className="text-left min-h-11 min-w-0 break-words p-2.5 rounded-lg border border-bongo-gold/25 bg-bongo-gold/5 hover:bg-bongo-gold/15 text-[10px] sm:text-xs leading-snug font-medium text-charcoal-graphite transition-colors duration-150"
+                        >
+                          {sg.icon} <strong>{sg.title}</strong><br />
+                          {sg.focus}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Conversation text input form */}
                 <form 
@@ -2014,7 +2122,7 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
                     onChange={(e) => setPlannerInput(e.target.value)}
                     placeholder="Type your study availability, preferred slots, or feedback here..."
                     disabled={isPlannerChatLoading}
-                    className="flex-1 rounded-md border border-charcoal-graphite/15 bg-background text-charcoal-graphite px-3 py-2 text-xs sm:text-sm placeholder:text-charcoal-graphite/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-fountain-ink outline-none"
+                    className="flex-1 rounded-md border border-charcoal-graphite/15 bg-background text-charcoal-graphite px-3 py-2 max-xl:h-11 text-base sm:text-sm placeholder:text-charcoal-graphite/40 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-fountain-ink outline-none"
                   />
                   <Button 
                     type="submit" 
@@ -2043,21 +2151,6 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
               </div>
             </div>
           )}
-        </TabsContent>
-
-        <TabsContent value="chat" className="xl:hidden flex-1 overflow-y-auto m-0 p-0 min-w-0">
-          <VoiceHub 
-            liveAPI={liveAPI} 
-            onViewFile={handleViewFile} 
-            onGeneratePlan={handleGeneratePlan}
-            isGeneratingPlan={isGeneratingPlan}
-            chatMode={chatMode}
-            onChatModeChange={handleChatModeChange}
-            chatModeProfile={profile}
-            sessionMode={session?.mode}
-            pendingMessageRef={pendingMessageRef}
-            onHelpRequested={markAssisted}
-          />
         </TabsContent>
 
         <TabsContent value="history" className="xl:hidden flex-1 overflow-y-auto p-4 m-0 min-w-0 custom-scrollbar">
@@ -2108,7 +2201,9 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
         </div>
       )}
 
-      {/* RIGHT SIDEBAR - 20vw / 64px / 0px (Desktop only) */}
+      {/* RIGHT SIDEBAR - 20vw / 64px / 0px. Mounted only from xl up: below it the tutor is the bottom sheet, so there is
+          never more than one VoiceHub (one chat box, one mode selector, one set of connection controls). */}
+      {wideLayout && (
       <div className={`hidden xl:flex h-full border-l bg-card shrink-0 flex flex-col border-charcoal-graphite/10 relative z-30 transition-all duration-300 ease-in-out ${
         isVisualizerFullWidth 
           ? 'xl:w-0 xl:overflow-hidden xl:border-l-0 xl:opacity-0' 
@@ -2136,6 +2231,8 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
             onGeneratePlan={handleGeneratePlan}
             isGeneratingPlan={isGeneratingPlan}
             onToggleClose={() => setIsProfessorSidebarHidden(true)}
+            draft={tutorDraft}
+            onDraftChange={setTutorDraft}
             chatMode={chatMode}
             onChatModeChange={handleChatModeChange}
             chatModeProfile={profile}
@@ -2145,6 +2242,49 @@ export function StudyInterface({ courseId, courseTitle, profile }: { courseId: s
           />
         )}
       </div>
+      )}
+
+      {/* Below xl: floating Tutor button and the bottom sheet that holds the same VoiceHub. The button stays mounted while the
+          sheet is open (focus returns to it); the sheet's content is mounted only while it is open. */}
+      {!wideLayout && (
+        <button
+          ref={tutorButtonRef}
+          type="button"
+          onClick={() => setTutorOpen(true)}
+          aria-haspopup="dialog"
+          aria-expanded={tutorSheetOpen}
+          aria-label={`Tutor, ${liveAPI.isConnected ? 'connected' : liveAPI.isConnecting ? 'connecting' : 'not connected'}`}
+          className="fixed bottom-4 right-4 z-40 inline-flex h-12 min-w-11 items-center gap-2 rounded-full bg-lecture-red px-5 text-sm font-semibold text-white shadow-lg outline-none focus-visible:ring-3 focus-visible:ring-ring/50 active:translate-y-px"
+        >
+          <MessageCircle className="size-5" aria-hidden="true" />
+          Tutor
+          {/* Connection state while the sheet is closed: green = connected, pulsing amber = connecting */}
+          {(liveAPI.isConnected || liveAPI.isConnecting) && (
+            <span
+              data-testid="tutor-connection-dot"
+              aria-hidden="true"
+              className={`absolute -top-0.5 -right-0.5 size-3.5 rounded-full border-2 border-white ${liveAPI.isConnected ? 'bg-green-500' : 'bg-amber-400 animate-pulse'}`}
+            />
+          )}
+        </button>
+      )}
+      <TutorSheet open={tutorSheetOpen} onOpenChange={setTutorOpen} returnFocusRef={tutorButtonRef}>
+        <VoiceHub
+          liveAPI={liveAPI}
+          onViewFile={handleViewFile}
+          onGeneratePlan={handleGeneratePlan}
+          isGeneratingPlan={isGeneratingPlan}
+          onClose={() => setTutorOpen(false)}
+          draft={tutorDraft}
+          onDraftChange={setTutorDraft}
+          chatMode={chatMode}
+          onChatModeChange={handleChatModeChange}
+          chatModeProfile={profile}
+          sessionMode={session?.mode}
+          pendingMessageRef={pendingMessageRef}
+          onHelpRequested={markAssisted}
+        />
+      </TutorSheet>
 
       {/* NEW SESSION DIALOG: mounted once; every "new session" button opens it through openSessionDialog */}
       <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
