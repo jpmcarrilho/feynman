@@ -34,6 +34,8 @@ import {
 } from '@/services/sessionService'
 import { enrichInBackground, isBackgroundEnrichmentEnabled, type EnrichableRow } from '@/services/enrichment'
 import { gradeAnswer, logScore } from '@/lib/grading'
+import { checkSessionStartable as checkSessionStartableFor, SessionNotStartableError, type StartCheck } from '@/services/sessionStartCheck'
+import { isListableSession } from '@/lib/sessionList'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import {
   explainMistakePrompt,
@@ -398,6 +400,13 @@ export async function startSession(input: StartSessionInput): Promise<SessionSta
   const sessionCourseId = scope
     ?? dominantCourseId(topicIds.length > 0 ? selectedTopicCourseIds : selected.map((e: { topic?: { courseId?: string } | null }) => e.topic?.courseId));
 
+  // No stored question was drawn: the session lives on generation alone. If nothing can be generated either (checked
+  // from the database only, no model call), no session is created at all.
+  if (selected.length === 0) {
+    const check = await checkSessionStartableFor({ courseId: scope, topicIds, count, sourcingMix })
+    if (!check.startable) throw new SessionNotStartableError(check.message)
+  }
+
   // The previous active session of this scope ends first (answers are kept), then the new one is stored with its items
   await endPreviousActiveSessions(scope ? { courseId: scope } : {})
   const session = await createSessionWithItems({
@@ -423,6 +432,23 @@ export async function startSession(input: StartSessionInput): Promise<SessionSta
   const state = await getSessionStateFor(session.id)
   if (!state) throw new Error('The session could not be read back after it was created.')
   return state
+}
+
+/**
+ * Asks, before startSession, whether a session over these topics could show any question (stored graded questions
+ * that the sourcing mix leaves room for, or a topic the generator can use). Database reads only. The study screen calls
+ * it first so that it can say why a start is impossible; startSession enforces the same rule.
+ */
+export async function checkSessionStartable(input: Pick<StartSessionInput, 'courseId' | 'topicIds' | 'count' | 'sourcingMix'>): Promise<StartCheck> {
+  await requireAuth()
+  const safe = (input ?? {}) as Partial<StartSessionInput>
+  const topicIds = Array.isArray(safe.topicIds) ? [...new Set(safe.topicIds.filter((id): id is string => typeof id === 'string' && id.length > 0))] : []
+  return checkSessionStartableFor({
+    courseId: cleanCourseId(safe.courseId),
+    topicIds,
+    count: Math.max(1, Math.min(500, Math.floor(Number(safe.count) || 10))),
+    sourcingMix: clampPct(safe.sourcingMix, 50),
+  })
 }
 
 /** The latest active session of the studyspace (all courses when no courseId), or null. See getActiveSessionFor. */
@@ -537,6 +563,7 @@ export async function cancelStudySession(sessionId: string) {
 /**
  * Session list. With a courseId: the sessions stored under that course (a session belongs to the course it was started
  * in), without the course's diagnosis holder row (mode 'global_diagnosis', not a study session). Without: all rows.
+ * Finished sessions that have no answers are left out (see isListableSession); running sessions and cancelled exams stay.
  */
 export async function getSessionHistory(courseId?: string) {
   await requireAuth()
@@ -548,7 +575,8 @@ export async function getSessionHistory(courseId?: string) {
     orderBy: { startTime: 'desc' },
     select: SESSION_LIST_SELECT
   })
-  return sessions.map(withItemInfo)
+  // Sessions without answers that are over (double-click leftovers, sessions ended at once) stay in the database but are not history
+  return sessions.map(withItemInfo).filter((s) => isListableSession({ status: s.status, logCount: s.logs.length }))
 }
 
 /** Every question of a session in order, with its answer or null; what the results dialog lists. */

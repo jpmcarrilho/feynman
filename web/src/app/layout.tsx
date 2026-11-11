@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Inter, Playfair_Display, Fira_Code } from "next/font/google";
 import "./globals.css";
+// Loaded once for every page: any markdown with math (study cards, tutor chat, viewer, diagnosis reports) needs it
+import "katex/dist/katex.min.css";
 
 const inter = Inter({
   variable: "--font-geist-sans",

@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest'
 import { render, screen, fireEvent } from '@testing-library/react'
-import { ConfigureSessionDialog } from './ConfigureSessionDialog'
+import { ConfigureSessionDialog, questionCountOptions } from './ConfigureSessionDialog'
 import { Dialog } from '@/components/ui/dialog'
 
 describe('ConfigureSessionDialog Component', () => {
@@ -26,11 +26,12 @@ describe('ConfigureSessionDialog Component', () => {
     }
   ]
 
-  const renderComponent = () => {
+  const renderComponent = (extra: { examPreset?: { label: string; questionCount: number } | null; topics?: typeof mockTopics } = {}) => {
     return render(
       <Dialog open={true}>
         <ConfigureSessionDialog
-          topics={mockTopics}
+          topics={extra.topics ?? mockTopics}
+          examPreset={extra.examPreset}
           selectedTopics={[]}
           setSelectedTopics={mockSetSelectedTopics}
           sessionDuration={300}
@@ -67,10 +68,61 @@ describe('ConfigureSessionDialog Component', () => {
     expect(screen.getByRole('button', { name: /📋 Start Timed Exam/i })).toBeInTheDocument()
   })
 
-  it('renders the course filters correctly', () => {
+  it('hides the course filter when the topics belong to a single course (a studyspace)', () => {
     renderComponent()
+    expect(screen.queryByText('Course')).not.toBeInTheDocument()
+  })
+
+  it('shows the course filter when topics of several courses are listed', () => {
+    renderComponent({ topics: [...mockTopics, { ...mockTopics[0], id: 'topic-3', course: { code: 'JPAL102x' } }] })
     expect(screen.getByText('Course')).toBeInTheDocument()
-    expect(screen.getByText('14.750x')).toBeInTheDocument()
+    expect(screen.getByText('JPAL102x')).toBeInTheDocument()
+  })
+
+  it('labels the grouping "Module", never "Week"', () => {
+    renderComponent()
+    expect(screen.getByText('Module')).toBeInTheDocument()
+    expect(screen.queryByText('Week')).not.toBeInTheDocument()
+  })
+
+  it('offers 5, 10, 20, 50 questions and the studyspace exam preset', () => {
+    renderComponent({ examPreset: { label: '14.750x Final', questionCount: 32 } })
+    const select = screen.getByDisplayValue('10 Questions') as HTMLSelectElement
+    expect(Array.from(select.options).map((o) => o.textContent)).toEqual([
+      '5 Questions',
+      '10 Questions',
+      '20 Questions',
+      '32 Questions (14.750x Final)',
+      '50 Questions',
+    ])
+    expect(screen.queryByText(/JPAL102x Final/)).not.toBeInTheDocument()
+  })
+
+  it('shows why a start failed, above the start button', () => {
+    render(
+      <Dialog open={true}>
+        <ConfigureSessionDialog topics={mockTopics} selectedTopics={[]} setSelectedTopics={mockSetSelectedTopics}
+          sessionDuration={300} setSessionDuration={mockSetSessionDuration} questionCount={10} setQuestionCount={mockSetQuestionCount}
+          onStartSession={mockOnStartSession} isLoading={false} errorMessage="The session could not be started." />
+      </Dialog>
+    )
+    expect(screen.getByRole('alert')).toHaveTextContent('The session could not be started.')
+  })
+
+  it('offers only the standard counts without a preset', () => {
+    renderComponent({ examPreset: null })
+    const select = screen.getByDisplayValue('10 Questions') as HTMLSelectElement
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['5', '10', '20', '50'])
+  })
+
+  it('does not repeat a count the preset shares with the standard ones', () => {
+    expect(questionCountOptions({ label: 'Final', questionCount: 50 })).toEqual([
+      { value: 5, label: '5 Questions' },
+      { value: 10, label: '10 Questions' },
+      { value: 20, label: '20 Questions' },
+      { value: 50, label: '50 Questions (Final)' },
+    ])
+    expect(questionCountOptions({ label: 'Final', questionCount: 53 }).map((o) => o.value)).toEqual([5, 10, 20, 50, 53])
   })
 
   it('renders topics with correct titles and tags', () => {

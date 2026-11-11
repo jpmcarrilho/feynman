@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getTopics, getTopicsWithPerformance, getAnalyticsData, generateGlobalDiagnosis, saveAndDeployStudyPlan, generateStructuredStudyPlan, generatePlannerResponse, generateSessionSummary, getCourseArtifacts, getSessionHistory, getSessionDetail, getStudyPlans, startSession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, recordCardTime, cancelStudySession, finishStudySession, saveDraft, setFlagged, setCurrentPosition, getActiveSession, getSessionState, reportExercise } from './actions'
+import { explainMistake, generateNextExercise, getTopics, getTopicsWithPerformance, getAnalyticsData, generateGlobalDiagnosis, saveAndDeployStudyPlan, generateStructuredStudyPlan, generatePlannerResponse, generateSessionSummary, getCourseArtifacts, getSessionHistory, getSessionDetail, getStudyPlans, startSession, checkSessionStartable, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, recordCardTime, cancelStudySession, finishStudySession, saveDraft, setFlagged, setCurrentPosition, getActiveSession, getSessionState, reportExercise } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 import { defaultProfile } from '@/lib/studyspace/profile'
@@ -52,6 +52,12 @@ vi.mock('@/services/sessionService', async (importOriginal) => {
   }
 })
 
+// startSession's "can anything be shown" check is covered in sessionStartCheck.test.ts; here it passes unless a test says otherwise
+const { startCheck } = vi.hoisted(() => ({ startCheck: vi.fn(async () => ({ startable: true })) }))
+vi.mock('@/services/sessionStartCheck', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/services/sessionStartCheck')>()),
+  checkSessionStartable: startCheck,
+}))
 vi.mock('@/services/summaryService', () => ({ createSessionSummary: vi.fn() }))
 vi.mock('@/services/artifactsService', () => ({ getCourseArtifactsService: vi.fn(async () => []), generateWeekSummaryService: vi.fn() }))
 
@@ -116,6 +122,7 @@ let randomSpy: any;
 
 beforeEach(() => {
   vi.clearAllMocks();
+  startCheck.mockResolvedValue({ startable: true })
   randomSpy = vi.spyOn(Math, 'random').mockReturnValue(0.9); // stable random
 })
 
@@ -266,7 +273,7 @@ describe('generateNextExercise action', () => {
 
     const result = await generateNextExercise('session-1')
 
-    expect(result).toEqual({ error: expect.stringContaining('quality checks') })
+    expect(result).toEqual({ error: expect.stringContaining('quality checks'), retryable: false })
     expect(generateObject).not.toHaveBeenCalled()
     // Only rejected rows created since the session started are counted
     expect(prisma.exercise.findMany).toHaveBeenCalledWith(expect.objectContaining({
@@ -307,7 +314,7 @@ describe('generateNextExercise action', () => {
 
     const result = await generateNextExercise('session-1')
 
-    expect(result).toEqual({ error: expect.stringContaining('Too many') })
+    expect(result).toEqual({ error: expect.stringContaining('Too many'), retryable: false })
     expect(generateObject).not.toHaveBeenCalled()
   })
 
@@ -343,7 +350,7 @@ describe('generateNextExercise action', () => {
     vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['empty-1', 'empty-2']) as never)
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await generateNextExercise('session-1')
-    expect(result).toEqual({ error: expect.stringContaining('graded study material') })
+    expect(result).toEqual({ error: expect.stringContaining('graded study material'), retryable: false })
     expect(generateObject).not.toHaveBeenCalled()
     logged.mockRestore()
   })
@@ -354,7 +361,7 @@ describe('generateNextExercise action', () => {
     vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['survey']) as never)
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const result = await generateNextExercise('session-1')
-    expect(result).toEqual({ error: expect.any(String) })
+    expect(result).toEqual({ error: expect.any(String), retryable: false })
     expect(generateObject).not.toHaveBeenCalled()
     logged.mockRestore()
   })
@@ -381,7 +388,7 @@ describe('generateNextExercise action', () => {
 
   it('returns an error for a session with an empty pool (a legacy session with no questions), never drawing from the whole database', async () => {
     vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(null) as never)
-    expect(await generateNextExercise('session-1')).toEqual({ error: expect.any(String) })
+    expect(await generateNextExercise('session-1')).toEqual({ error: expect.any(String), retryable: false })
     expect(generateObject).not.toHaveBeenCalled()
   })
 
@@ -464,8 +471,8 @@ describe('payload trimming', () => {
 
   it('getSessionHistory selects list fields only (no chatLog, diagnosis, topic content) and returns exerciseCount', async () => {
     vi.mocked(prisma.studySession.findMany).mockResolvedValueOnce([
-      { id: 's1', mode: 'exam', items: [{ exerciseId: 'a', position: 0 }, { exerciseId: 'b', position: 1 }, { exerciseId: 'c', position: 2 }], logs: [] },
-      { id: 's2', mode: 'study', items: [], logs: [] },
+      { id: 's1', mode: 'exam', status: 'active', items: [{ exerciseId: 'a', position: 0 }, { exerciseId: 'b', position: 1 }, { exerciseId: 'c', position: 2 }], logs: [] },
+      { id: 's2', mode: 'study', status: 'active', items: [], logs: [] },
     ] as never)
 
     const result = await getSessionHistory()
@@ -499,6 +506,17 @@ describe('payload trimming', () => {
     ] as never)
     const [s1] = await getSessionHistory()
     expect(s1.logs.map((l) => [l.exerciseId, l.position])).toEqual([['a', 0], ['c', 2], ['zzz', null]])
+  })
+
+  it('getSessionHistory leaves out finished sessions without answers, keeping running sessions, cancelled exams and answered ones', async () => {
+    vi.mocked(prisma.studySession.findMany).mockResolvedValueOnce([
+      { id: 'leftover', mode: 'study', status: 'completed', items: [{ exerciseId: 'a', position: 0 }], logs: [] },
+      { id: 'running', mode: 'study', status: 'active', items: [], logs: [] },
+      { id: 'cancelled', mode: 'exam', status: 'cancelled', items: [], logs: [] },
+      { id: 'answered', mode: 'study', status: 'completed', items: [{ exerciseId: 'a', position: 0 }], logs: [{ id: 'l1', exerciseId: 'a' }] },
+    ] as never)
+    const result = await getSessionHistory('cA')
+    expect(result.map((s) => s.id)).toEqual(['running', 'cancelled', 'answered'])
   })
 
   it('getSessionHistory finalizes overdue exams before listing', async () => {
@@ -576,6 +594,24 @@ describe('payload trimming', () => {
     expect(vi.mocked(endPreviousActiveSessions).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(createSessionWithItems).mock.invocationCallOrder[0])
     await startSession(si())
     expect(endPreviousActiveSessions).toHaveBeenLastCalledWith({})
+  })
+
+  it('startSession creates no session when no stored question was drawn and nothing can be generated either', async () => {
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'cA' } as never)
+    startCheck.mockResolvedValueOnce({ startable: false, message: 'Nothing can be generated.' } as never)
+    await expect(startSession(si({ courseId: 'cA', topicIds: [] }))).rejects.toThrow('Nothing can be generated.')
+    expect(startCheck).toHaveBeenCalledWith(expect.objectContaining({ courseId: 'cA', topicIds: [], sourcingMix: 0 }))
+    expect(endPreviousActiveSessions).not.toHaveBeenCalled()
+    expect(createSessionWithItems).not.toHaveBeenCalled()
+  })
+
+  it('checkSessionStartable cleans its input and delegates to the check', async () => {
+    startCheck.mockResolvedValueOnce({ startable: true } as never)
+    const res = await checkSessionStartable({ courseId: ' cA ', topicIds: ['t1', 't1', 5 as unknown as string], count: 9999, sourcingMix: 150 })
+    expect(res).toEqual({ startable: true })
+    expect(startCheck).toHaveBeenCalledWith({ courseId: 'cA', topicIds: ['t1'], count: 500, sourcingMix: 100 })
   })
 
   it('startSession cleans odd input: duplicate and non-string topic ids, absurd counts, an unknown mode', async () => {

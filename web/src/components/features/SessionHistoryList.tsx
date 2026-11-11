@@ -2,6 +2,7 @@
 
 import { Button } from '@/components/ui/button'
 import { History, Trash2 } from 'lucide-react'
+import { LocalDate } from './LocalDate'
 import { sessionHeadline, formatScore } from '@/lib/grading'
 
 interface SessionHistoryListProps {
@@ -34,11 +35,11 @@ export function SessionHistoryList({
             onClick={() => setSelectedHistory(h)}
           >
             <div className="font-medium text-charcoal-graphite">
-              {h.title || new Date(h.startTime).toLocaleString()}
+              {h.title || <LocalDate value={h.startTime} kind="datetime" />}
             </div>
             {h.title && (
               <div className="text-[10px] mt-0.5 text-charcoal-graphite/50">
-                {new Date(h.startTime).toLocaleString()}
+                <LocalDate value={h.startTime} kind="datetime" />
               </div>
             )}
             <div className="mt-1 flex justify-between text-charcoal-graphite/60">

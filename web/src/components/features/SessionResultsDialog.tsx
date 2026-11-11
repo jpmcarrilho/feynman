@@ -8,6 +8,7 @@ import { PlayCircle, Loader2 } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { getSessionDetail, getSessionResults } from '@/app/actions'
 import type { SessionResultItem } from '@/services/sessionService'
+import { LocalDate } from './LocalDate'
 import { sessionHeadline, formatScore } from '@/lib/grading'
 
 interface ChatMessage {
@@ -88,7 +89,7 @@ export function SessionResultsDialog({
       </DialogHeader>
       <div className="py-4 space-y-6">
         <div className="space-y-2 border-b pb-4">
-          <p className="text-sm"><strong>Date:</strong> {new Date(selectedHistory.startTime).toLocaleString()}</p>
+          <p className="text-sm"><strong>Date:</strong> <LocalDate value={selectedHistory.startTime} kind="datetime" /></p>
           <p className="text-sm"><strong>Score:</strong> {formatScore(scoreSum)} / {totalCount} ({correctCount} fully correct{notAnswered > 0 ? `, ${notAnswered} not answered` : ''})</p>
           {resultItems === null && selectedHistory.logs.length > 0 && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading questions...</div>

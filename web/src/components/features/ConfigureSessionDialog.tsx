@@ -28,6 +28,24 @@ interface ConfigureSessionDialogProps {
   setQuestionCount: (count: number) => void;
   onStartSession: (mode: 'study' | 'exam', timeLimit: number | null, sourcingMix: number, weakPct: number, unstudiedPct: number, expertPct: number, topicIds: string[]) => void;
   isLoading: boolean;
+  /** The studyspace's full-length exam (profile.examPreset), offered next to the standard question counts. */
+  examPreset?: { label: string; questionCount: number } | null;
+  /** Plain-language reason the last start failed, shown above the start button. */
+  errorMessage?: string | null;
+}
+
+const STANDARD_QUESTION_COUNTS = [5, 10, 20, 50]
+
+/** 5, 10, 20, 50 and the exam preset (once, in order); the preset's option carries its label. */
+export function questionCountOptions(examPreset?: { label: string; questionCount: number } | null): { value: number; label: string }[] {
+  const counts = new Set(STANDARD_QUESTION_COUNTS)
+  if (examPreset) counts.add(examPreset.questionCount)
+  return [...counts]
+    .sort((a, b) => a - b)
+    .map((value) => ({
+      value,
+      label: examPreset && value === examPreset.questionCount ? `${value} Questions (${examPreset.label})` : `${value} Questions`,
+    }))
 }
 
 export function ConfigureSessionDialog({
@@ -40,6 +58,8 @@ export function ConfigureSessionDialog({
   setQuestionCount,
   onStartSession,
   isLoading,
+  examPreset = null,
+  errorMessage = null,
 }: ConfigureSessionDialogProps) {
   const [selectedCourses, setSelectedCourses] = useState<string[]>([])
   const [selectedWeeks, setSelectedWeeks] = useState<string[]>([])
@@ -80,6 +100,9 @@ export function ConfigureSessionDialog({
   };
 
   const courses = useMemo(() => Array.from(new Set(topics.map(t => t.course?.code).filter(Boolean))), [topics])
+  // Inside a studyspace there is only one course: asking the student to filter by it would be noise
+  const showCourseFilter = courses.length > 1
+  const countOptions = useMemo(() => questionCountOptions(examPreset), [examPreset])
 
   const weeks = useMemo(() => {
     const filtered = topics.filter(t => selectedCourses.length === 0 || selectedCourses.includes(t.course?.code))
@@ -198,12 +221,9 @@ export function ConfigureSessionDialog({
               onChange={e => setQuestionCount(Number(e.target.value))}
               className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              <option value="5">5 Questions</option>
-              <option value="10">10 Questions</option>
-              <option value="20">20 Questions</option>
-              <option value="32">32 Questions (14.750x Final)</option>
-              <option value="50">50 Questions</option>
-              <option value="53">53 Questions (JPAL102x Final)</option>
+              {countOptions.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
             </select>
           </div>
 
@@ -283,7 +303,7 @@ export function ConfigureSessionDialog({
         <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 mb-4 pb-2 border-b">
           <div>
             <Label className="text-sm sm:text-base">Select Topics</Label>
-            <p className="text-xs sm:text-sm text-muted-foreground mt-1">Select specific topics or leave blank to randomize across all courses.</p>
+            <p className="text-xs sm:text-sm text-muted-foreground mt-1">Select specific topics or leave blank to randomize across the whole studyspace.</p>
           </div>
           <Button 
             variant="outline" 
@@ -301,8 +321,9 @@ export function ConfigureSessionDialog({
           </Button>
         </div>
         
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[1fr_1.8fr_2.2fr_0.8fr] gap-4 mb-4">
-          {/* Course selection */}
+        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 ${showCourseFilter ? 'lg:grid-cols-[1fr_1.8fr_2.2fr_0.8fr]' : 'lg:grid-cols-[1.8fr_2.2fr_0.8fr]'}`}>
+          {/* Course selection (hidden when there is a single course, as in a studyspace) */}
+          {showCourseFilter && (
           <div className="flex flex-col">
             <Label className="mb-2 block font-medium text-xs text-muted-foreground uppercase tracking-wider">Course</Label>
             <ScrollArea className="h-32 sm:h-44 w-full rounded-md border border-input bg-card/40 p-1">
@@ -339,10 +360,11 @@ export function ConfigureSessionDialog({
               </div>
             </ScrollArea>
           </div>
+          )}
 
-          {/* Week selection */}
+          {/* Module selection (stored in the `week` column) */}
           <div className="flex flex-col">
-            <Label className="mb-2 block font-medium text-xs text-muted-foreground uppercase tracking-wider">Week</Label>
+            <Label className="mb-2 block font-medium text-xs text-muted-foreground uppercase tracking-wider">Module</Label>
             <ScrollArea className="h-32 sm:h-44 w-full rounded-md border border-input bg-card/40 p-1">
               <div className="flex flex-col space-y-0.5 pr-2">
                 {weeks.map((w: any) => {
@@ -372,7 +394,7 @@ export function ConfigureSessionDialog({
                   );
                 })}
                 {weeks.length === 0 && (
-                  <div className="text-xs text-muted-foreground p-3 text-center italic">Select course first</div>
+                  <div className="text-xs text-muted-foreground p-3 text-center italic">{showCourseFilter ? 'Select course first' : 'No modules'}</div>
                 )}
               </div>
             </ScrollArea>
@@ -467,7 +489,7 @@ export function ConfigureSessionDialog({
             <div className="relative w-full md:w-80">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search topics by title, week, or class..."
+                placeholder="Search topics by title, module, or class..."
                 value={topicSearchText}
                 onChange={e => setTopicSearchText(e.target.value)}
                 className="pl-9 h-9 text-xs bg-background"
@@ -605,6 +627,9 @@ export function ConfigureSessionDialog({
         )}
 
         <div className="pt-4 border-t space-y-3">
+          {errorMessage && (
+            <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{errorMessage}</p>
+          )}
           <p data-testid="topic-scope-summary" className={`text-sm ${scope.canStart ? 'text-charcoal-graphite/80' : 'text-lecture-red'}`}>{scope.summary}</p>
           <Button 
             onClick={() => {

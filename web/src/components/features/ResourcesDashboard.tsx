@@ -28,13 +28,15 @@ const formatDisplayName = (name: string | null | undefined): string => {
 }
 
 interface ResourcesDashboardProps {
+  /** The studyspace whose materials are listed. */
+  courseId: string;
   onViewFile: (href: string, title?: string) => void;
   onStartWeekSession: (topicIds: string[], weekName: string) => void;
   /** True while a session is being created: the practice buttons are disabled so a second click cannot start another. */
   startingSession?: boolean;
 }
 
-export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSession = false }: ResourcesDashboardProps) {
+export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, startingSession = false }: ResourcesDashboardProps) {
   const [courses, setCourses] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [activeCourseCode, setActiveCourseCode] = useState<string>('')
@@ -43,7 +45,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
 
   // Load initial data
   useEffect(() => {
-    getCourseArtifacts().then((data) => {
+    getCourseArtifacts(courseId).then((data) => {
       setCourses(data)
       if (data.length > 0) {
         setActiveCourseCode(data[0].courseCode)
@@ -53,7 +55,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
       console.error("Failed to load course artifacts:", err)
       setLoading(false)
     })
-  }, [])
+  }, [courseId])
 
   // Find currently active course
   const activeCourse = courses.find(c => c.courseCode === activeCourseCode)
@@ -85,7 +87,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
         handleOpenFile(result.link, "Feynman Study Guide: " + formatDisplayName(weekName))
         
         // Refresh local courses list to reflect summaryExists = true
-        const updatedData = await getCourseArtifacts()
+        const updatedData = await getCourseArtifacts(courseId)
         setCourses(updatedData)
       }
     } catch (err) {
@@ -101,7 +103,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
       <div className="py-24 flex flex-col items-center justify-center text-center gap-4 bg-background h-full font-sans animate-pulse">
         <Loader2 className="w-12 h-12 text-lecture-red animate-spin" />
         <h4 className="font-bold text-lg font-display italic text-charcoal-graphite">Retrieving Course Materials & Study Guides...</h4>
-        <p className="text-sm text-charcoal-graphite/60 max-w-xs">Organizing course slides, transcriptions, and summaries per week</p>
+        <p className="text-sm text-charcoal-graphite/60 max-w-xs">Organizing slides, transcriptions, and summaries per module</p>
       </div>
     )
   }
@@ -112,7 +114,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
         <BookOpen className="w-12 h-12 text-charcoal-graphite/40" />
         <h4 className="font-bold text-lg font-display italic text-charcoal-graphite">No Resources Available</h4>
         <p className="text-sm text-charcoal-graphite/60">
-          Make sure course topics are seeded and loaded in your database. Follow instructions to run the seeder inside your local terminal.
+          This studyspace has no material yet.
         </p>
       </div>
     )
@@ -123,16 +125,16 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
       
       {/* 1. Header and Intro */}
       <div className="space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight font-display italic text-charcoal-graphite">Course Resources</h1>
+        <h1 className="text-3xl font-bold tracking-tight font-display italic text-charcoal-graphite">Resources</h1>
         <p className="text-sm text-charcoal-graphite/65 max-w-2xl">
-          Explore and study all course lecture materials, original slides, video lecture transcripts, reading notes, and AI-generated Feynman summaries organized dynamically per course and week.
+          Explore and study all lecture materials, original slides, video lecture transcripts, reading notes, and AI-generated Feynman summaries of this studyspace, organized per module.
         </p>
       </div>
 
       {/* 2. Search and Course Select Filters */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-card p-4 rounded-xl border border-charcoal-graphite/10 shadow-sm">
-        {/* Course Tabs */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0 scrollbar-none">
+        {/* Course Tabs (only when several courses are listed; a studyspace has one) */}
+        <div className={`flex items-center gap-2 overflow-x-auto pb-1 md:pb-0 scrollbar-none ${courses.length > 1 ? '' : 'hidden'}`}>
           {courses.map((course) => (
             <button
               key={course.courseId}
@@ -166,7 +168,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
       {/* 3. Weeks List Accordion / Timeline */}
       {filteredWeeks.length === 0 ? (
         <div className="text-center py-16 bg-card border border-charcoal-graphite/15 rounded-xl">
-          <p className="text-sm text-charcoal-graphite/50">No weeks or materials matching your search terms.</p>
+          <p className="text-sm text-charcoal-graphite/50">No modules or materials matching your search terms.</p>
         </div>
       ) : (
         <div className="space-y-6">
@@ -211,7 +213,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSes
                       className="bg-lecture-red hover:bg-lecture-red/90 text-white font-semibold text-xs rounded-lg shrink-0 flex items-center gap-1.5 shadow-sm animate-sketch-draw h-9"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>Practice This Week</span>
+                      <span>Practice This Module</span>
                     </Button>
                   )}
                 </div>

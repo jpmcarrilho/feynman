@@ -74,3 +74,16 @@ export function stateDiffers(
 ): boolean {
   return local.status !== state.session.status || local.itemCount !== state.items.length || local.missingCount !== state.missingCount
 }
+
+/**
+ * What to do with the id found under the pre-studyspace key `dedp_active_session` when a studyspace page opens.
+ * `adopt`: the session belongs to this studyspace, use it as the hint. `forward`: it belongs to another studyspace,
+ * hand it to that one's hint key so it resumes there. `drop`: it does not exist, has no studyspace, or is over.
+ */
+export function routeLegacySession(
+  found: { courseId: string | null; status: string } | null,
+  thisCourseId: string,
+): { action: 'adopt' | 'drop' } | { action: 'forward'; courseId: string } {
+  if (!found || !found.courseId || found.status !== 'active') return { action: 'drop' }
+  return found.courseId === thisCourseId ? { action: 'adopt' } : { action: 'forward', courseId: found.courseId }
+}

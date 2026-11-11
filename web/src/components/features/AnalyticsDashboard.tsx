@@ -4,47 +4,13 @@ import { useEffect, useState } from 'react'
 import { getAnalyticsData, generateExamDiagnosis, generateGlobalDiagnosis } from '@/app/actions'
 import { AnalyticsMetrics } from './analytics/AnalyticsMetrics'
 import { ActivityChart } from './analytics/ActivityChart'
-import { CourseAccuracyChart } from './analytics/CourseAccuracyChart'
 import { AccuracyHeatmap } from './analytics/AccuracyHeatmap'
 import { TopicEvolutionChart } from './analytics/TopicEvolutionChart'
 import { Button } from '@/components/ui/button'
 import { formatScore } from '@/lib/grading'
 import { Loader2, Sparkles, AlertCircle } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import remarkMath from 'remark-math'
-import rehypeKatex from 'rehype-katex'
-import 'katex/dist/katex.min.css'
-import { parseFileLink } from '@/lib/fileLinks'
-
-type ViewFile = (href: string, title?: string) => void
-
-/** Markdown link renderer: file links open in the in-app viewer, everything else in a new tab. */
-const fileAwareLink = (onViewFile?: ViewFile) => {
-  const Link = ({ href, children }: any) => {
-    if (onViewFile && href && parseFileLink(href, window.location.origin)) {
-      const text = typeof children === 'string' ? children : Array.isArray(children) ? children.filter((c: unknown) => typeof c === 'string').join('') : ''
-      return (
-        <a
-          href={href}
-          onClick={(e) => { e.preventDefault(); onViewFile(href, text || undefined) }}
-          className="text-fountain-ink hover:underline font-semibold cursor-pointer"
-        >
-          {children}
-        </a>
-      )
-    }
-    return <a href={href} target="_blank" rel="noopener noreferrer" className="text-fountain-ink hover:underline font-semibold">{children}</a>
-  }
-  return Link
-}
-
-const preprocessLaTeX = (text: string | null | undefined): string => {
-  if (!text) return '';
-  let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
-  processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
-  return processed;
-}
+import { LocalDate } from './LocalDate'
+import { DiagnosisMarkdown, type ViewFile } from './DiagnosisMarkdown'
 
 function ExamItem({ exam, onViewFile }: { exam: any; onViewFile?: ViewFile }) {
   const [isGenerating, setIsGenerating] = useState(false)
@@ -71,7 +37,7 @@ function ExamItem({ exam, onViewFile }: { exam: any; onViewFile?: ViewFile }) {
         <div className="space-y-0.5">
           <h4 className="font-semibold text-sm sm:text-base text-charcoal-graphite">{exam.title}</h4>
           <p className="text-xs text-muted-foreground">
-            Completed on {new Date(exam.startTime).toLocaleDateString()} • {exam.totalQuestions} Questions
+            Completed on <LocalDate value={exam.startTime} /> • {exam.totalQuestions} Questions
           </p>
         </div>
 
@@ -106,22 +72,15 @@ function ExamItem({ exam, onViewFile }: { exam: any; onViewFile?: ViewFile }) {
 
       {isExpanded && examDiagnosis && (
         <div className="mt-4 pt-4 border-t border-dashed border-charcoal-graphite/10 prose dark:prose-invert max-w-none text-xs sm:text-sm leading-relaxed text-charcoal-graphite/85">
-          <ReactMarkdown 
-            remarkPlugins={[remarkGfm, remarkMath]} 
-            rehypePlugins={[rehypeKatex]}
-            components={{
-              a: fileAwareLink(onViewFile)
-            }}
-          >
-            {preprocessLaTeX(examDiagnosis)}
-          </ReactMarkdown>
+          <DiagnosisMarkdown text={examDiagnosis} onViewFile={onViewFile} />
         </div>
       )}
     </div>
   )
 }
 
-export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {}) {
+/** Dashboard of one studyspace: every number, chart, exam and the diagnosis cover only `courseId`. */
+export function AnalyticsDashboard({ courseId, onViewFile }: { courseId: string; onViewFile?: ViewFile }) {
   const [data, setData] = useState<any>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [globalDiagnosisText, setGlobalDiagnosisText] = useState<string | null>(null)
@@ -129,19 +88,19 @@ export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {
   const [isGlobalExpanded, setIsGlobalExpanded] = useState(true)
 
   useEffect(() => {
-    getAnalyticsData().then((res) => {
+    getAnalyticsData(courseId).then((res) => {
       setData(res)
       if (res?.globalDiagnosis) {
         setGlobalDiagnosisText(res.globalDiagnosis)
       }
       setIsLoading(false)
     })
-  }, [])
+  }, [courseId])
 
   const handleGenerateGlobal = async () => {
     setIsGeneratingGlobal(true)
     try {
-      const markdown = await generateGlobalDiagnosis()
+      const markdown = await generateGlobalDiagnosis(courseId)
       if (markdown) {
         setGlobalDiagnosisText(markdown)
         setIsGlobalExpanded(true)
@@ -177,10 +136,10 @@ export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {
           <div className="space-y-1">
             <h2 className="text-xl font-bold font-display italic text-charcoal-graphite flex items-center gap-2">
               <Sparkles className="w-5 h-5 text-bongo-gold fill-bongo-gold animate-pulse" />
-              Comprehensive Global AI Learning Diagnosis
+              AI Learning Diagnosis
             </h2>
             <p className="text-xs sm:text-sm text-muted-foreground">
-              A comprehensive analysis of your performance across ALL study and exam sessions, cross-referenced with course slides & transcriptions.
+              A comprehensive analysis of your performance across all study and exam sessions in this studyspace, cross-referenced with its material.
             </p>
           </div>
 
@@ -194,7 +153,7 @@ export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {
               {isGeneratingGlobal ? (
                 <><Loader2 className="w-3.5 h-3.5 mr-2 animate-spin" /> Analyzing...</>
               ) : (
-                'Regenerate Global Diagnosis'
+                'Regenerate Diagnosis'
               )}
             </Button>
           )}
@@ -217,14 +176,14 @@ export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {
             <AlertCircle className="w-8 h-8 text-fountain-ink" />
             <div className="space-y-3 max-w-sm">
               <p className="text-xs sm:text-sm text-muted-foreground">
-                You have not generated your global learning diagnosis yet. Click the button below to analyze your performance across both courses!
+                You have not generated a learning diagnosis for this studyspace yet. Click the button below to analyze your performance here!
               </p>
               <Button
                 type="button"
                 onClick={handleGenerateGlobal}
                 className="text-xs font-semibold bg-lecture-red hover:bg-lecture-red/90 text-white border-0 rounded-lg h-9 px-4"
               >
-                Generate Global AI Diagnosis & Study Guide
+                Generate AI Diagnosis & Study Guide
               </Button>
             </div>
           </div>
@@ -251,15 +210,7 @@ export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {
                     <Loader2 className="w-8 h-8 text-lecture-red animate-spin" />
                   </div>
                 )}
-                <ReactMarkdown 
-                  remarkPlugins={[remarkGfm, remarkMath]} 
-                  rehypePlugins={[rehypeKatex]}
-                  components={{
-                    a: fileAwareLink(onViewFile)
-                  }}
-                >
-                  {preprocessLaTeX(globalDiagnosisText)}
-                </ReactMarkdown>
+                <DiagnosisMarkdown text={globalDiagnosisText} onViewFile={onViewFile} />
               </div>
             )}
           </div>
@@ -274,9 +225,8 @@ export function AnalyticsDashboard({ onViewFile }: { onViewFile?: ViewFile } = {
       )}
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* 3. Middle Row: Recharts Activity & Course Accuracy Charts */}
+        {/* 3. Middle Row: Recharts Activity chart (no per-course chart: a studyspace is one course) */}
         <ActivityChart activityData={data.activityChartData} />
-        <CourseAccuracyChart courseAccuracyData={data.courseAccuracy} />
 
         {/* 4. Bottom Row: Module Accuracy Heatmap Drilldown Box */}
         <AccuracyHeatmap heatmapData={data.heatmapData} />

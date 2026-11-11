@@ -21,7 +21,7 @@ export async function getCourseArtifactsService(courseId?: string) {
   const topics = await prisma.topic.findMany({
     where: courseId ? { courseId } : undefined,
     orderBy: [{ week: 'asc' }, { order: 'asc' }], // module label first, outline order inside it
-    include: { course: true, exercises: { where: { origin: 'imported', status: 'active' }, select: { id: true } } }
+    include: { course: true, exercises: { where: { origin: 'imported', status: 'active', isGraded: true }, select: { id: true } } }
   });
 
   const results = courses.map(course => {

@@ -132,6 +132,8 @@ export class GenerationError extends Error {
   constructor(
     readonly code: 'topic_not_found' | 'no_content' | 'ungraded_only' | 'no_eligible_topic' | 'validation_failed' | 'not_study_material',
     readonly userMessage: string,
+    /** Whether asking again can succeed. Known causes that no retry changes (no usable topic, logistics, no content) are not retryable; a question that failed the quality checks is. */
+    readonly retryable: boolean = code === 'validation_failed',
   ) {
     super(`${code}: ${userMessage}`)
     this.name = 'GenerationError'

@@ -19,7 +19,7 @@ import { parseIdList } from '@/services/sessionService'
  */
 export type NextExerciseResult =
   | { exercise: Exercise & { topic: Topic } }
-  | { error: string }
+  | { error: string; /** false: asking again cannot succeed (the client stops and shows the message without a Retry). Absent: transient, retry. */ retryable?: false }
   | { stopped: true }
 
 /** Topics judged to be course logistics that one request skips over before giving up. */
@@ -65,7 +65,7 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
     if (courseId && session.courseId !== courseId) return { stopped: true }
 
     const topicIds = await resolveSessionTopicIds(session)
-    if (topicIds.length === 0) return { error: 'No topics are selected for this session.' }
+    if (topicIds.length === 0) return { error: 'No topics are selected for this session.', retryable: false }
     // Scoped call: every topic of the pool must belong to the course (the pool comes from the session, so this only
     // fails for a session that was stored with foreign topics)
     if (courseId) {
@@ -73,7 +73,7 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
       for (const chunk of chunkIds([...new Set(topicIds)])) {
         for (const t of await prisma.topic.findMany({ where: { id: { in: chunk }, courseId }, select: { id: true } })) inCourse.add(t.id)
       }
-      if (new Set(topicIds).size !== inCourse.size) return { error: new CourseScopeError().message }
+      if (new Set(topicIds).size !== inCourse.size) return { error: new CourseScopeError().message, retryable: false }
     }
     const existingExerciseIds = (await prisma.sessionExercise.findMany({ where: { sessionId }, select: { exerciseId: true } })).map((i) => i.exerciseId)
 
@@ -87,11 +87,11 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
     const rejectedByTopic = await countRejectedSince(eligibleTopicIds, session.startTime)
     const rejectedInSession = [...rejectedByTopic.values()].reduce((a, b) => a + b, 0)
     if (rejectedInSession >= SESSION_REJECTION_LIMIT) {
-      throw new GenerationError('validation_failed', 'Too many generated questions failed the quality checks in this session, so no more will be generated for it.')
+      throw new GenerationError('validation_failed', 'Too many generated questions failed the quality checks in this session, so no more will be generated for it.', false)
     }
     const usableTopicIds = eligibleTopicIds.filter((id) => (rejectedByTopic.get(id) ?? 0) < TOPIC_REJECTION_LIMIT)
     if (usableTopicIds.length === 0) {
-      throw new GenerationError('validation_failed', 'The remaining topics keep producing questions that fail the quality checks, so no more will be generated for them in this session.')
+      throw new GenerationError('validation_failed', 'The remaining topics keep producing questions that fail the quality checks, so no more will be generated for them in this session.', false)
     }
 
     // Find current representation of selected topics in the session to keep the questions balanced
@@ -132,9 +132,15 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
           styleTopicIds: topicIds,
         })
       } catch (e) {
-        if (e instanceof GenerationError && e.code === 'not_study_material' && skips < MAX_LOGISTICS_SKIPS) {
-          skipped.add(shuffledTargetPool[0])
-          continue
+        if (e instanceof GenerationError && e.code === 'not_study_material') {
+          if (skips < MAX_LOGISTICS_SKIPS) {
+            skipped.add(shuffledTargetPool[0])
+            continue
+          }
+          // Skip budget of this request used up. Topics found so far stay marked, so another request goes on with the
+          // rest: that is worth a retry as long as a candidate is left; with none left it cannot succeed.
+          const left = candidates.filter((id) => id !== shuffledTargetPool[0]).length
+          if (left > 0) throw new GenerationError('not_study_material', e.userMessage, true)
         }
         throw e
       }
@@ -149,7 +155,8 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
   } catch (e) {
     // Full error on the server only; the provider message can contain request details
     console.error('Failed to generate next exercise:', e)
-    return { error: e instanceof GenerationError ? e.userMessage : GENERATION_FAILED_MESSAGE }
+    if (e instanceof GenerationError) return e.retryable ? { error: e.userMessage } : { error: e.userMessage, retryable: false }
+    return { error: GENERATION_FAILED_MESSAGE }
   }
 }
 

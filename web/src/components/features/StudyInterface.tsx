@@ -7,10 +7,12 @@ import { SessionTimer } from './SessionTimer'
 import { generateWithRetry } from '@/lib/generationRetry'
 import { requestNextExercise } from '@/lib/generationClient'
 import { VoiceHub } from './VoiceHub'
-import { Dialog, DialogTrigger } from '@/components/ui/dialog'
+import Link from 'next/link'
+import { Dialog } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
   startSession,
+  checkSessionStartable,
   getActiveSession,
   getSessionState,
   saveDraft,
@@ -63,10 +65,9 @@ import {
   voicePlannerContextMessage,
   voiceDashboardContextMessage,
 } from '@/lib/prompts'
-import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import { formatScore, sessionScore } from '@/lib/grading'
-import type { TutorChatMode } from '@/lib/studyspace/profile'
-import { getChatMode, setChatMode, subscribeChatMode } from '@/lib/studyspace/chatMode'
+import type { TutorChatMode, TutorProfile } from '@/lib/studyspace/profile'
+import { getChatMode, setChatMode, subscribeChatMode, migrateLegacyChatMode } from '@/lib/studyspace/chatMode'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
 import { FeynmanLogo } from './FeynmanLogo'
 import { ConfigureSessionDialog } from './ConfigureSessionDialog'
@@ -83,6 +84,7 @@ import {
   remainingSeconds,
   activeSessionHintKey,
   legacySessionId,
+  routeLegacySession,
   stateDiffers,
   serverOffsetOf,
 } from '@/lib/sessionClient'
@@ -131,10 +133,6 @@ const safeRemoveItem = (key: string) => {
 
 const EXAM_DIAGNOSIS_FILE = 'inline:exam-diagnosis.md'
 
-// Module-level so the instruction string is stable across renders. T19 replaces the legacy persona with the space profile.
-const VOICE_SYSTEM_INSTRUCTION = voiceSystemInstruction(LEGACY_VOICE_PROFILE)
-// localStorage key suffix for the chat mode (feynman_chat_mode_legacy) until studyspaces exist in the UI
-const CHAT_MODE_SCOPE = 'legacy'
 // How long a typed first message waits for the exercise context prefetch before it is sent without it
 const CONTEXT_WAIT_MS = 5000
 
@@ -168,9 +166,11 @@ const readAssisted = (sessionId: string): string[] => {
  * The study screen. The state of the running session (question, drafts, flags, answers, deadline, questions still to
  * be generated, topics) lives on the server; this component renders what `getSessionState` / `getActiveSession`
  * return. The only thing the browser keeps is a hint: the id of the session this browser had open
- * (`feynman_active_session_<courseId|global>`). `courseId` scopes the session actions to one studyspace (T19 passes it).
+ * (`feynman_active_session_<courseId>`). `courseId` scopes every server call to one studyspace, and `profile` (the
+ * studyspace's stored tutor profile) is the only persona the tutor uses. The page mounts this with `key={courseId}`, so
+ * nothing in memory (planner chat, plan draft, selection) can carry over from another studyspace.
  */
-export function StudyInterface({ courseId }: { courseId?: string } = {}) {
+export function StudyInterface({ courseId, courseTitle, profile }: { courseId: string; courseTitle: string; profile: TutorProfile }) {
   const [topics, setTopics] = useState<any[]>([])
   // The Create Session dialog's selection only
   const [selectedTopics, setSelectedTopics] = useState<string[]>([])
@@ -179,12 +179,16 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
   const [isLoading, setIsLoading] = useState(false)
   const [sessionDuration, setSessionDuration] = useState<number>(300) // Default 5 mins
   const [questionCount, setQuestionCount] = useState<number>(10)
+  // A plain-language message for a failed start/save (shown in the session dialog while it is open, else as a banner)
+  const [notice, setNotice] = useState<string | null>(null)
 
   const [session, setSession] = useState<any>(null)
   const [exercises, setExercises] = useState<any[]>([])
   const [missingCount, setMissingCount] = useState(0)
   // Set when one question slot failed 3 times in a row; holds the message to show. Generation stops until Retry.
   const [generationError, setGenerationError] = useState<string | null>(null)
+  // false when the server said asking again cannot succeed: the banner then has no Retry button
+  const [generationRetryable, setGenerationRetryable] = useState(true)
   // Guards for the background generator: only one loop at a time, and a loop stops when the session changes or ends
   const generationLoopActiveRef = useRef(false)
   const generationRunRef = useRef(0)
@@ -262,19 +266,24 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     }
   }, [currentExercise?.choices]);
 
-  // Until studyspaces exist in the UI (T19) the tutor uses the global legacy persona and one chat mode key.
-  // Speech heard from the student is forwarded to markAssisted (a ref, because that function is defined further down)
+  // The tutor is the studyspace's persona. Speech heard from the student is forwarded to markAssisted (a ref, because that function is defined further down)
   const speechHeardRef = useRef<(source: SpeechSource) => void>(() => {})
-  const liveAPI = useLiveAPI(VOICE_SYSTEM_INSTRUCTION, (source) => speechHeardRef.current(source))
+  const voiceInstruction = useMemo(() => voiceSystemInstruction(profile), [profile])
+  const liveAPI = useLiveAPI(voiceInstruction, (source) => speechHeardRef.current(source))
+  // always the latest connection, for the cleanup that runs when the student leaves the studyspace
+  const liveRef = useRef(liveAPI)
 
-  // The mode lives in a small external store (memory + localStorage `feynman_chat_mode_legacy`). The exercise-context
+  // The mode lives in a small external store (memory + localStorage `feynman_chat_mode_<courseId>`). The exercise-context
   // effect reads it with getChatMode() instead of depending on it, so a mode change never re-sends the exercise context.
+  // The pre-studyspace choice (`feynman_chat_mode_legacy`) moves once into the first studyspace opened (idempotent).
+  useState(() => { migrateLegacyChatMode(courseId) })
   const chatMode = useSyncExternalStore(
     subscribeChatMode,
-    () => getChatMode(CHAT_MODE_SCOPE, LEGACY_VOICE_PROFILE.defaultChatMode),
-    () => LEGACY_VOICE_PROFILE.defaultChatMode
+    () => getChatMode(courseId, profile.defaultChatMode),
+    () => profile.defaultChatMode
   )
-  const handleChatModeChange = (mode: TutorChatMode) => setChatMode(CHAT_MODE_SCOPE, mode)
+  const handleChatModeChange = (mode: TutorChatMode) => setChatMode(courseId, mode)
+  const refreshHistories = () => getSessionHistory(courseId).then(setHistories)
 
   // ---------------------------------------------------------------------------------------------------------------
   // Server-owned session state. The screen renders what the server returns; the browser keeps only a hint (session id).
@@ -369,7 +378,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       const statusChanged = latestRef.current.status !== state.session.status
       applyState(state, { keepIndex: true })
       // the server ended the session (deadline passed, finished elsewhere): the list shows its new status and score
-      if (statusChanged) getSessionHistory().then(setHistories)
+      if (statusChanged) void refreshHistories()
     }
     return state
   }
@@ -475,7 +484,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
 
   const loadActivePlan = async () => {
     try {
-      const plans = await getStudyPlans();
+      const plans = await getStudyPlans(courseId);
       const active = plans.find((p: any) => p.status === 'active');
       setActivePlan(active || null);
 
@@ -502,7 +511,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       clearSessionView({ forgetHint: false, keepChat: true })
 
       // Fetch actual, current data analytics metrics to feed into Gemini advisor
-      const analytics = await getAnalyticsData()
+      const analytics = await getAnalyticsData(courseId)
       
       // Prioritize the planner workspace chat messages first, falling back to general liveAPI history if empty
       const activeMessages = plannerChat.length > 1 ? plannerChat.map(m => ({
@@ -510,7 +519,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
         text: m.content
       })) : liveAPI.messages;
 
-      const plan = await generateStructuredStudyPlan(activeMessages, analytics)
+      const plan = await generateStructuredStudyPlan(activeMessages, analytics, courseId)
       if (plan) {
         setDraftPlan(plan)
         setActiveTab('plan') // Programmatically switch to Plan tab where the draft widget renders!
@@ -519,6 +528,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       }
     } catch (e) {
       console.error(e)
+      setNotice('The study plan could not be compiled. Check your connection and try again.')
     }
     setIsGeneratingPlan(false)
   }
@@ -531,8 +541,8 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     setIsPlannerChatLoading(true)
 
     try {
-      const analytics = await getAnalyticsData()
-      const response = await generatePlannerResponse(updatedMessages, analytics)
+      const analytics = await getAnalyticsData(courseId)
+      const response = await generatePlannerResponse(updatedMessages, analytics, courseId)
       if (response) {
         setPlannerChat([...updatedMessages, { role: 'assistant' as const, content: response }])
       }
@@ -546,14 +556,18 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
   const handleDeployPlan = async (finalPlan: any) => {
     setIsDeployingPlan(true)
     try {
-      const plan = await saveAndDeployStudyPlan(finalPlan)
+      const plan = await saveAndDeployStudyPlan(finalPlan, courseId)
       if (plan) {
         setDraftPlan(null)
         await loadActivePlan()
-        getSessionHistory().then(setHistories)
+        refreshHistories()
+      } else {
+        // null: the plan named topics of another studyspace, or it could not be stored; nothing was written
+        setNotice('The study plan could not be saved. It may name topics that are not part of this studyspace; the draft is kept, so you can adjust it and deploy again.')
       }
     } catch (e) {
       console.error(e)
+      setNotice('The study plan could not be saved. The draft is kept; try again in a moment.')
     }
     setIsDeployingPlan(false)
   }
@@ -564,34 +578,50 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       if (ok) {
         await deleteStudyPlan(planId)
         await loadActivePlan()
-        getSessionHistory().then(setHistories)
+        refreshHistories()
       }
     }
   }
 
+  /**
+   * The pre-studyspace client kept a snapshot under `dedp_active_session`. Its session id is used once: for this
+   * studyspace if the session is its own, handed to the studyspace that owns it otherwise (it resumes there), dropped
+   * when the session is over or gone. This is the one call that asks for a session without the studyspace scope: it is
+   * how the owning studyspace is found. The key is removed only after the decision, so a network failure retries later.
+   */
+  const resolveLegacySession = async () => {
+    const raw = safeGetItem(LEGACY_SESSION_KEY)
+    if (raw === null) return
+    const legacyId = legacySessionId(raw)
+    if (legacyId) {
+      let found: { courseId: string | null; status: string } | null
+      try {
+        const state = await getSessionState(legacyId)
+        found = state ? { courseId: state.session.courseId, status: state.session.status } : null
+      } catch {
+        return
+      }
+      const route = routeLegacySession(found, courseId)
+      if (route.action === 'adopt' && !safeGetItem(hintKey)) safeSetItem(hintKey, legacyId)
+      if (route.action === 'forward' && !safeGetItem(activeSessionHintKey(route.courseId))) safeSetItem(activeSessionHintKey(route.courseId), legacyId)
+    }
+    safeRemoveItem(LEGACY_SESSION_KEY)
+  }
+
   useEffect(() => {
-    // Load initial data (including performance coverage metrics)
-    getTopicsWithPerformance().then(setTopics)
-    getSessionHistory().then(setHistories)
+    // Load initial data (including performance coverage metrics), all of this studyspace
+    getTopicsWithPerformance(courseId).then(setTopics)
+    refreshHistories()
     loadActivePlan()
 
-    // Resume the running session from the server. The hint (session id this browser had open) is preferred while that
-    // session is still active; otherwise the latest active session of the scope. An empty localStorage works too.
-    // Before T17 the browser kept a whole snapshot under `dedp_active_session`; only its session id is used, once, as the
-    // hint (written at once, so a second run of this effect in development finds it)
-    let hint = safeGetItem(hintKey)
-    const legacy = safeGetItem(LEGACY_SESSION_KEY)
-    if (legacy !== null) {
-      const legacyId = legacySessionId(legacy)
-      safeRemoveItem(LEGACY_SESSION_KEY)
-      if (legacyId && !hint) {
-        hint = legacyId
-        safeSetItem(hintKey, legacyId)
-      }
-    }
+    // Resume the running session from the server. The hint (session id this browser had open in this studyspace) is
+    // preferred while that session is still active; otherwise the latest active session of the studyspace.
+    // An empty localStorage works too.
     let cancelled = false
     ;(async () => {
       try {
+        await resolveLegacySession()
+        const hint = safeGetItem(hintKey)
         let state: SessionState | null = null
         if (hint) {
           state = await getSessionState(hint, courseId).catch(() => null)
@@ -627,6 +657,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
 
   // What the generation loop and the visibility handler compare the server's state against
   useEffect(() => {
+    liveRef.current = liveAPI
     latestRef.current = { status: session?.status, itemCount: exercises.length, missingCount }
     sessionModeRef.current = session?.mode ?? null
     chat.observe(liveAPI.messages)
@@ -660,6 +691,16 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('pagehide', onPageHide)
+      // Leaving for another page of the app (the "Studyspaces" link) does not fire pagehide: save what is pending, and
+      // release the microphone and the tutor connection, which no longer have a screen
+      onPageHide()
+      const sid = sessionIdRef.current
+      const messages = sid && latestRef.current.status === 'active' ? chat.changedSnapshot(sid) : null
+      if (sid && messages) {
+        chat.markSaved(sid, messages)
+        void saveChatLog(sid, messages).catch(() => {})
+      }
+      liveRef.current.disconnect()
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
@@ -747,7 +788,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     if (!session) return
     setIsGeneratingSummary(true)
     try {
-      const result = await generateSessionSummary(session.id)
+      const result = await generateSessionSummary(session.id, courseId)
       if (result && result.link) {
         // Force the visualizer to show the newly generated markdown file!
         setActiveFile(result.link)
@@ -856,21 +897,35 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     startingRef.current = true
     setIsLoading(true)
     try {
+      // Cheap database-only check: a start that could never show a question creates no session and says why
+      const check = await checkSessionStartable({ courseId, topicIds: input.topicIds, count: input.count, sourcingMix: input.sourcingMix })
+      if (!check.startable) {
+        setNotice(check.message)
+        return
+      }
       // Drafts and flags still queued belong to the session that is about to end: send them first
       await writer.flush()
       const state = await startSession({ ...input, courseId })
       applyState(state)
+      setNotice(null)
       setIsModalOpen(false)
       setActiveTab('study') // Ensure active tab shifts to 'study' immediately to reveal the active cards!
-      getSessionHistory().then(setHistories)
+      refreshHistories()
     } catch (e) {
       console.error('Failed to start the session', e)
+      // Server messages are hidden from the browser in production, so the text is fixed: it covers the two known causes
+      setNotice('The session could not be started. The selected topics may not belong to this studyspace, or the studyspace no longer exists. Reload the page and try again.')
       // The previous session may or may not have been ended: show what the server has
       if (sessionIdRef.current) void refreshFromServer(sessionIdRef.current, { force: true }).catch(() => {})
     } finally {
       startingRef.current = false
       setIsLoading(false)
     }
+  }
+
+  const openSessionDialog = () => {
+    setNotice(null)
+    setIsModalOpen(true)
   }
 
   const handleStartSession = async (
@@ -913,7 +968,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       const finalState = await getSessionState(session.id, courseId);
       if (finalState) applyState(finalState, { keepIndex: true });
       // The exam is in History as soon as it is graded, not only after the diagnosis has been written
-      getSessionHistory().then(setHistories);
+      refreshHistories();
 
       // Trigger generateExamDiagnosis action
       const reportMarkdown = await generateExamDiagnosis(session.id);
@@ -937,7 +992,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       }
 
       // Refresh histories
-      getSessionHistory().then(setHistories);
+      refreshHistories();
     } catch (e) {
       console.error("Failed to finish timed exam:", e);
     } finally {
@@ -956,6 +1011,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       generationStoppedRef.current = false
       generationLoopActiveRef.current = false
       setGenerationError(null)
+      setGenerationRetryable(true)
     }
   }, [sessionId, sessionEnded])
 
@@ -986,6 +1042,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
           if ('error' in outcome) {
             // Stop here; the banner offers Retry. No timer restarts the loop.
             setGenerationError(outcome.error)
+            setGenerationRetryable(outcome.retryable !== false)
             return
           }
           remaining -= 1
@@ -1010,7 +1067,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       // Queued drafts of the exam are dropped: a cancelled exam has no answers and no score
       writer.discard(`${session.id}:`)
       await cancelStudySession(session.id)
-      setHistories(await getSessionHistory())
+      setHistories(await getSessionHistory(courseId))
     } catch (e) {
       console.error('Failed to cancel exam:', e)
     } finally {
@@ -1040,7 +1097,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
         ])
 
         // Fetch updated history so we can show results immediately!
-        const updatedHistories = await getSessionHistory()
+        const updatedHistories = await getSessionHistory(courseId)
         setHistories(updatedHistories)
 
         const finishedSession = updatedHistories.find((h: any) => h.id === session.id)
@@ -1057,7 +1114,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
     clearSessionView()
 
     if (!session) {
-      getSessionHistory().then(setHistories)
+      refreshHistories()
     }
   }
 
@@ -1205,14 +1262,14 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
       if (!cachedContext || cachedContext.key !== key) return
       lastContextKeyRef.current = key
       liveAPI.sendContext(
-        voiceExerciseContextMessage(LEGACY_VOICE_PROFILE, {
+        voiceExerciseContextMessage(profile, {
           topicTitle: currentExercise.topic?.title,
           questionText: currentExercise.questionText,
           choices: parsedChoices,
           sessionMode: session.mode,
           unitsText: cachedContext.unitsText,
           // The mode in effect right now, read here (not a dependency) so a mode change never re-runs this effect
-          chatMode: getChatMode(CHAT_MODE_SCOPE, LEGACY_VOICE_PROFILE.defaultChatMode),
+          chatMode: getChatMode(courseId, profile.defaultChatMode),
         }),
         { interrupt: true, respond }
       )
@@ -1329,10 +1386,10 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
           <>
             {/* Header with Logo and Close toggle */}
             <div className="h-[80px] px-4 border-b border-charcoal-graphite/10 shrink-0 flex items-center justify-between">
-              <div className="cursor-pointer flex items-center gap-2 select-none" onClick={() => window.location.href = '/'}>
+              <Link href="/spaces" title="Studyspaces" className="cursor-pointer flex items-center gap-2 select-none">
                 <FeynmanLogo variant="mini" size={40} className="stroke-charcoal-graphite transition-transform duration-200 hover:scale-105 animate-sketch-draw" />
                 <span className="font-display text-xl sm:text-2xl italic font-bold tracking-tight text-charcoal-graphite transition-colors duration-200 hover:text-fountain-ink">Feynman</span>
-              </div>
+              </Link>
               <Button
                 type="button"
                 variant="ghost"
@@ -1348,23 +1405,10 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
             {/* Sidebar Contents */}
             <div className="flex-1 flex flex-col min-h-0">
               <div className="p-4 border-b border-charcoal-graphite/10 shrink-0 space-y-3">
-                <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-                  <DialogTrigger render={<Button className="w-full flex gap-2 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-11 shrink-0" />}>
+                <Button type="button" onClick={openSessionDialog} className="w-full flex gap-2 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-11 shrink-0">
                     <PlusCircle className="w-4 h-4" />
                     Create Session
-                  </DialogTrigger>
-                  <ConfigureSessionDialog
-                    topics={topics}
-                    selectedTopics={selectedTopics}
-                    setSelectedTopics={setSelectedTopics}
-                    sessionDuration={sessionDuration}
-                    setSessionDuration={setSessionDuration}
-                    questionCount={questionCount}
-                    setQuestionCount={setQuestionCount}
-                    onStartSession={handleStartSession}
-                    isLoading={isLoading}
-                  />
-                </Dialog>
+                  </Button>
 
                 <Button 
                   onClick={handleGeneratePlan}
@@ -1404,10 +1448,10 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
         className={`flex-1 flex flex-col transition-all duration-300 ease-in-out bg-background w-full ${getMainWidthClass()}`}
       >
         <div className="pt-4 pb-4 px-4 sm:px-8 border-b border-charcoal-graphite/10 transition-all duration-300 flex flex-col sm:flex-row sm:justify-between sm:items-center gap-3 xl:pl-8">
-          {/* Logo & Title (Desktop & Mobile Unified Header - Hidden on Desktop) */}
-          <div className="cursor-pointer flex xl:hidden items-center gap-2 select-none" onClick={() => window.location.href = '/'}>
-            <FeynmanLogo variant="mini" size={36} className="stroke-charcoal-graphite transition-transform duration-200 hover:scale-105" />
-            <span className="font-display text-xl sm:text-2xl italic font-bold tracking-tight text-charcoal-graphite">Feynman</span>
+          {/* Way back to the list, and which studyspace this is */}
+          <div className="flex items-center gap-3 min-w-0 select-none">
+            <Link href="/spaces" className="shrink-0 text-xs sm:text-sm font-semibold text-fountain-ink hover:underline">&larr; Studyspaces</Link>
+            <span className="font-display text-lg sm:text-xl italic font-bold tracking-tight text-charcoal-graphite truncate" title={courseTitle}>{courseTitle}</span>
           </div>
 
           {/* Tabs row */}
@@ -1423,6 +1467,13 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
           </div>
         </div>
 
+        {notice && !isModalOpen && (
+          <div role="alert" className="mx-4 sm:mx-8 mt-3 flex items-start justify-between gap-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900 font-sans">
+            <p>{notice}</p>
+            <Button type="button" size="sm" variant="outline" onClick={() => setNotice(null)} className="shrink-0 border-amber-400 bg-white">Dismiss</Button>
+          </div>
+        )}
+
         <TabsContent value="study" className="flex-1 overflow-y-auto p-4 sm:p-8 m-0 min-w-0">
           {session ? (
             <div className="w-full max-w-3xl mx-auto space-y-6 pb-12 min-w-0">
@@ -1430,23 +1481,10 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
               {/* Actions Row: Create Session, Session Summary, and End Session (Above elapsed time) */}
               <div className="flex flex-wrap items-center gap-3 bg-card p-4 rounded-xl border border-charcoal-graphite/10 shadow-sm justify-between">
                 <div className="flex flex-wrap items-center gap-2">
-                  <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-                    <DialogTrigger render={<Button className="flex gap-1.5 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-9 px-3 text-xs rounded-lg animate-sketch-draw" />}>
+                  <Button type="button" onClick={openSessionDialog} className="flex gap-1.5 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold h-9 px-3 text-xs rounded-lg animate-sketch-draw">
                       <PlusCircle className="w-4 h-4" />
                       <span>New Session</span>
-                    </DialogTrigger>
-                    <ConfigureSessionDialog
-                      topics={topics}
-                      selectedTopics={selectedTopics}
-                      setSelectedTopics={setSelectedTopics}
-                      sessionDuration={sessionDuration}
-                      setSessionDuration={setSessionDuration}
-                      questionCount={questionCount}
-                      setQuestionCount={setQuestionCount}
-                      onStartSession={handleStartSession}
-                      isLoading={isLoading}
-                    />
-                  </Dialog>
+                    </Button>
 
                   {session.mode !== 'exam' && (
                     <Button
@@ -1587,10 +1625,13 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
                   <div>
                     <p className="font-semibold">{missingCount} of {exercises.length + missingCount} questions could not be generated.</p>
                     <p className="text-xs">{generationError}</p>
+                    {!generationRetryable && <p className="text-xs">Trying again will not help. Start a new session with other topics.</p>}
                   </div>
-                  <Button type="button" size="sm" variant="outline" onClick={() => setGenerationError(null)} className="shrink-0 border-amber-400 bg-white">
-                    Retry
-                  </Button>
+                  {generationRetryable && (
+                    <Button type="button" size="sm" variant="outline" onClick={() => setGenerationError(null)} className="shrink-0 border-amber-400 bg-white">
+                      Retry
+                    </Button>
+                  )}
                 </div>
               )}
 
@@ -1757,23 +1798,10 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
 
                 {/* Center Create Session Button for all screen sizes */}
                 <div className="flex flex-col gap-3 items-center">
-                  <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
-                    <DialogTrigger render={<Button className="w-full max-w-[240px] flex gap-2 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-md font-semibold h-11 mx-auto rounded-lg shadow-sm" />}>
+                  <Button type="button" onClick={openSessionDialog} className="w-full max-w-[240px] flex gap-2 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-md font-semibold h-11 mx-auto rounded-lg shadow-sm">
                       <PlusCircle className="w-5 h-5" />
                       Create Study Session
-                    </DialogTrigger>
-                    <ConfigureSessionDialog
-                      topics={topics}
-                      selectedTopics={selectedTopics}
-                      setSelectedTopics={setSelectedTopics}
-                      sessionDuration={sessionDuration}
-                      setSessionDuration={setSessionDuration}
-                      questionCount={questionCount}
-                      setQuestionCount={setQuestionCount}
-                      onStartSession={handleStartSession}
-                      isLoading={isLoading}
-                    />
-                  </Dialog>
+                    </Button>
                 </div>
               </div>
             </div>
@@ -2025,7 +2053,7 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
             isGeneratingPlan={isGeneratingPlan}
             chatMode={chatMode}
             onChatModeChange={handleChatModeChange}
-            chatModeProfile={LEGACY_VOICE_PROFILE}
+            chatModeProfile={profile}
             sessionMode={session?.mode}
             pendingMessageRef={pendingMessageRef}
             onHelpRequested={markAssisted}
@@ -2046,11 +2074,11 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
         </TabsContent>
 
         <TabsContent value="resources" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">
-          <ResourcesDashboard onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} startingSession={isLoading} />
+          <ResourcesDashboard courseId={courseId} onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} startingSession={isLoading} />
         </TabsContent>
 
         <TabsContent value="analytics" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">
-          <AnalyticsDashboard onViewFile={handleViewFile} />
+          <AnalyticsDashboard courseId={courseId} onViewFile={handleViewFile} />
         </TabsContent>
       </Tabs>
 
@@ -2110,13 +2138,30 @@ export function StudyInterface({ courseId }: { courseId?: string } = {}) {
             onToggleClose={() => setIsProfessorSidebarHidden(true)}
             chatMode={chatMode}
             onChatModeChange={handleChatModeChange}
-            chatModeProfile={LEGACY_VOICE_PROFILE}
+            chatModeProfile={profile}
             sessionMode={session?.mode}
             pendingMessageRef={pendingMessageRef}
             onHelpRequested={markAssisted}
           />
         )}
       </div>
+
+      {/* NEW SESSION DIALOG: mounted once; every "new session" button opens it through openSessionDialog */}
+      <Dialog open={isModalOpen} onOpenChange={setIsModalOpen}>
+        <ConfigureSessionDialog
+          topics={topics}
+          selectedTopics={selectedTopics}
+          setSelectedTopics={setSelectedTopics}
+          sessionDuration={sessionDuration}
+          setSessionDuration={setSessionDuration}
+          questionCount={questionCount}
+          setQuestionCount={setQuestionCount}
+          onStartSession={handleStartSession}
+          isLoading={isLoading}
+          examPreset={profile.examPreset}
+          errorMessage={notice}
+        />
+      </Dialog>
 
       {/* SESSION RESULTS MODAL */}
       <Dialog open={!!selectedHistory} onOpenChange={(open) => !open && setSelectedHistory(null)}>

@@ -17,7 +17,7 @@ export async function requestNextExercise<T>(
     body: JSON.stringify(body),
     signal,
   })
-  if (res.status === 401) return { error: 'Your session has expired. Please sign in again.' }
+  if (res.status === 401) return { error: 'Your session has expired. Please sign in again.', retryable: false }
   const json = (await res.json().catch(() => null)) as GenerationOutcome<T> | null
   if (!res.ok || !json || typeof json !== 'object') return { error: 'The question generator is not available right now. Please try again in a moment.' }
   return json

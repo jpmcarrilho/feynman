@@ -42,7 +42,7 @@ export function AccuracyHeatmap({ heatmapData }: AccuracyHeatmapProps) {
     <Card className="col-span-1 lg:col-span-2 border border-charcoal-graphite/10 shadow-sm bg-card text-charcoal-graphite">
       <CardHeader className="border-b border-charcoal-graphite/5 pb-4 mb-4">
         <CardTitle className="font-display italic text-lg font-bold text-charcoal-graphite">Module Accuracy Heatmap</CardTitle>
-        <CardDescription className="text-charcoal-graphite/60 font-sans text-xs">Visualizing performance across weeks and courses (Click a card for breakdown)</CardDescription>
+        <CardDescription className="text-charcoal-graphite/60 font-sans text-xs">Visualizing performance across modules (Click a card for breakdown)</CardDescription>
       </CardHeader>
       <CardContent>
         {heatmapData && heatmapData.length > 0 ? (
@@ -53,7 +53,10 @@ export function AccuracyHeatmap({ heatmapData }: AccuracyHeatmapProps) {
 
               return (
                 <div key={courseData.course} className="border border-charcoal-graphite/10 rounded-md p-4 bg-background shadow-sm">
-                  <h3 className="font-display italic text-lg font-bold mb-3 text-charcoal-graphite">{courseData.course}</h3>
+                  {/* The course name is only a heading when several courses are listed; a studyspace has one */}
+                  {heatmapData.length > 1 && (
+                    <h3 className="font-display italic text-lg font-bold mb-3 text-charcoal-graphite">{courseData.course}</h3>
+                  )}
                   <div className="flex flex-wrap gap-2 mb-2">
                     {courseData.weeks.sort((a, b) => a.week.localeCompare(b.week)).map((weekData) => {
                       const groupKey = `${courseData.course}_${weekData.week}`

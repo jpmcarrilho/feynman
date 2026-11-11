@@ -22,8 +22,9 @@ export function ActivityChart({ activityData }: ActivityChartProps) {
               dataKey="date" 
               tick={{ fontSize: 10, fill: 'var(--charcoal-graphite, #2C2E33)', opacity: 0.7 }}
               tickFormatter={(str) => {
-                const date = new Date(str);
-                return `${date.getMonth() + 1}/${date.getDate()}`;
+                // "YYYY-MM-DD" is a calendar day; reading it through Date would shift it by the time zone offset
+                const [, month, day] = String(str).split('-');
+                return `${Number(month)}/${Number(day)}`;
               }}
             />
             <YAxis allowDecimals={false} tick={{ fontSize: 10, fill: 'var(--charcoal-graphite, #2C2E33)', opacity: 0.7 }} />

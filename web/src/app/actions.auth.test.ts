@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import * as actions from './actions'
+import * as spaceActions from './spaces/actions'
 import { createLiveToken } from './auth-actions'
 
 // Any prisma.model.method(...) or prisma.$transaction(...) call is counted and resolves to null.
@@ -42,6 +43,10 @@ const exportedActionNames = Object.keys(actions).filter(
   (key) => typeof (actions as Record<string, unknown>)[key] === 'function'
 )
 
+const spaceActionNames = Object.keys(spaceActions).filter(
+  (key) => typeof (spaceActions as Record<string, unknown>)[key] === 'function'
+)
+
 describe('server actions require authentication', () => {
   const originalPasscode = process.env.APP_PASSCODE
 
@@ -63,6 +68,17 @@ describe('server actions require authentication', () => {
     const fn = (actions as Record<string, (...args: unknown[]) => Promise<unknown>>)[name]
     // Passing {} keeps destructured parameters (explainMistake) from throwing before the auth check runs.
     await expect(fn({})).rejects.toThrow('Unauthorized')
+    expect(dbCalls.count).toBe(0)
+  })
+
+  it('covers every exported action in spaces/actions.ts', () => {
+    expect(spaceActionNames.length).toBeGreaterThanOrEqual(3)
+  })
+
+  it.each(spaceActionNames)('spaces %s rejects with Unauthorized and does not touch the database', async (name) => {
+    dbCalls.count = 0
+    const fn = (spaceActions as Record<string, (...args: unknown[]) => Promise<unknown>>)[name]
+    await expect(fn({}, {})).rejects.toThrow('Unauthorized')
     expect(dbCalls.count).toBe(0)
   })
 

@@ -1,8 +1,9 @@
 import { ChatModeEnum, type TutorChatMode } from './profile'
 
-// Client-side store for the student's chat mode, one key per studyspace.
-// Until spaces exist in the UI the key is "legacy". The choice is kept in memory first so the UI works
-// even when localStorage is blocked; localStorage only makes it survive a reload.
+// Client-side store for the student's chat mode, one key per studyspace (`feynman_chat_mode_<courseId>`).
+// Before studyspaces the single global choice lived under the key "legacy"; migrateLegacyChatMode moves it once.
+// The choice is kept in memory first so the UI works even when localStorage is blocked; localStorage only makes it
+// survive a reload.
 export function chatModeStorageKey(courseId: string): string {
   return `feynman_chat_mode_${courseId}`
 }
@@ -23,6 +24,25 @@ export function writeStoredChatMode(courseId: string, mode: TutorChatMode): void
   try {
     if (typeof window === 'undefined') return
     window.localStorage.setItem(chatModeStorageKey(courseId), mode)
+  } catch {
+    // ignore
+  }
+}
+
+const LEGACY_SCOPE = 'legacy'
+
+/**
+ * One-time move of the pre-studyspace choice (`feynman_chat_mode_legacy`) into the first studyspace that is opened,
+ * unless that studyspace already has its own choice. The legacy key is removed in either case, so no later studyspace
+ * (and no new one) inherits it: every studyspace starts from its persona's default mode. Never throws.
+ */
+export function migrateLegacyChatMode(courseId: string): void {
+  try {
+    if (typeof window === 'undefined' || courseId === LEGACY_SCOPE) return
+    const legacy = readStoredChatMode(LEGACY_SCOPE)
+    if (legacy === null) return
+    if (readStoredChatMode(courseId) === null) writeStoredChatMode(courseId, legacy)
+    window.localStorage.removeItem(chatModeStorageKey(LEGACY_SCOPE))
   } catch {
     // ignore
   }

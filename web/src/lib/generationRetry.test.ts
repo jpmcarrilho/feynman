@@ -72,3 +72,22 @@ describe('generateWithRetry: stopped sessions and cancellation', () => {
     err.mockRestore()
   })
 })
+
+describe('generateWithRetry: failures that retrying cannot fix', () => {
+  it('stops at the first attempt on retryable:false: no wait, no second request', async () => {
+    const terminal = { error: 'None of the selected topics has graded study material.', retryable: false }
+    const attempt = vi.fn().mockResolvedValue(terminal)
+    const sleep = vi.fn().mockResolvedValue(undefined)
+    expect(await generateWithRetry(attempt, () => false, { sleep })).toEqual(terminal)
+    expect(attempt).toHaveBeenCalledTimes(1)
+    expect(sleep).not.toHaveBeenCalled()
+  })
+
+  it('still retries a transient error (retryable absent or true)', async () => {
+    const attempt = vi.fn().mockResolvedValueOnce({ error: 'x', retryable: true }).mockResolvedValueOnce({ error: 'y' }).mockResolvedValueOnce(ok)
+    const sleep = vi.fn().mockResolvedValue(undefined)
+    expect(await generateWithRetry(attempt, () => false, { sleep })).toEqual(ok)
+    expect(attempt).toHaveBeenCalledTimes(3)
+  })
+})
+

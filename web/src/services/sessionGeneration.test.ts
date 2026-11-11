@@ -120,7 +120,7 @@ describe('resolveSessionTopicIds', () => {
   it('a legacy session with no questions has an empty pool (generation reports an error)', async () => {
     expect(await resolveSessionTopicIds({ id: 's', courseId: null, topicIds: null })).toEqual([])
     vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ ...SESSION, topicIds: null } as never)
-    expect(await generateNextForSession('s')).toEqual({ error: expect.stringContaining('No topics') })
+    expect(await generateNextForSession('s')).toEqual({ error: expect.stringContaining('No topics'), retryable: false })
     expect(generateObject).not.toHaveBeenCalled()
   })
 })
@@ -197,9 +197,45 @@ describe('generateNextForSession: logistics topics', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {})
     vi.spyOn(console, 'warn').mockImplementation(() => {})
     const res = await generateNextForSession('s')
-    expect(res).toEqual({ error: expect.stringContaining('rules or administration') })
+    expect(res).toEqual({ error: expect.stringContaining('rules or administration'), retryable: false })
     expect(generateObject).toHaveBeenCalledTimes(1)
     expect(prisma.sessionExercise.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('generateNextForSession: terminal and transient failures', () => {
+  const logisticsEverywhere = () => vi.mocked(generateObject).mockResolvedValue({ object: logistics } as never)
+  const quiet = () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+  }
+
+  it('marks "every topic is logistics" as not retryable', async () => {
+    setupTopics(['welcome'])
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ ...SESSION, topicIds: JSON.stringify(['welcome']) } as never)
+    logisticsEverywhere()
+    quiet()
+    expect(await generateNextForSession('s')).toEqual({ error: expect.stringContaining('rules or administration'), retryable: false })
+  })
+
+  it('keeps it retryable when the skip budget ran out but other topics are left to try (markers persist, the next request goes on)', async () => {
+    setupTopics(['a', 'b', 'c', 'd'])
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ ...SESSION, topicIds: JSON.stringify(['a', 'b', 'c', 'd']) } as never)
+    logisticsEverywhere()
+    quiet()
+    const res = await generateNextForSession('s')
+    expect(res).toEqual({ error: expect.stringContaining('rules or administration') })
+    expect(res).not.toHaveProperty('retryable')
+  })
+
+  it('keeps a provider failure transient', async () => {
+    setupTopics(['t1'])
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(SESSION as never)
+    vi.mocked(generateObject).mockRejectedValue(new Error('503 overloaded'))
+    quiet()
+    const res = await generateNextForSession('s')
+    expect(res).toEqual({ error: expect.any(String) })
+    expect(res).not.toHaveProperty('retryable')
   })
 })
 
@@ -217,7 +253,7 @@ describe('generateNextForSession: course scope', () => {
     vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ ...SESSION, topicIds: '["t1","t2"]' } as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1' }] as never) // only t1 is in c1
     const res = await generateNextForSession('s', 'c1')
-    expect(res).toEqual({ error: expect.stringMatching(/do not belong/) })
+    expect(res).toEqual({ error: expect.stringMatching(/do not belong/), retryable: false })
     expect(vi.mocked(prisma.topic.findMany).mock.calls[0][0]).toMatchObject({ where: { id: { in: ['t1', 't2'] }, courseId: 'c1' } })
     expect(generateObject).not.toHaveBeenCalled()
   })

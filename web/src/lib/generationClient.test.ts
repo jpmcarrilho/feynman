@@ -18,7 +18,7 @@ describe('requestNextExercise', () => {
 
   it('turns HTTP failures and unreadable bodies into plain errors', async () => {
     const sig = new AbortController().signal
-    expect(await requestNextExercise('s', body, sig, vi.fn().mockResolvedValue(json('Unauthorized', 401)))).toEqual({ error: expect.stringContaining('sign in') })
+    expect(await requestNextExercise('s', body, sig, vi.fn().mockResolvedValue(json('Unauthorized', 401)))).toEqual({ error: expect.stringContaining('sign in'), retryable: false })
     expect(await requestNextExercise('s', body, sig, vi.fn().mockResolvedValue(json({ error: 'x' }, 500)))).toEqual({ error: expect.stringContaining('not available') })
     const bad = { ok: true, status: 200, json: async () => { throw new Error('x') } } as unknown as Response
     expect(await requestNextExercise('s', body, sig, vi.fn().mockResolvedValue(bad))).toEqual({ error: expect.any(String) })
