@@ -33,7 +33,7 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => {})
 })
 
-const mix = { single_choice: 2, multiple_choice: 1, numeric: 1, dropdown: 0 }
+const mix = { single_choice: 2, multiple_choice: 1, numeric: 1, dropdown: 0, open: 0 }
 function answer(over: Record<string, unknown> = {}, profileOver: Record<string, unknown> = {}) {
   return {
     profile: {
@@ -104,6 +104,26 @@ describe('proposeProfile', () => {
     }
     const q = await mod.proposeProfile(courseId, { generate: fake(answer({}, { quantitative: true })).fn })
     expect(q.profile.questionTypeMix.numeric).toBeCloseTo(0.25, 10)
+  })
+
+  it('keeps a proposed open share, caps one above 0.3 and scales the other shares into the rest', async () => {
+    const { courseId } = await makeSpace(['ready'])
+    const ok = await mod.proposeProfile(courseId, { generate: fake(answer({}, { quantitative: true, questionTypeMix: { single_choice: 2, multiple_choice: 1, numeric: 1, dropdown: 0, open: 1 } })).fn })
+    expect(ok.profile.questionTypeMix.open).toBeCloseTo(0.2, 10)
+    const heavy = await mod.proposeProfile(courseId, { generate: fake(answer({}, { quantitative: true, questionTypeMix: { single_choice: 1, multiple_choice: 1, numeric: 0, dropdown: 0, open: 8 }, quantitativeQuestionTypeMix: { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0, open: 1 } })).fn })
+    expect(heavy.profile.questionTypeMix.open).toBeCloseTo(0.3, 10)
+    expect(heavy.profile.questionTypeMix.single_choice).toBeCloseTo(0.35, 10)
+    expect(Object.values(heavy.profile.questionTypeMix).reduce((a, b) => a + b, 0)).toBeCloseTo(1, 10)
+    // only open asked for: capped, and the rest comes from the default mix
+    const m = heavy.profile.quantitativeQuestionTypeMix
+    expect(m.open).toBeCloseTo(0.3, 10)
+    expect(Object.values(m).reduce((a, b) => a + b, 0)).toBeCloseTo(1, 10)
+    expect(m.numeric).toBeGreaterThan(0)
+    // no numeric for a non-quantitative subject, whatever the open share
+    const flat = await mod.proposeProfile(courseId, { generate: fake(answer({}, { quantitative: false, questionTypeMix: { single_choice: 0, multiple_choice: 0, numeric: 1, dropdown: 0, open: 1 } })).fn })
+    expect(flat.profile.questionTypeMix.numeric).toBe(0)
+    expect(flat.profile.questionTypeMix.open).toBeCloseTo(0.3, 10)
+    expect(TutorProfileSchema.safeParse(flat.profile).success).toBe(true)
   })
 
   it('takes the default chat mode of the tone preset when the model gives none', async () => {

@@ -1,8 +1,8 @@
 // Prompt that proposes the tutor persona of a new studyspace (T25). Pure string builders: no I/O.
-import { PRESETS, type TutorProfile } from '@/lib/studyspace/profile'
+import { PRESETS, choiceMixOf, type TutorProfile } from '@/lib/studyspace/profile'
 
 /** Bump whenever the proposal prompt changes. */
-export const PROFILE_PROMPT_VERSION = 'profile-v1'
+export const PROFILE_PROMPT_VERSION = 'profile-v2'
 
 /** Size limits of the proposal input. The whole prompt stays near 24,000 characters (about 6,000 tokens) however large the studyspace is. */
 export const PROFILE_PROMPT_CAPS = {
@@ -117,7 +117,7 @@ Fill in "profile":
 - "defaultChatMode": one of probe, guide, explain: how the tutor answers questions in the chat. probe = asks before telling, guide = short hints one step at a time, explain = answers directly and briefly. socratic_professor and exam_driller usually use probe, patient_coach usually guide.
 - "analogyDomains": 2 to 5 short domains (each at most 40 characters) that suit the subject and the student's likely background.
 - "quantitative": judge it from what the files actually contain (formulas, worked calculations, numeric exercises or data to compute with), not from the reputation of the subject. true only when the files contain such content; when they have none, "quantitative" is false (a conceptual text on statistics or economics without formulas or calculations is not quantitative).
-- "questionTypeMix" and "quantitativeQuestionTypeMix": the share of single_choice, multiple_choice, numeric and dropdown questions for conceptual topics and for calculation topics. Each sums to 1. Use numeric 0 when "quantitative" is false.
+- "questionTypeMix" and "quantitativeQuestionTypeMix": the share of single_choice, multiple_choice, numeric, dropdown and open questions for conceptual topics and for calculation topics. Each sums to 1. Use numeric 0 when "quantitative" is false. "open" is a question answered in a few written sentences and checked against key points: it suits conceptual material where the student should explain, compare or justify. Use about 0.2 for "questionTypeMix" and about 0.1 for "quantitativeQuestionTypeMix", never more than 0.3.
 - "contentLanguage": the language of the materials as a short language code such as "en" or "pt-BR".
 - "sampleExplanation": "concept" (a concept that appears in the text samples or outline) and "explanation" (at most 150 words, Feynman style, in the content language, written as this tutor would speak).
 
@@ -133,8 +133,9 @@ export function updatableView(p: TutorProfile) {
     tutorIdentity: p.tutorIdentity,
     analogyDomains: p.analogyDomains,
     quantitative: p.quantitative,
-    questionTypeMix: p.questionTypeMix,
-    quantitativeQuestionTypeMix: p.quantitativeQuestionTypeMix,
+    // Four shares each, summing to 1: the written-answer share is the student's choice and is not part of what the model changes
+    questionTypeMix: choiceMixOf(p.questionTypeMix),
+    quantitativeQuestionTypeMix: choiceMixOf(p.quantitativeQuestionTypeMix),
     contentLanguage: p.contentLanguage,
     sampleConcept: p.sampleExplanation.concept,
     sampleExplanation: p.sampleExplanation.explanation,
@@ -184,7 +185,7 @@ A new file ADDS to the studyspace; it does not replace what is already there. Ju
 Answer with "changeWarranted". It is true only when the new file clearly shows that a field of the current tutor is wrong or too narrow now: a different subject or a clearly wider one, a different level, a different language of the material, or material that needs calculations when the tutor has none (or the reverse). A file on the same subject at a similar level, more material of the same kind, or a change of taste is NOT a reason: answer false.
 
 Then return every field below: when "changeWarranted" is false, copy the current values exactly. When it is true, change only what the new file justifies and copy the other fields exactly.
-- "subject" (at most 120 characters), "level" (intro, undergraduate, graduate or professional), "tutorIdentity" (one line, at most 200 characters, no names of real people), "analogyDomains" (2 to 5 short domains, each at most 40 characters), "quantitative" (judge it from what the new file actually contains: formulas, worked calculations, numeric exercises; not from the reputation of the subject; when the file has none, false), "questionTypeMix" and "quantitativeQuestionTypeMix" (each sums to 1; numeric is 0 when "quantitative" is false), "contentLanguage" (a short language code such as "en" or "pt-BR").
+- "subject" (at most 120 characters), "level" (intro, undergraduate, graduate or professional), "tutorIdentity" (one line, at most 200 characters, no names of real people), "analogyDomains" (2 to 5 short domains, each at most 40 characters), "quantitative" (judge it from what the new file actually contains: formulas, worked calculations, numeric exercises; not from the reputation of the subject; when the file has none, false), "questionTypeMix" and "quantitativeQuestionTypeMix" (four shares each: single_choice, multiple_choice, numeric and dropdown, summing to 1; numeric is 0 when "quantitative" is false; written-answer questions are the student's own setting and are not part of your answer), "contentLanguage" (a short language code such as "en" or "pt-BR").
 - "sampleConcept" and "sampleExplanation": the concept and the short explanation (at most 150 words, Feynman style) the tutor shows as a sample of how it speaks. When you change "subject" or "contentLanguage", write a new pair about the new subject, in the new content language, as this tutor would speak. Otherwise copy the current pair exactly.
 - "rationale": one or two plain sentences, at most 400 characters, addressed to the student, saying what in the new file calls for the change. Empty when "changeWarranted" is false.`
 }

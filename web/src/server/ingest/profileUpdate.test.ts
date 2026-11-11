@@ -52,8 +52,8 @@ const accepted = (over: Partial<TutorProfile> = {}): TutorProfile => ({
   defaultChatMode: 'probe',
   analogyDomains: ['cooking', 'lego'],
   quantitative: false,
-  questionTypeMix: { single_choice: 0.4, multiple_choice: 0.3, numeric: 0, dropdown: 0.3 },
-  quantitativeQuestionTypeMix: { single_choice: 0.2, multiple_choice: 0.2, numeric: 0.5, dropdown: 0.1 },
+  questionTypeMix: { single_choice: 0.4, multiple_choice: 0.3, numeric: 0, dropdown: 0.3, open: 0 },
+  quantitativeQuestionTypeMix: { single_choice: 0.2, multiple_choice: 0.2, numeric: 0.5, dropdown: 0.1, open: 0 },
   contentLanguage: 'en',
   calibrationModule: '02 · Statistical mechanics',
   examPreset: { label: 'Final', questionCount: 40 },
@@ -203,7 +203,7 @@ describe('suggestProfileUpdate', () => {
   })
 
   it('judges the tutor for the whole studyspace: it prompts with the files already there and never turns quantitative off or the language over from one file', async () => {
-    const q = accepted({ quantitative: true, contentLanguage: 'pt-BR', level: 'undergraduate', questionTypeMix: { single_choice: 0.25, multiple_choice: 0.25, numeric: 0.25, dropdown: 0.25 } })
+    const q = accepted({ quantitative: true, contentLanguage: 'pt-BR', level: 'undergraduate', questionTypeMix: { single_choice: 0.25, multiple_choice: 0.25, numeric: 0.25, dropdown: 0.25, open: 0 } })
     const a = await makeSpace({ profile: q })
     await prisma.source.create({ data: { id: `${a.courseId}-old`, courseId: a.courseId, originalName: 'calculus-notes.pdf', mimeType: 'application/pdf', sizeBytes: 1, storageKey: 'k', bundle: 'initial', status: 'ready' } })
     await prisma.topic.create({ data: { id: `${a.courseId}-oldt`, courseId: a.courseId, sourceId: `${a.courseId}-old`, order: 1, week: '01 · Optimisation problems', title: 'Lagrange', content: 'x' } })
@@ -237,8 +237,58 @@ describe('suggestProfileUpdate', () => {
   })
 
   describe('applyProfileUpdate rules', () => {
-    const base = accepted({ quantitative: true, contentLanguage: 'pt-BR', questionTypeMix: { single_choice: 0.25, multiple_choice: 0.25, numeric: 0.25, dropdown: 0.25 } })
+    const base = accepted({ quantitative: true, contentLanguage: 'pt-BR', questionTypeMix: { single_choice: 0.25, multiple_choice: 0.25, numeric: 0.25, dropdown: 0.25, open: 0 } })
     const ask = (over: Record<string, unknown>) => answer(base, over) as never
+    describe('with a written-answer share', () => {
+      const withOpen = accepted({
+        quantitative: true,
+        questionTypeMix: { single_choice: 0.3, multiple_choice: 0.25, numeric: 0.05, dropdown: 0.2, open: 0.2 },
+        quantitativeQuestionTypeMix: { single_choice: 0.2, multiple_choice: 0.15, numeric: 0.45, dropdown: 0.1, open: 0.1 },
+      })
+      const sum = (m: Record<string, number>) => Object.values(m).reduce((a, b) => a + b, 0)
+      it("keeps the owner's open share and rescales the model's four shares into what is left", () => {
+        const r = proposal.applyProfileUpdate(withOpen, answer(withOpen, { level: 'graduate', questionTypeMix: { single_choice: 0.5, multiple_choice: 0.25, numeric: 0.25, dropdown: 0 } }) as never)
+        if (!('profile' in r)) throw new Error(r.problem)
+        const m = r.profile.questionTypeMix
+        expect(m.open).toBe(0.2)
+        expect(m.single_choice).toBeCloseTo(0.4, 10)
+        expect(m.multiple_choice).toBeCloseTo(0.2, 10)
+        expect(m.numeric).toBeCloseTo(0.2, 10)
+        expect(m.dropdown).toBe(0)
+        expect(sum(m)).toBeCloseTo(1, 10)
+        expect(r.changed).toEqual(['level', 'questionTypeMix'])
+      })
+      it('reports no change when the four shares differ from the accepted ones only by rounding', () => {
+        const four = (m: typeof withOpen.questionTypeMix) => {
+          const rest = 1 - m.open
+          return { single_choice: Math.round((m.single_choice / rest) * 100) / 100, multiple_choice: Math.round((m.multiple_choice / rest) * 100) / 100, numeric: Math.round((m.numeric / rest) * 100) / 100, dropdown: Math.round((m.dropdown / rest) * 100) / 100 }
+        }
+        const r = proposal.applyProfileUpdate(withOpen, answer(withOpen, { level: 'graduate', questionTypeMix: four(withOpen.questionTypeMix), quantitativeQuestionTypeMix: four(withOpen.quantitativeQuestionTypeMix) }) as never)
+        if (!('profile' in r)) throw new Error(r.problem)
+        expect(r.changed).toEqual(['level'])
+        expect(r.profile.questionTypeMix).toEqual(withOpen.questionTypeMix)
+        expect(r.profile.quantitativeQuestionTypeMix).toEqual(withOpen.quantitativeQuestionTypeMix)
+      })
+      it('still never zeroes numeric while quantitative, and the banner text shows the open share', () => {
+        const r = proposal.applyProfileUpdate(withOpen, answer(withOpen, { level: 'graduate', quantitativeQuestionTypeMix: { single_choice: 1, multiple_choice: 0, numeric: 0, dropdown: 0 } }) as never)
+        if (!('profile' in r)) throw new Error(r.problem)
+        expect(r.profile.quantitativeQuestionTypeMix).toEqual(withOpen.quantitativeQuestionTypeMix)
+        const flat = accepted({ quantitative: false, questionTypeMix: { single_choice: 0.3, multiple_choice: 0.25, numeric: 0, dropdown: 0.25, open: 0.2 } })
+        const shown = profileChanges(flat, applyChanged(flat, { questionTypeMix: { single_choice: 1, multiple_choice: 0, numeric: 0, dropdown: 0 } }))
+        expect(shown).toEqual([{ field: 'questionTypeMix', label: 'Question types (concepts)', from: 'single choice 30%, multiple choice 25%, dropdown 25%, open answer 20%', to: 'single choice 80%, open answer 20%' }])
+      })
+      it('an owner who set everything to open keeps it', () => {
+        const allOpen = accepted({ quantitative: false, questionTypeMix: { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0, open: 1 } })
+        const r = proposal.applyProfileUpdate(allOpen, answer(allOpen, { level: 'graduate', questionTypeMix: { single_choice: 1, multiple_choice: 0, numeric: 0, dropdown: 0 } }) as never)
+        if (!('profile' in r)) throw new Error(r.problem)
+        expect(r.profile.questionTypeMix).toEqual(allOpen.questionTypeMix)
+      })
+      const applyChanged = (p: TutorProfile, over: Record<string, unknown>) => {
+        const r = proposal.applyProfileUpdate(p, answer(p, over) as never)
+        if (!('profile' in r)) throw new Error(r.problem)
+        return r.profile
+      }
+    })
     it('quantitative goes false -> true but never true -> false', () => {
       const off = proposal.applyProfileUpdate(base, ask({ quantitative: false, level: 'graduate' }))
       expect('profile' in off && off.profile.quantitative).toBe(true)

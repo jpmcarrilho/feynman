@@ -28,6 +28,7 @@ import {
 import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
 import { validateExerciseStructure } from '@/lib/exerciseValidation'
 import { gradeAnswer } from '@/lib/grading'
+import { z } from 'zod'
 import { defaultProfile, type TutorProfile } from '@/lib/studyspace/profile'
 
 vi.mock('ai', () => ({ generateText: vi.fn(), generateObject: vi.fn() }))
@@ -110,7 +111,7 @@ describe('generateExerciseForTopic', () => {
   })
 
   it('uses the quantitative mix for quantitative topics and the other mix otherwise, cycling by existing count', async () => {
-    const profile = { ...defaultProfile({ title: 'Course' }), questionTypeMix: { single_choice: 1, multiple_choice: 0, numeric: 0, dropdown: 0 }, quantitativeQuestionTypeMix: { single_choice: 0, multiple_choice: 0, numeric: 1, dropdown: 0 } }
+    const profile = { ...defaultProfile({ title: 'Course' }), questionTypeMix: { single_choice: 1, multiple_choice: 0, numeric: 0, dropdown: 0, open: 0 }, quantitativeQuestionTypeMix: { single_choice: 0, multiple_choice: 0, numeric: 1, dropdown: 0, open: 0 } }
     setup({ isQuantitative: true }, profile)
     await generateExerciseForTopic({ primaryTopicId: 't1', poolTopicIds: ['t1'], existingExerciseIds: ['e1', 'e2', 'e3'] })
     expect(promptOf()).toContain('exercise of type: "numeric"')
@@ -259,8 +260,8 @@ describe('generateExerciseForTopic validation', () => {
     await generateExerciseForTopic(args)
     expect(promptOf()).toContain('FIRST, JUDGE THE TARGET CONTENT')
     expect(promptOf()).toMatch(/honor code/)
-    expect(generatedExerciseSchema.safeParse({ newExercise: { contentKind: 'logistics', logisticsReason: 'x', questionText: '', exerciseType: 'single_choice', choices: [], correctChoiceIndexes: [], correctAnswer: '', explanation: '' } }).success).toBe(true)
-    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v6')
+    expect(generatedExerciseSchema.safeParse({ newExercise: { contentKind: 'logistics', logisticsReason: 'x', questionText: '', exerciseType: 'single_choice', choices: [], correctChoiceIndexes: [], correctAnswer: '', explanation: '', keyPoints: [] } }).success).toBe(true)
+    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v8')
   })
 
   it('lets a solver error propagate and stores nothing for that attempt', async () => {
@@ -670,5 +671,190 @@ describe('bounded id lists in generation queries', () => {
       existingExerciseIds: Array.from({ length: 700 }, (_, i) => `x${i}`),
     })
     expect(largestListInAllQueries()).toBeLessThanOrEqual(ID_CHUNK_SIZE)
+  })
+})
+
+describe('written-answer (open) questions', () => {
+  const args = { primaryTopicId: 't1', poolTopicIds: ['t1'], existingExerciseIds: [] as string[] }
+  const openProfile = (): TutorProfile => ({ ...defaultProfile({ title: 'Course' }), contentLanguage: 'pt-BR', questionTypeMix: { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0, open: 1 } })
+  const KEY_POINTS = ['The unit mean is subtracted', 'Constant traits cancel out', 'Time-varying confounders remain']
+  const MODEL_ANSWER = 'Fixed effects subtract each unit\'s mean from its observations, so anything constant within the unit cancels. Confounders that change over time remain.'
+  const openModel = {
+    newExercise: {
+      contentKind: 'subject_matter', logisticsReason: '', questionText: 'Explain why fixed effects remove time-invariant differences between units.', exerciseType: 'open',
+      choices: [], correctChoiceIndexes: [], correctAnswer: MODEL_ANSWER, keyPoints: KEY_POINTS, explanation: 'A common mistake is to think they remove all confounding.',
+    },
+  }
+  const created = () => vi.mocked(prisma.exercise.create).mock.calls.map((c) => c[0].data as Record<string, unknown>)
+  const gradeResult = (statuses: ('covered' | 'partly' | 'missing')[], score: number) => ({
+    score, isCorrect: score === 1, offTask: false, ms: 5,
+    feedback: { v: 1 as const, keyPoints: statuses.map((status, i) => ({ point: KEY_POINTS[i], status })), misconceptions: [] as string[], text: 'ok' },
+  })
+  const solved = { answerable: true, issue: '', answer: 'Subtracting the unit mean cancels constant traits; time-varying confounders stay.', ms: 3 }
+
+  function checks(over: { openSolve?: unknown; grade?: unknown; blind?: unknown } = {}) {
+    return {
+      openSolve: vi.fn((over.openSolve ?? (async () => solved)) as (...a: unknown[]) => Promise<unknown>),
+      gradeOpenAnswer: vi.fn((over.grade ?? (async () => gradeResult(['covered', 'covered', 'covered'], 1))) as (...a: unknown[]) => Promise<unknown>),
+      blindSolve: vi.fn((over.blind ?? (async () => { throw new Error('blind solve must not run for an open question') })) as (...a: unknown[]) => Promise<unknown>),
+    }
+  }
+
+  it('asks for an open question and stores it: no choices, model answer, key points, no shuffle, active', async () => {
+    setup({ content: 'FIXED-EFFECTS-BODY' }, openProfile())
+    mockModel(openModel)
+    const c = checks()
+    await generateExerciseForTopic(args, c as never)
+    expect(promptOf()).toContain('exercise of type: "open"')
+    expect(promptOf()).toMatch(/NEUTRAL EXAM ITEM[\s\S]*model answer and the key points/)
+    expect(promptOf()).toContain("'keyPoints' MUST list 2 to 4")
+    expect(promptOf()).toContain('EXACTLY ONE task and is ONE question sentence')
+    expect(promptOf()).toContain('NEVER join two instructions with "and" or "also"')
+    expect(promptOf()).toContain('never tell the student which points to cover or how many')
+    const row = created()[0]
+    expect(row).toMatchObject({
+      status: 'active', exerciseType: 'open', choices: '[]', correctAnswer: MODEL_ANSWER, keyPoints: JSON.stringify(KEY_POINTS),
+      origin: 'generated', promptVersion: 'gen-v8',
+    })
+    // the solver gets the question and the grounding window, never the model answer or the key points
+    const solveArgs = c.openSolve.mock.calls[0][0] as { questionText: string; groundingContext: string; language: string }
+    expect(solveArgs.questionText).toBe(openModel.newExercise.questionText)
+    expect(solveArgs.groundingContext).toContain('FIXED-EFFECTS-BODY')
+    expect(solveArgs.language).toBe('pt-BR')
+    expect(JSON.stringify(solveArgs)).not.toContain(MODEL_ANSWER)
+    expect(JSON.stringify(solveArgs)).not.toContain(KEY_POINTS[1])
+    // the grader checks the solver's answer against the stored model answer and key points
+    expect(c.gradeOpenAnswer.mock.calls[0][0]).toMatchObject({ studentAnswer: solved.answer, modelAnswer: MODEL_ANSWER, keyPoints: KEY_POINTS, language: 'pt-BR' })
+    expect(c.blindSolve).not.toHaveBeenCalled()
+  })
+
+  it('rejects a question the solver only answers at 0.67, stores why, and retries', async () => {
+    setup({}, openProfile())
+    mockModel(openModel)
+    const c = checks({
+      grade: vi.fn()
+        .mockResolvedValueOnce(gradeResult(['covered', 'covered', 'missing'], 0.67))
+        .mockResolvedValueOnce(gradeResult(['covered', 'covered', 'covered'], 1)),
+    })
+    vi.mocked(prisma.exercise.create).mockResolvedValue({ id: 'gen-ok' } as never)
+    const res = await generateExerciseForTopic(args, c as never)
+    expect(res).toEqual({ id: 'gen-ok' })
+    const rows = created()
+    expect(rows).toHaveLength(2)
+    expect(rows[0]).toMatchObject({ status: 'rejected', exerciseType: 'open', keyPoints: JSON.stringify(KEY_POINTS) })
+    expect(String(rows[0].reportedReason)).toMatch(/^open_solve\[open-solve-v1\/grade-open-v1\]: mismatch \(score 0\.67\)/)
+    expect(String(rows[0].reportedReason)).toContain(`missing: ${KEY_POINTS[2]}`)
+    expect(rows[1]).toMatchObject({ status: 'active' })
+  })
+
+  it('rejects a question the solver cannot answer from the material, without grading', async () => {
+    setup({}, openProfile())
+    mockModel(openModel)
+    const c = checks({ openSolve: vi.fn(async () => ({ answerable: false, issue: 'The figure it refers to is not given.', answer: 'x', ms: 1 })) })
+    await expect(generateExerciseForTopic(args, c as never)).rejects.toMatchObject({ code: 'validation_failed' })
+    expect(c.gradeOpenAnswer).not.toHaveBeenCalled()
+    expect(created()).toHaveLength(MAX_GENERATION_ATTEMPTS)
+    expect(created().every((r) => r.status === 'rejected')).toBe(true)
+    expect(String(created()[0].reportedReason)).toMatch(/^open_solve\[open-solve-v1\/grade-open-v1\]: not_answerable: The figure it refers to is not given\./)
+  })
+
+  it('a structurally invalid open question is rejected and retried without spending the solver or the grader', async () => {
+    setup({}, openProfile())
+    mockModel({ newExercise: { ...openModel.newExercise, keyPoints: ['Only one point here'] } })
+    const c = checks()
+    await expect(generateExerciseForTopic(args, c as never)).rejects.toMatchObject({ code: 'validation_failed' })
+    expect(c.openSolve).not.toHaveBeenCalled()
+    expect(c.gradeOpenAnswer).not.toHaveBeenCalled()
+    expect(String(created()[0].reportedReason)).toMatch(/^structural: key_point_count/)
+  })
+
+  it('rejects an open question that comes with choices or correct indexes, and a [Dropdown] or "which of the following" stem', async () => {
+    for (const bad of [
+      { choices: ['A', 'B', 'C'] },
+      { questionText: 'Which of the following explains fixed effects?' },
+      { questionText: 'Fixed effects remove [Dropdown 1] differences.' },
+    ]) {
+      vi.clearAllMocks()
+      setup({}, openProfile())
+      mockModel({ newExercise: { ...openModel.newExercise, ...bad } })
+      const c = checks()
+      await expect(generateExerciseForTopic(args, c as never)).rejects.toMatchObject({ code: 'validation_failed' })
+      expect(c.openSolve).not.toHaveBeenCalled()
+    }
+    vi.clearAllMocks()
+    setup({}, openProfile())
+    mockModel({ newExercise: { ...openModel.newExercise, correctChoiceIndexes: [0] } })
+    await expect(generateExerciseForTopic(args, checks() as never)).rejects.toMatchObject({ code: 'validation_failed' })
+    expect(String(created()[0].reportedReason)).toMatch(/^structural: invalid_correct_choice_indexes/)
+  })
+
+  it('lets a solver error propagate, and an unreachable grader stops the call without a rejected row', async () => {
+    setup({}, openProfile())
+    mockModel(openModel)
+    await expect(generateExerciseForTopic(args, checks({ openSolve: vi.fn(async () => { throw new Error('provider down') }) }) as never)).rejects.toThrow('provider down')
+    await expect(generateExerciseForTopic(args, checks({ grade: vi.fn(async () => null) }) as never)).rejects.toThrow(/could not be completed/)
+    expect(prisma.exercise.create).not.toHaveBeenCalled()
+  })
+
+  it('runs the real solver and grader prompts: a solver answer that misses a key point is rejected, a full one accepted', async () => {
+    setup({ content: 'FIXED-EFFECTS-BODY' }, openProfile())
+    const grade = (statuses: string[]) => ({ offTask: false, keyPoints: statuses.map((status, index) => ({ index, status, note: 'n' })), misconceptions: [], feedback: 'f' })
+    let graded = 0
+    vi.mocked(generateObject).mockImplementation((async (a: { prompt: string }) => {
+      if (a.prompt.includes('careful student who has just studied')) return { object: { answerable: true, issue: '', answer: 'It subtracts unit means.' } }
+      if (a.prompt.includes('fair, careful grader')) return { object: grade(graded++ === 0 ? ['covered', 'covered', 'missing'] : ['covered', 'covered', 'covered']) }
+      return { object: openModel }
+    }) as never)
+    vi.mocked(prisma.exercise.create).mockResolvedValue({ id: 'gen-ok' } as never)
+    await generateExerciseForTopic(args)
+    const rows = created()
+    expect(rows.map((r) => r.status)).toEqual(['rejected', 'active'])
+    expect(String(rows[0].reportedReason)).toMatch(/^open_solve\[open-solve-v1\/grade-open-v1\]: mismatch \(score 0\.67\)/)
+    const solverPrompt = vi.mocked(generateObject).mock.calls.map((c) => c[0].prompt as string).find((p) => p.includes('careful student who has just studied')) as string
+    expect(solverPrompt).toContain('FIXED-EFFECTS-BODY')
+    expect(solverPrompt).toContain('Portuguese')
+    expect(solverPrompt).not.toContain(KEY_POINTS[0])
+  })
+
+  it('choice types still go through the blind solve exactly as before, and key points are not stored for them', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: { ...generated.newExercise, keyPoints: ['stray point'] } })
+    const c = checks({ blind: vi.fn(async () => ({ passed: true, reason: '', answerable: true, userAnswer: 'A', score: 1, ms: 1 })) })
+    await generateExerciseForTopic(args, c as never)
+    expect(c.blindSolve).toHaveBeenCalledTimes(1)
+    expect(c.openSolve).not.toHaveBeenCalled()
+    expect(created()[0]).not.toHaveProperty('keyPoints')
+  })
+
+  it('style and rigor examples leave open rows out unless the target type is open', async () => {
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'cal1' }] as never)
+    const profile = { ...defaultProfile({ title: 'C' }), calibrationModule: 'Final' }
+    const whereTypes = () => vi.mocked(prisma.exercise.findMany).mock.calls.map((c) => (c[0]?.where as Record<string, unknown>).exerciseType)
+    await fetchLocalStyleExamples({ week: 'W1', courseId: 'c1', order: 1 }, ['t1'], [])
+    await fetchRigorExamples('c1', profile)
+    expect(whereTypes().length).toBeGreaterThanOrEqual(2)
+    expect(whereTypes().every((t) => JSON.stringify(t) === JSON.stringify({ not: 'open' }))).toBe(true)
+
+    vi.mocked(prisma.exercise.findMany).mockClear()
+    await fetchLocalStyleExamples({ week: 'W1', courseId: 'c1', order: 1 }, ['t1'], [], { includeOpen: true })
+    await fetchRigorExamples('c1', profile, { includeOpen: true })
+    expect(whereTypes().every((t) => t === undefined)).toBe(true)
+  })
+
+  it('shows an open example with its model answer and key points in the style block of an open target', async () => {
+    setup({}, openProfile())
+    vi.mocked(prisma.exercise.findMany).mockImplementation((async (a: { where?: { topic?: unknown } }) =>
+      a?.where?.topic ? [{ id: 'x1', exerciseType: 'open', questionText: 'Explain X.', choices: '[]', correctAnswer: 'X because Y.', keyPoints: JSON.stringify(['Y holds']), topic: { id: 't1' } }] : []) as never)
+    const { prompt } = await buildGenerationPrompt(args)
+    expect(prompt).toContain('Model Answer: X because Y.')
+    expect(prompt).toContain('- Y holds')
+  })
+
+  it('the output schema accepts an open question with key points and the version is gen-v8', () => {
+    expect(generatedExerciseSchema.safeParse(openModel).success).toBe(true)
+    expect(generatedExerciseSchema.safeParse({ newExercise: { ...openModel.newExercise, keyPoints: undefined } }).success).toBe(false)
+    expect(JSON.stringify(z.toJSONSchema(generatedExerciseSchema))).not.toContain('"default"')
+    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v8')
   })
 })

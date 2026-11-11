@@ -4,14 +4,14 @@ import type { TutorProfile } from './profile'
 // Mixes are the proportions of today's type cycles:
 //   quantitative: numeric, multiple_choice, single_choice, numeric, multiple_choice, dropdown
 //   qualitative:  single_choice, dropdown, single_choice, multiple_choice, dropdown
-// The exact cycles are kept in questionTypeCycles so legacy behavior is unchanged.
+// The exact cycles are kept in questionTypeCycles so legacy behavior is unchanged. They have no written-answer share (open 0).
 const LEGACY_CYCLES = {
   quantitative: ['numeric', 'multiple_choice', 'single_choice', 'numeric', 'multiple_choice', 'dropdown'],
   qualitative: ['single_choice', 'dropdown', 'single_choice', 'multiple_choice', 'dropdown'],
 } as const
 
-const LEGACY_QUALITATIVE_MIX = { single_choice: 0.4, multiple_choice: 0.2, numeric: 0, dropdown: 0.4 }
-const LEGACY_QUANTITATIVE_MIX = { single_choice: 1 / 6, multiple_choice: 1 / 3, numeric: 1 / 3, dropdown: 1 / 6 }
+const LEGACY_QUALITATIVE_MIX = { single_choice: 0.4, multiple_choice: 0.2, numeric: 0, dropdown: 0.4, open: 0 }
+const LEGACY_QUANTITATIVE_MIX = { single_choice: 1 / 6, multiple_choice: 1 / 3, numeric: 1 / 3, dropdown: 1 / 6, open: 0 }
 
 function legacyBase(subject: string, tutorIdentity: string, calibrationModule: string, examLabel: string, questionCount: number): TutorProfile {
   return {

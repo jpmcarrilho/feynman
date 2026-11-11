@@ -1,13 +1,32 @@
 import { z } from 'zod'
 
-export const TypeEnum = z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown'])
+export const TypeEnum = z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown', 'open'])
 export type QuestionType = z.infer<typeof TypeEnum>
 
 // How the tutor answers in the chat/voice panel (section 5.7). The student can switch it at any time.
 export const ChatModeEnum = z.enum(['probe', 'guide', 'explain'])
 export type TutorChatMode = z.infer<typeof ChatModeEnum>
 
+// Stored shape. `open` (written answers) is newer than the other four, so a stored profile or suggestion without it parses with 0.
 export const QuestionTypeMixSchema = z.object({
+  single_choice: z.number().min(0).max(1),
+  multiple_choice: z.number().min(0).max(1),
+  numeric: z.number().min(0).max(1),
+  dropdown: z.number().min(0).max(1),
+  open: z.number().min(0).max(1).default(0),
+})
+
+// The same mix for a proposal call: `open` is required and there is no default (structured output schemas stay free of defaults, plan 5.2).
+export const QuestionTypeMixModelSchema = z.object({
+  single_choice: z.number().min(0).max(1),
+  multiple_choice: z.number().min(0).max(1),
+  numeric: z.number().min(0).max(1),
+  dropdown: z.number().min(0).max(1),
+  open: z.number().min(0).max(1),
+})
+
+// The mix of an update call: four keys. The written-answer share is the owner's choice, so the model never sees or changes it.
+export const QuestionTypeMixChoiceModelSchema = z.object({
   single_choice: z.number().min(0).max(1),
   multiple_choice: z.number().min(0).max(1),
   numeric: z.number().min(0).max(1),
@@ -46,7 +65,11 @@ export const ProfileProposalSchema = z.object({
 
 // The same shape for the model call, without `.default(...)` (structured output schemas stay free of defaults, plan 5.2).
 export const ProfileProposalModelSchema = z.object({
-  profile: ProfileProposalSchema.shape.profile.extend({ toneNotes: z.string().max(300) }),
+  profile: ProfileProposalSchema.shape.profile.extend({
+    toneNotes: z.string().max(300),
+    questionTypeMix: QuestionTypeMixModelSchema,
+    quantitativeQuestionTypeMix: QuestionTypeMixModelSchema,
+  }),
   subjectsCoherent: z.boolean(),
   subjectGroups: z.array(z.object({ label: z.string(), sourceIds: z.array(z.string()) })),
 })
@@ -62,8 +85,8 @@ export const ProfileUpdateModelSchema = z.object({
   tutorIdentity: z.string(),
   analogyDomains: z.array(z.string()),
   quantitative: z.boolean(),
-  questionTypeMix: QuestionTypeMixSchema,
-  quantitativeQuestionTypeMix: QuestionTypeMixSchema,
+  questionTypeMix: QuestionTypeMixChoiceModelSchema,
+  quantitativeQuestionTypeMix: QuestionTypeMixChoiceModelSchema,
   contentLanguage: z.string(),
   sampleConcept: z.string(),
   sampleExplanation: z.string(),
@@ -105,8 +128,11 @@ export function parseProfile(json: string | null | undefined): TutorProfile | nu
   }
 }
 
-const MIX_KEYS: QuestionType[] = ['single_choice', 'multiple_choice', 'numeric', 'dropdown']
+const MIX_KEYS: QuestionType[] = ['single_choice', 'multiple_choice', 'numeric', 'dropdown', 'open']
 export type QuestionTypeMix = z.infer<typeof QuestionTypeMixSchema>
+
+/** The share of written-answer questions a proposal may carry; the owner can set any share in the card. */
+export const MAX_PROPOSED_OPEN_SHARE = 0.3
 
 /**
  * Scales a question-type mix to sum to 1. Negative and non-finite weights count as 0; `noNumeric` zeroes the numeric weight
@@ -120,10 +146,68 @@ export function normalizeMix(mix: Partial<Record<QuestionType, number>>, opts: {
   const total = MIX_KEYS.reduce((a, t) => a + weight(t), 0)
   if (total <= 0) {
     if (opts.fallback) return normalizeMix(opts.fallback, { noNumeric: opts.noNumeric })
-    return opts.noNumeric ? { single_choice: 0.5, multiple_choice: 0.25, numeric: 0, dropdown: 0.25 } : { single_choice: 0.25, multiple_choice: 0.25, numeric: 0.25, dropdown: 0.25 }
+    return opts.noNumeric
+      ? { single_choice: 0.5, multiple_choice: 0.25, numeric: 0, dropdown: 0.25, open: 0 }
+      : { single_choice: 0.25, multiple_choice: 0.25, numeric: 0.25, dropdown: 0.25, open: 0 }
   }
-  const out = { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0 }
+  const out: QuestionTypeMix = { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0, open: 0 }
   for (const t of MIX_KEYS) out[t] = weight(t) / total
+  return out
+}
+
+/**
+ * Sets one share of a mix to the typed percent (rounded, clamped to 0-100) and scales the OTHER shares in proportion to fill the
+ * rest. When the others are all 0 the rest goes to the first allowed type after the edited one in the order single choice, multiple
+ * choice, dropdown, open, numeric. Numeric stays 0 with `noNumeric`. The result holds whole percents (as fractions) that sum to 100.
+ */
+export function setMixShare(mix: QuestionTypeMix, key: QuestionType, percent: number, opts: { noNumeric?: boolean } = {}): QuestionTypeMix {
+  const typed = Number.isFinite(percent) ? Math.min(100, Math.max(0, Math.round(percent))) : 0
+  const allowed = MIX_KEYS.filter((t) => t !== key && !(opts.noNumeric && t === 'numeric'))
+  const fillOrder = (['single_choice', 'multiple_choice', 'dropdown', 'open', 'numeric'] as QuestionType[]).filter((t) => allowed.includes(t))
+  const rest = 100 - (opts.noNumeric && key === 'numeric' ? 0 : typed)
+  const weights = allowed.map((t) => Math.max(0, mix[t] ?? 0))
+  const sum = weights.reduce((a, b) => a + b, 0)
+  const out: Record<QuestionType, number> = { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0, open: 0 }
+  out[key] = opts.noNumeric && key === 'numeric' ? 0 : typed
+  if (sum <= 0) {
+    if (rest > 0 && fillOrder.length > 0) out[fillOrder[0]] = rest
+  } else {
+    const exact = weights.map((w) => (w / sum) * rest)
+    const floors = exact.map(Math.floor)
+    let left = rest - floors.reduce((a, b) => a + b, 0)
+    const order = exact.map((x, i) => ({ i, rem: x - Math.floor(x) })).sort((a, b) => b.rem - a.rem || a.i - b.i)
+    for (const { i } of order) {
+      if (left <= 0) break
+      floors[i]++
+      left--
+    }
+    allowed.forEach((t, i) => { out[t] = floors[i] })
+  }
+  const result = {} as QuestionTypeMix
+  for (const t of MIX_KEYS) result[t] = out[t] / 100
+  return result
+}
+
+const CHOICE_KEYS: QuestionType[] = ['single_choice', 'multiple_choice', 'numeric', 'dropdown']
+
+/** The mix without its written-answer share, scaled to sum to 1 (what an update model sees and returns). */
+export function choiceMixOf(mix: QuestionTypeMix): z.infer<typeof QuestionTypeMixChoiceModelSchema> {
+  const n = normalizeMix({ ...mix, open: 0 })
+  return { single_choice: n.single_choice, multiple_choice: n.multiple_choice, numeric: n.numeric, dropdown: n.dropdown }
+}
+
+/**
+ * Lowers a written-answer share above `max` to `max` and scales the other four shares to fill the rest. When the other four are
+ * all 0, `fallbackChoices` (already normalized, open 0) supplies their proportions. A share at or below `max` is returned unchanged.
+ */
+export function capOpenShare(mix: QuestionTypeMix, max: number, fallbackChoices: QuestionTypeMix): QuestionTypeMix {
+  if (mix.open <= max) return mix
+  const others = CHOICE_KEYS.reduce((a, t) => a + mix[t], 0)
+  const source = others > 0 ? mix : fallbackChoices
+  const sum = CHOICE_KEYS.reduce((a, t) => a + source[t], 0)
+  const room = 1 - max
+  const out: QuestionTypeMix = { single_choice: 0, multiple_choice: 0, numeric: 0, dropdown: 0, open: max }
+  for (const t of CHOICE_KEYS) out[t] = sum > 0 ? (source[t] / sum) * room : 0
   return out
 }
 
@@ -139,8 +223,8 @@ export function defaultProfile(course: { title: string; goal?: string | null }):
     defaultChatMode: PRESETS.socratic_professor.defaultChatMode,
     analogyDomains: [],
     quantitative: false,
-    questionTypeMix: { single_choice: 0.4, multiple_choice: 0.3, numeric: 0, dropdown: 0.3 },
-    quantitativeQuestionTypeMix: { single_choice: 0.2, multiple_choice: 0.2, numeric: 0.5, dropdown: 0.1 },
+    questionTypeMix: { single_choice: 0.3, multiple_choice: 0.25, numeric: 0, dropdown: 0.25, open: 0.2 },
+    quantitativeQuestionTypeMix: { single_choice: 0.2, multiple_choice: 0.15, numeric: 0.45, dropdown: 0.1, open: 0.1 },
     contentLanguage: 'en',
     sampleExplanation: {
       concept: subject,
@@ -156,12 +240,15 @@ export function applyPreset(p: TutorProfile, tone: TutorProfile['tone']): TutorP
   return { ...p, tone, toneNotes: PRESETS[tone].toneNotes, defaultChatMode: PRESETS[tone].defaultChatMode }
 }
 
-const TYPE_ORDER: QuestionType[] = ['single_choice', 'numeric', 'multiple_choice', 'dropdown']
+const TYPE_ORDER: QuestionType[] = ['single_choice', 'numeric', 'multiple_choice', 'dropdown', 'open']
 const CYCLE_SLOTS = 10
 
-/** 10 slots by largest-remainder rounding, interleaved round-robin in TYPE_ORDER. */
+/**
+ * 10 slots by largest-remainder rounding, each type spread evenly over the cycle (see below). Deterministic; any window of N
+ * consecutive positions is close to the mix.
+ */
 export function buildCycleFromMix(mix: z.infer<typeof QuestionTypeMixSchema>): QuestionType[] {
-  const weights = TYPE_ORDER.map((t) => Math.max(0, mix[t]))
+  const weights = TYPE_ORDER.map((t) => Math.max(0, mix[t] ?? 0))
   const total = weights.reduce((a, b) => a + b, 0)
   if (total <= 0) return ['single_choice']
   const exact = weights.map((w) => (w / total) * CYCLE_SLOTS)
@@ -175,14 +262,22 @@ export function buildCycleFromMix(mix: z.infer<typeof QuestionTypeMixSchema>): Q
     slots[i]++
     left--
   }
+  // Position by position, take the type that is furthest behind its even share (ties by TYPE_ORDER)
+  const placed = TYPE_ORDER.map(() => 0)
   const cycle: QuestionType[] = []
-  while (slots.some((s) => s > 0)) {
-    TYPE_ORDER.forEach((t, i) => {
-      if (slots[i] > 0) {
-        cycle.push(t)
-        slots[i]--
+  for (let pos = 0; pos < CYCLE_SLOTS; pos++) {
+    let best = -1
+    let bestDeficit = -Infinity
+    TYPE_ORDER.forEach((_, i) => {
+      if (placed[i] >= slots[i]) return
+      const deficit = (slots[i] * (pos + 1)) / CYCLE_SLOTS - placed[i]
+      if (deficit > bestDeficit + 1e-9) {
+        best = i
+        bestDeficit = deficit
       }
     })
+    placed[best]++
+    cycle.push(TYPE_ORDER[best])
   }
   return cycle
 }

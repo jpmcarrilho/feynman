@@ -9,11 +9,12 @@ import {
   acceptProfileAction, dismissSplitNoticeAction, getPersonaStepAction, getSpaceStatusAction, regenerateProfileAction, splitStudyspaceAction,
 } from '@/app/spaces/actions'
 import {
-  PRESETS, TutorProfileSchema, applyPreset, normalizeMix,
+  PRESETS, TutorProfileSchema, applyPreset, normalizeMix, setMixShare,
   type QuestionType, type QuestionTypeMix, type TutorChatMode, type TutorProfile,
 } from '@/lib/studyspace/profile'
 import { CHAT_MODE_HINTS, CHAT_MODE_LABELS } from '@/lib/prompts/chatMode'
 import { MAX_SPACE_NAME_LENGTH } from '@/lib/spaceLimits'
+import { sameMix } from '@/lib/studyspace/suggestion'
 import type { PersonaStep } from '@/server/ingest/persona'
 
 export const STARTER_POLL_MS = 2000
@@ -27,7 +28,7 @@ const LEVELS: { value: TutorProfile['level']; label: string }[] = [
 const MODES: TutorChatMode[] = ['probe', 'guide', 'explain']
 const TONES = Object.keys(PRESETS) as TutorProfile['tone'][]
 const TYPE_LABELS: Record<QuestionType, string> = {
-  single_choice: 'Single choice', multiple_choice: 'Multiple choice', numeric: 'Numeric answer', dropdown: 'Dropdown',
+  single_choice: 'Single choice', multiple_choice: 'Multiple choice', numeric: 'Numeric answer', dropdown: 'Dropdown', open: 'Open answer (written)',
 }
 const TYPES = Object.keys(TYPE_LABELS) as QuestionType[]
 const FIELD_LABELS: Record<string, string> = {
@@ -86,9 +87,9 @@ function MixEditor({ legend, mix, noNumeric, onChange }: { legend: string; mix: 
   return (
     <fieldset className="flex flex-col gap-2">
       <legend className="text-sm font-semibold text-charcoal-graphite">{legend}</legend>
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
         {TYPES.map((t) => (
-          <div key={t} className="flex flex-col gap-1">
+          <div key={t} className="flex min-w-0 flex-col gap-1">
             <label htmlFor={`mix-${legend}-${t}`} className="text-xs text-charcoal-graphite/70">{TYPE_LABELS[t]} (%)</label>
             <Input
               id={`mix-${legend}-${t}`}
@@ -100,17 +101,16 @@ function MixEditor({ legend, mix, noNumeric, onChange }: { legend: string; mix: 
               disabled={noNumeric && t === 'numeric'}
               value={noNumeric && t === 'numeric' ? '0' : raw[t] ?? pct(t)}
               onChange={(e) => {
-                const next = { ...raw, [t]: e.target.value }
-                setRaw(next)
-                const weights = Object.fromEntries(TYPES.map((k) => [k, Number(next[k] ?? pct(k)) / 100])) as Record<QuestionType, number>
-                onChange(normalizeMix(weights, { noNumeric, fallback: mix }))
+                // The typed share is kept and the others scale to fill the rest
+                setRaw({ [t]: e.target.value })
+                onChange(setMixShare(mix, t, e.target.value === '' ? 0 : Number(e.target.value), { noNumeric }))
               }}
               onBlur={() => setRaw({})}
             />
           </div>
         ))}
       </div>
-      <p className="text-xs text-charcoal-graphite/60">The shares are scaled to add up to 100% when you leave a field.</p>
+      <p className="text-xs text-charcoal-graphite/60">The share you type is kept and the other shares adjust so that the total stays 100%.</p>
     </fieldset>
   )
 }
@@ -291,6 +291,15 @@ export function PersonaCard({ courseId, onStudy, onBack, onRenamed, initial }: {
   const dirty = JSON.stringify(draft) !== baseline
   const problem = profileProblem(draft)
   const set = (patch: Partial<TutorProfile>) => setDraft((d) => (d ? { ...d, ...patch } : d))
+  // A profile with a fixed order of question types (the imported courses) follows that order and ignores its shares. Changing a
+  // share replaces the order with the shares: the order is cleared, and the note below says so.
+  const setMixes = (patch: Partial<Pick<TutorProfile, 'questionTypeMix' | 'quantitativeQuestionTypeMix'>>) =>
+    setDraft((d) => {
+      if (!d) return d
+      const changed = (['questionTypeMix', 'quantitativeQuestionTypeMix'] as const).some((k) => patch[k] && !sameMix(d[k], patch[k]))
+      return { ...d, ...patch, ...(changed && d.questionTypeCycles ? { questionTypeCycles: null } : {}) }
+    })
+  const hadFixedOrder = !!step.profile.questionTypeCycles
 
   const accept = async () => {
     if (busy || problem) return
@@ -547,11 +556,24 @@ export function PersonaCard({ courseId, onStudy, onBack, onRenamed, initial }: {
 
         <div className="flex flex-col gap-3">
           <label className="flex min-h-10 items-center gap-2 text-sm font-semibold text-charcoal-graphite sm:min-h-0">
-            <input type="checkbox" className="size-5 sm:size-4" checked={draft.quantitative} onChange={(e) => set({ quantitative: e.target.checked, ...(e.target.checked ? {} : { questionTypeMix: normalizeMix(draft.questionTypeMix, { noNumeric: true }), quantitativeQuestionTypeMix: normalizeMix(draft.quantitativeQuestionTypeMix, { noNumeric: true }) }) })} />
+            <input type="checkbox" className="size-5 sm:size-4" checked={draft.quantitative} onChange={(e) => {
+              set({ quantitative: e.target.checked })
+              if (!e.target.checked) setMixes({ questionTypeMix: normalizeMix(draft.questionTypeMix, { noNumeric: true }), quantitativeQuestionTypeMix: normalizeMix(draft.quantitativeQuestionTypeMix, { noNumeric: true }) })
+            }} />
             This subject involves calculations
           </label>
-          <MixEditor legend="Question types for conceptual topics" mix={draft.questionTypeMix} noNumeric={!draft.quantitative} onChange={(m) => set({ questionTypeMix: m })} />
-          {draft.quantitative && <MixEditor legend="Question types for calculation topics" mix={draft.quantitativeQuestionTypeMix} noNumeric={false} onChange={(m) => set({ quantitativeQuestionTypeMix: m })} />}
+          <MixEditor legend="Question types for conceptual topics" mix={draft.questionTypeMix} noNumeric={!draft.quantitative} onChange={(m) => setMixes({ questionTypeMix: m })} />
+          {draft.quantitative && <MixEditor legend="Question types for calculation topics" mix={draft.quantitativeQuestionTypeMix} noNumeric={false} onChange={(m) => setMixes({ quantitativeQuestionTypeMix: m })} />}
+          {draft.questionTypeCycles && (
+            <p role="note" className="text-xs text-charcoal-graphite/70">
+              {readOnly
+                ? 'This tutor asks its question types in a fixed order, so the shares above are shown for reference only.'
+                : 'This tutor asks its question types in a fixed order. If you change any share above, that order is replaced by the shares.'}
+            </p>
+          )}
+          {!draft.questionTypeCycles && hadFixedOrder && (
+            <p role="note" className="text-xs font-medium text-charcoal-graphite/80">The original fixed order of question types is replaced by these shares when you save.</p>
+          )}
         </div>
 
         <Field label="Sample explanation" hint="How the tutor would explain a concept from your files. Read-only; Regenerate makes a new one.">

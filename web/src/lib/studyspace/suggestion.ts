@@ -37,8 +37,8 @@ export const FIELD_LABELS: Record<UpdatableField, string> = {
 }
 
 const LEVEL_LABELS: Record<TutorProfile['level'], string> = { intro: 'Introductory', undergraduate: 'Undergraduate', graduate: 'Graduate', professional: 'Professional' }
-const TYPE_SHORT: Record<QuestionType, string> = { single_choice: 'single choice', multiple_choice: 'multiple choice', numeric: 'numeric', dropdown: 'dropdown' }
-const TYPES: QuestionType[] = ['single_choice', 'multiple_choice', 'numeric', 'dropdown']
+const TYPE_SHORT: Record<QuestionType, string> = { single_choice: 'single choice', multiple_choice: 'multiple choice', numeric: 'numeric', dropdown: 'dropdown', open: 'open answer' }
+const TYPES: QuestionType[] = ['single_choice', 'multiple_choice', 'numeric', 'dropdown', 'open']
 
 const percent = (n: number) => Math.round(n * 100)
 

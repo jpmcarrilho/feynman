@@ -13,6 +13,7 @@ vi.mock('@/lib/db', async () => {
 })
 
 import { GenerationError, NOT_STUDY_MATERIAL_PREFIX } from '@/services/exerciseGenerator'
+import { defaultProfile, pickQuestionType } from '@/lib/studyspace/profile'
 import { STARTERS_PER_SOURCE, STARTER_MAX_CONSECUTIVE_FAILURES } from '@/lib/ingestLimits'
 
 type Prisma = typeof import('@/lib/db').prisma
@@ -49,7 +50,7 @@ async function makeSource(topicCount: number) {
 }
 
 /** Generator fake: stores a question like the real one (origin generated, status active) and returns it. */
-type Args = { primaryTopicId: string }
+type Args = { primaryTopicId: string; typePosition?: number }
 const store = (args: Args) =>
   prisma.exercise.create({
     data: { id: `gen-${crypto.randomUUID()}`, topicId: args.primaryTopicId, questionText: 'Q?', choices: '["a","b","c"]', correctAnswer: 'a', origin: 'generated', status: 'active' },
@@ -163,5 +164,54 @@ describe('warning notes', () => {
     const note = mod.starterNote({ created: 5, failedSlots: 2, notAttempted: 0, stoppedBy: null })
     expect(mod.stripStarterNote(`Encoding was guessed. ${note}`)).toBe('Encoding was guessed.')
     expect(mod.stripStarterNote(null)).toBe('')
+  })
+})
+
+describe('question types of starters follow one running position over the studyspace', () => {
+  const profileWith = (open: number) => ({
+    ...defaultProfile({ title: 'x' }),
+    questionTypeMix: { single_choice: (1 - open) / 2, multiple_choice: (1 - open) / 2, numeric: 0, dropdown: 0, open },
+  })
+  const typesOf = (positions: number[], open: number) => positions.map((p) => pickQuestionType(profileWith(open), false, p))
+
+  it.each([[0.2, 2], [0.5, 5]])('5 topics at an open share of %s give %s open questions among the 10 starters', async (open, expected) => {
+    const { sourceId } = await makeSource(5)
+    const positions: number[] = []
+    const generate = asGenerator(async (args) => {
+      positions.push(args.typePosition as number)
+      return store(args)
+    })
+    await mod.generateStartersForSource(sourceId, mod.newStarterBudget(), () => false, generate)
+    expect([...positions].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7, 8, 9])
+    expect(typesOf(positions, open).filter((t) => t === 'open')).toHaveLength(expected)
+  })
+
+  it('a resumed run continues after the starters already there and never exceeds 2 per topic', async () => {
+    const { sourceId, topicIds } = await makeSource(5)
+    for (const id of [topicIds[0], topicIds[1], topicIds[2]]) {
+      await prisma.exercise.create({ data: { id: `old-${id}`, topicId: id, questionText: 'old', choices: '[]', correctAnswer: 'a', origin: 'starter', status: 'active' } })
+    }
+    const positions: number[] = []
+    const generate = asGenerator(async (args) => {
+      positions.push(args.typePosition as number)
+      return store(args)
+    })
+    await mod.generateStartersForSource(sourceId, mod.newStarterBudget(), () => false, generate)
+    expect([...positions].sort((a, b) => a - b)).toEqual([3, 4, 5, 6, 7, 8, 9])
+    for (const id of topicIds) expect(await startersOf(id)).toBeLessThanOrEqual(2)
+  })
+
+  it('a later upload continues the sequence of the whole studyspace', async () => {
+    const { courseId, sourceId } = await makeSource(2)
+    await mod.generateStartersForSource(sourceId, mod.newStarterBudget(), () => false, storingGenerator())
+    await prisma.source.create({ data: { id: `${sourceId}-b`, courseId, originalName: 'b.txt', mimeType: 'text/plain', sizeBytes: 1, storageKey: 'k', status: 'ready', bundle: 'later' } })
+    await prisma.topic.create({ data: { id: `${sourceId}-bt`, courseId, sourceId: `${sourceId}-b`, order: 50, week: '02 · N', title: 'B', content: 'More content' } })
+    const positions: number[] = []
+    const generate = asGenerator(async (args) => {
+      positions.push(args.typePosition as number)
+      return store(args)
+    })
+    await mod.generateStartersForSource(`${sourceId}-b`, mod.newStarterBudget(), () => false, generate)
+    expect(positions).toEqual([4, 5])
   })
 })

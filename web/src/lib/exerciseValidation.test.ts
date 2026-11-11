@@ -214,10 +214,29 @@ describe('open questions', () => {
     expect(codes({ keyPoints: JSON.stringify(open.keyPoints), choices: '[]' })).toEqual([])
   })
 
+  it('accepts single-task wordings that look similar', () => {
+    for (const q of [
+      'Compare and contrast fixed effects and random effects.',
+      'What would happen to the median voter outcome if turnout fell? Explain.',
+      'Explain how supply and demand together set the price.',
+      'Explain why the estimator is biased when a confounder varies over time.',
+    ]) expect(codes({ questionText: q }), q).toEqual([])
+  })
+
+  it('does not apply the single-task rules to imported questions', () => {
+    const q = { ...open, questionText: 'Explain X, and explain Y. In your answer, discuss Z.' }
+    expect(validateExerciseStructure(q, { origin: 'imported' })).toEqual([])
+    expect(validateExerciseStructure(q).map((i) => i.code)).toEqual(expect.arrayContaining(['open_instructs_coverage', 'open_multiple_tasks']))
+  })
+
   it.each([
     ['choices', { choices: ['a', 'b', 'c'] }, 'open_has_choices'],
     ['a dropdown placeholder', { questionText: 'Explain [Dropdown 1] in two sentences.' }, 'open_has_placeholder'],
     ['"which of the following"', { questionText: 'Which of the following explains fixed effects?' }, 'open_which_of_following'],
+    ['a coverage instruction', { questionText: 'Explain why fixed effects remove constants. In your response, address both the mean and the error.' }, 'open_instructs_coverage'],
+    ['two instructions joined by "and"', { questionText: 'Explain the impact of the compound on T cell activation, and explain why a second signal is required.' }, 'open_multiple_tasks'],
+    ['a second task sentence', { questionText: 'Explain why fixed effects remove constants. Furthermore, describe what remains.' }, 'open_multiple_tasks'],
+    ['two question marks', { questionText: 'Why do fixed effects remove constants? What remains?' }, 'open_multiple_tasks'],
     ['a too-short model answer', { correctAnswer: 'Because of means.' }, 'model_answer_length'],
     ['a too-long model answer', { correctAnswer: 'x'.repeat(1501) }, 'model_answer_length'],
     ['one key point', { keyPoints: ['Subtracts the unit mean'] }, 'key_point_count'],

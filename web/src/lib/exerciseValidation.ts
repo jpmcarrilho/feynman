@@ -52,6 +52,16 @@ export const IMPORTED_SINGLE_CHOICE_MIN = 2
 /** Length limits of the stored parts of an open question (the model answer's upper limit is MODEL_ANSWER_MAX_CHARS). */
 export const OPEN_ANSWER_LIMITS = { modelAnswerMin: 40, keyPointMin: 5, keyPointMax: 300 } as const
 
+const TASK_VERB = '(?:explain|describe|discuss|compare|justify|analy[sz]e|identify|define|outline|evaluate)'
+/** "In your response, address ..." and the like. */
+const OPEN_COVERAGE_INSTRUCTION = /\bin your (?:response|answer|explanation),?\s+(?:address|discuss|include|cover|mention|describe|explain|clarify)\b|\b(?:be sure|make sure) to (?:address|discuss|include|cover|mention)\b/i
+/** Two instructions: two task verbs joined by "and", or a second sentence that opens with another task. */
+const OPEN_TWO_TASKS = [
+  new RegExp(`\\b${TASK_VERB}\\b[^.?!]*,?\\s+(?:and|as well as)\\s+(?:also\\s+)?${TASK_VERB}\\b`, 'i'),
+  new RegExp(`[.?!]\\s+(?:furthermore|additionally|moreover|also|then|next|finally),?\\s+${TASK_VERB}\\b`, 'i'),
+  /\?[^?]*\?/,
+]
+
 export const DROPDOWN_PLACEHOLDER = '[Dropdown 1]'
 
 // --- LaTeX ------------------------------------------------------------------------------------------------------
@@ -215,6 +225,11 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
       if (choices.length > 0) add('open_has_choices', 'An open question must have no choices.')
       if (/\[Dropdown \d+\]|\[BLANK\]/.test(questionText)) add('open_has_placeholder', 'An open question cannot contain a [Dropdown n] or [BLANK] placeholder.')
       if (/which\s+of\s+the\s+following/i.test(questionText)) add('open_which_of_following', 'An open question cannot ask "which of the following".')
+      // A generated question has one task and does not tell the student what to cover (imported questions are the file's own)
+      if (opts.origin !== 'imported') {
+        if (OPEN_COVERAGE_INSTRUCTION.test(questionText)) add('open_instructs_coverage', 'An open question must not tell the student which points to cover ("in your response, address ...").')
+        if (OPEN_TWO_TASKS.some((re) => re.test(questionText))) add('open_multiple_tasks', 'An open question must have exactly one task, not two instructions joined together.')
+      }
       const len = answer.trim().length
       if (len < OPEN_ANSWER_LIMITS.modelAnswerMin || len > MODEL_ANSWER_MAX_CHARS) {
         add('model_answer_length', `The model answer needs ${OPEN_ANSWER_LIMITS.modelAnswerMin}-${MODEL_ANSWER_MAX_CHARS} characters, has ${len}.`)

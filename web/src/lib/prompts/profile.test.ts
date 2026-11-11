@@ -80,3 +80,20 @@ describe('the update prompt judges the whole studyspace', () => {
     expect(profileUpdatePrompt({ title: 'T', goal: null, profile: defaultProfile({ title: 'T' }), source: f })).not.toContain('already holds')
   })
 })
+
+describe('written-answer share in the profile prompts', () => {
+  const [f] = fitProposalSources([source('a', 2)])
+  it('the proposal asks for open about 0.2 (concepts) and 0.1 (calculations), at most 0.3', () => {
+    const p = proposeProfilePrompt({ title: 'T', goal: null, sources: [f] })
+    expect(p).toMatch(/single_choice, multiple_choice, numeric, dropdown and open/)
+    expect(p).toMatch(/about 0\.2 for "questionTypeMix" and about 0\.1 for "quantitativeQuestionTypeMix", never more than 0\.3/)
+  })
+  it('the update shows the model four shares per mix, without the owner’s open share, and says it is not part of the answer', () => {
+    const profile = defaultProfile({ title: 'T' })
+    const p = profileUpdatePrompt({ title: 'T', goal: null, profile, source: f })
+    const shown = JSON.parse(p.slice(p.indexOf('{\n'), p.indexOf('\n}\n') + 2))
+    expect(Object.keys(shown.questionTypeMix)).toEqual(['single_choice', 'multiple_choice', 'numeric', 'dropdown'])
+    expect(Object.values(shown.questionTypeMix as Record<string, number>).reduce((a, b) => a + b, 0)).toBeCloseTo(1, 10)
+    expect(p).toMatch(/written-answer questions are the student's own setting/)
+  })
+})

@@ -3,11 +3,12 @@
 // step (every initial file is terminal by then and the outline carries the owner's edits), never by the runner.
 import { prisma } from '@/lib/db'
 import {
-  ChatModeEnum, PRESETS, ProfileProposalModelSchema, ProfileUpdateModelSchema, TutorProfileSchema, defaultProfile, normalizeMix, parseProfile,
+  ChatModeEnum, MAX_PROPOSED_OPEN_SHARE, PRESETS, ProfileProposalModelSchema, ProfileUpdateModelSchema, TutorProfileSchema, capOpenShare, choiceMixOf, defaultProfile,
+  normalizeMix, parseProfile,
   type ProfileSuggestion, type QuestionTypeMix, type TutorProfile,
 } from '@/lib/studyspace/profile'
 import { existingOutline, fitProposalSources, proposeProfilePrompt, profileUpdatePrompt, type ProposalOutlineSource } from '@/lib/prompts/profile'
-import { UPDATABLE_FIELDS, fieldChanged, parseSuggestion } from '@/lib/studyspace/suggestion'
+import { UPDATABLE_FIELDS, fieldChanged, parseSuggestion, sameMix } from '@/lib/studyspace/suggestion'
 import { NOT_STUDY_MATERIAL_PREFIX } from '@/services/exerciseGenerator'
 import { splitModuleName } from '@/services/outlineService'
 import { StageError, newModelStats, structuredCall, type GenerateObjectFn } from './modelCall'
@@ -67,6 +68,13 @@ type Assembled = { profile: TutorProfile } | { problem: string }
 function assemble(proposed: ReturnType<typeof ProfileProposalModelSchema.parse>['profile'], course: { title: string; goal: string | null }): Assembled {
   const base = defaultProfile(course)
   const tone = proposed.tone
+  // The proposed mix, normalized, with the written-answer share capped (the owner can set any share later)
+  const proposedMix = (mix: QuestionTypeMix, fallback: QuestionTypeMix): QuestionTypeMix =>
+    capOpenShare(
+      normalizeMix(mix, { noNumeric: !proposed.quantitative, fallback }),
+      MAX_PROPOSED_OPEN_SHARE,
+      normalizeMix({ ...fallback, open: 0 }, { noNumeric: !proposed.quantitative }),
+    )
   const modeCheck = ChatModeEnum.safeParse(proposed.defaultChatMode)
   const candidate = {
     ...proposed,
@@ -74,8 +82,8 @@ function assemble(proposed: ReturnType<typeof ProfileProposalModelSchema.parse>[
     toneNotes: (proposed.toneNotes ?? '').trim(),
     defaultChatMode: modeCheck.success ? modeCheck.data : PRESETS[tone].defaultChatMode,
     analogyDomains: [...new Set((proposed.analogyDomains ?? []).map((a) => a.trim()).filter(Boolean))].slice(0, 5),
-    questionTypeMix: normalizeMix(proposed.questionTypeMix, { noNumeric: !proposed.quantitative, fallback: base.questionTypeMix }),
-    quantitativeQuestionTypeMix: normalizeMix(proposed.quantitativeQuestionTypeMix, { noNumeric: !proposed.quantitative, fallback: base.quantitativeQuestionTypeMix }),
+    questionTypeMix: proposedMix(proposed.questionTypeMix, base.questionTypeMix),
+    quantitativeQuestionTypeMix: proposedMix(proposed.quantitativeQuestionTypeMix, base.quantitativeQuestionTypeMix),
     calibrationModule: null,
     examPreset: null,
     questionTypeCycles: null,
@@ -245,9 +253,22 @@ export function applyProfileUpdate(accepted: TutorProfile, o: UpdateModelOutput,
   //  - with other files in the studyspace the content language does not change (they are in the accepted language, and one file in
   //    another language is not a reason to switch the tutor).
   const quantitative = accepted.quantitative || o.quantitative
-  const keepNumeric = (proposed: QuestionTypeMix, current: QuestionTypeMix): QuestionTypeMix => {
-    const next = normalizeMix(proposed, { fallback: current })
-    return quantitative && current.numeric > 0 && next.numeric === 0 ? current : next
+  // The model returns the four choice/numeric shares only. The accepted written-answer share is the owner's choice and is kept;
+  // the proposed four are rescaled into what it leaves. A proposal equal to the accepted four (rounding aside) changes nothing.
+  const keepNumeric = (proposed: ReturnType<typeof choiceMixOf>, current: QuestionTypeMix): QuestionTypeMix => {
+    if (current.open >= 1) return current
+    const currentChoices = normalizeMix({ ...current, open: 0 })
+    const next = normalizeMix({ ...proposed, open: 0 }, { fallback: currentChoices })
+    if (quantitative && currentChoices.numeric > 0 && next.numeric === 0) return current
+    if (sameMix(next, currentChoices)) return current
+    const room = 1 - current.open
+    return {
+      single_choice: next.single_choice * room,
+      multiple_choice: next.multiple_choice * room,
+      numeric: next.numeric * room,
+      dropdown: next.dropdown * room,
+      open: current.open,
+    }
   }
   const languageKept = !!ctx.otherFiles && fieldChanged('contentLanguage', accepted, { ...accepted, contentLanguage: o.contentLanguage.trim() })
   const candidate: Record<string, unknown> = {

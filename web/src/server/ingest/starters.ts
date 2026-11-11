@@ -75,6 +75,11 @@ export async function generateStartersForSource(
   const eligible = allIds.filter((id) => eligibility.get(id) === 'ok')
   if (eligible.length === 0) return outcome
 
+  // The type of a starter follows one running position over the whole studyspace (starters already there, then this call's slots in
+  // order), so the question-type mix is honoured across topics, a resumed run continues the sequence and a later upload carries on.
+  const src = await prisma.source.findUnique({ where: { id: sourceId }, select: { courseId: true } })
+  let nextPosition = src ? await prisma.exercise.count({ where: { origin: 'starter', status: 'active', topic: { courseId: src.courseId } } }) : 0
+
   const have = await countStartersByTopic(eligible)
   let sourceRoom = STARTERS_PER_SOURCE - [...have.values()].reduce((a, b) => a + b, 0)
   const dropped = new Set<string>()
@@ -82,20 +87,20 @@ export async function generateStartersForSource(
   for (let round = 1; round <= STARTERS_PER_TOPIC; round++) {
     const todo = eligible.filter((id) => (have.get(id) ?? 0) < round && !dropped.has(id))
     if (todo.length === 0) continue
-    const slots: string[] = []
+    const slots: { topicId: string; position: number }[] = []
     for (const id of todo) {
       if (sourceRoom <= 0) { outcome.notAttempted++; outcome.stoppedBy ??= 'cap'; continue }
       sourceRoom--
-      slots.push(id)
+      slots.push({ topicId: id, position: nextPosition++ })
     }
-    await mapWithConcurrency(slots, STAGE_CONCURRENCY, async (topicId) => {
+    await mapWithConcurrency(slots, STAGE_CONCURRENCY, async ({ topicId, position }) => {
       if (shouldStop()) { outcome.stoppedBy ??= 'cancelled'; return }
       if (budget.broken) { outcome.stoppedBy ??= 'breaker'; outcome.notAttempted++; return }
       if (budget.slotsLeft <= 0) { outcome.stoppedBy ??= 'budget'; outcome.notAttempted++; return }
       budget.slotsLeft--
       try {
         const existing = await activeExerciseIds(topicId)
-        const made = await generate({ primaryTopicId: topicId, poolTopicIds: eligible, existingExerciseIds: existing })
+        const made = await generate({ primaryTopicId: topicId, poolTopicIds: eligible, existingExerciseIds: existing, typePosition: position })
         await prisma.exercise.update({ where: { id: made.id }, data: { origin: 'starter' } })
         have.set(topicId, (have.get(topicId) ?? 0) + 1)
         outcome.created++

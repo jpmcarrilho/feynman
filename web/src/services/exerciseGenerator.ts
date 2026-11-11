@@ -3,9 +3,12 @@ import { z } from 'zod'
 import type { Exercise, Topic } from '@prisma/client'
 import { textModel } from '@/lib/ai'
 import { prisma } from '@/lib/db'
-import { generateExercisePrompt, GENERATE_EXERCISE_PROMPT_VERSION, BLIND_SOLVE_PROMPT_VERSION } from '@/lib/prompts'
+import { generateExercisePrompt, GENERATE_EXERCISE_PROMPT_VERSION, BLIND_SOLVE_PROMPT_VERSION, OPEN_SOLVE_PROMPT_VERSION, GRADE_OPEN_PROMPT_VERSION } from '@/lib/prompts'
 import { validateExerciseStructure, summarizeIssues, deriveChoiceAnswer, type ValidationIssue } from '@/lib/exerciseValidation'
 import { blindSolve } from '@/services/blindSolve'
+import { openSolve } from '@/services/openSolve'
+import { gradeOpenAnswer, EXAM_GRADE_ATTEMPTS } from '@/services/openGrading'
+import { parseKeyPoints } from '@/lib/openAnswer'
 import { pickQuestionType, type TutorProfile } from '@/lib/studyspace/profile'
 import { getCourseWithProfile } from '@/services/studyspaceService'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
@@ -31,12 +34,21 @@ function shuffleArray<T>(array: T[]): T[] {
   return shuffled
 }
 
-function describeExercise(ex: { exerciseType: string; questionText: string; choices: string; correctAnswer: string }): string {
+function describeExercise(ex: { exerciseType: string; questionText: string; choices: string; correctAnswer: string; keyPoints?: string | null }): string {
+  if (ex.exerciseType === 'open') {
+    const points = parseKeyPoints(ex.keyPoints).map((k) => `- ${k}`).join('\n')
+    return `Type: open\nQuestion: ${ex.questionText}\nModel Answer: ${ex.correctAnswer}\nKey Points:\n${points}`
+  }
   return `Type: ${ex.exerciseType}\nQuestion: ${ex.questionText}\nChoices: ${ex.choices}\nCorrect Answer: ${ex.correctAnswer}`
 }
 
+/** Prisma filter that leaves written-answer rows out of example lists unless the question to generate is one. */
+function typeFilter(includeOpen: boolean) {
+  return includeOpen ? {} : { exerciseType: { not: 'open' } }
+}
+
 /** Final-exam-level example questions of the profile's calibration module. '' when the profile has none. */
-export async function fetchRigorExamples(courseId: string, profile: TutorProfile): Promise<string> {
+export async function fetchRigorExamples(courseId: string, profile: TutorProfile, opts: { includeOpen?: boolean } = {}): Promise<string> {
   if (!profile.calibrationModule) return ''
   const calibrationTopics = await prisma.topic.findMany({
     where: { courseId, week: profile.calibrationModule },
@@ -47,7 +59,7 @@ export async function fetchRigorExamples(courseId: string, profile: TutorProfile
   const rigorExercises: Awaited<ReturnType<typeof prisma.exercise.findMany>> = []
   for (const chunk of chunkIds(ids)) {
     if (rigorExercises.length >= 3) break
-    rigorExercises.push(...(await prisma.exercise.findMany({ where: { topicId: { in: chunk }, status: 'active' }, take: 3 - rigorExercises.length })))
+    rigorExercises.push(...(await prisma.exercise.findMany({ where: { topicId: { in: chunk }, status: 'active', ...typeFilter(!!opts.includeOpen) }, take: 3 - rigorExercises.length })))
   }
   return rigorExercises.map(describeExercise).join('\n\n')
 }
@@ -65,13 +77,15 @@ export async function fetchLocalStyleExamples(
   topicData: Pick<Topic, 'week' | 'courseId' | 'order'>,
   topicIds: string[],
   existingIds: string[],
+  opts: { includeOpen?: boolean } = {},
 ) {
+  const only = typeFilter(!!opts.includeOpen)
   const existing = new Set(existingIds)
 
   // Exercises from the same module (generated ones included)
   let exercises = (
     await prisma.exercise.findMany({
-      where: { topic: { week: topicData.week, courseId: topicData.courseId }, status: 'active' },
+      where: { topic: { week: topicData.week, courseId: topicData.courseId }, status: 'active', ...only },
       take: STYLE_EXAMPLES_WANTED + existing.size,
       include: { topic: true },
     })
@@ -90,7 +104,7 @@ export async function fetchLocalStyleExamples(
     for (const chunk of chunkIds(nearest, STYLE_FALLBACK_TOPICS_PER_QUERY)) {
       if (exercises.length >= STYLE_EXAMPLES_WANTED) break
       const found = await prisma.exercise.findMany({
-        where: { topicId: { in: chunk }, status: 'active' },
+        where: { topicId: { in: chunk }, status: 'active', ...only },
         take: STYLE_EXAMPLES_WANTED + existing.size,
         include: { topic: true },
       })
@@ -320,6 +334,8 @@ export async function buildGenerationPrompt(args: {
   poolTopicIds: string[]
   existingExerciseIds: string[]
   styleTopicIds?: string[]
+  /** Position in the type cycle. Defaults to the number of existing exercises; starters pass a running index over the whole run. */
+  typePosition?: number
 }) {
   const { primaryTopicId, poolTopicIds, existingExerciseIds } = args
   // Classify before loading the topic: a failed extraction can leave tens of MB of binary in `content`
@@ -353,11 +369,11 @@ export async function buildGenerationPrompt(args: {
   const course = await getCourseWithProfile(topicData.courseId)
   const profile = course?.profile ?? LEGACY_VOICE_PROFILE
 
-  // Style examples from the target topic's module (previously generated ones included)
-  const existingExercises = await fetchLocalStyleExamples(topicData, args.styleTopicIds ?? poolTopicIds, existingExerciseIds)
-  const existingExercisesContext = existingExercises.map(describeExercise).join('\n\n')
+  const targetType = pickQuestionType(profile, topicData.isQuantitative, args.typePosition ?? existingExerciseIds.length)
 
-  const targetType = pickQuestionType(profile, topicData.isQuantitative, existingExerciseIds.length)
+  // Style examples from the target topic's module (previously generated ones included); written-answer rows only for a written-answer target
+  const existingExercises = await fetchLocalStyleExamples(topicData, args.styleTopicIds ?? poolTopicIds, existingExerciseIds, { includeOpen: targetType === 'open' })
+  const existingExercisesContext = existingExercises.map(describeExercise).join('\n\n')
 
   // Siblings: pool topics of the target's module that can be generated from, nearest in course order first
   const poolIdSet = new Set(poolTopicIds)
@@ -384,7 +400,7 @@ export async function buildGenerationPrompt(args: {
   // Different windows of a long topic for each new exercise
   const rotation = await prisma.exercise.count({ where: { topicId: primaryTopicId } })
   const bucketContext = await compileGroundingContext(topicData, siblings, rotation, existingExercises, profile)
-  const rigorExercisesContext = await fetchRigorExamples(topicData.courseId, profile)
+  const rigorExercisesContext = await fetchRigorExamples(topicData.courseId, profile, { includeOpen: targetType === 'open' })
 
   const alreadyAskedQuestionsText = existingExercisesInSession
     .map((text, idx) => `Question ${idx + 1}: ${truncateForPrompt(text, ALREADY_ASKED_CHARS)}`)
@@ -399,7 +415,7 @@ export async function buildGenerationPrompt(args: {
     alreadyAsked: alreadyAskedQuestionsText,
     targetType,
   })
-  return { prompt, bucketContext, topicData }
+  return { prompt, bucketContext, topicData, profile, targetType }
 }
 
 /** Structured output of the generation call. */
@@ -411,13 +427,15 @@ export const generatedExerciseSchema = z.object({
     logisticsReason: z.string(),
     // With "logistics" these may be empty ("" and [])
     questionText: z.string(),
-    exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
+    exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown', 'open']),
     choices: z.array(z.string()),
     // 0-based indexes into `choices` of the correct options (one for single_choice and dropdown, one or more for
     // multiple_choice, none for numeric). Code derives the stored answer from them; the model never retypes option text.
     correctChoiceIndexes: z.array(z.number().int()),
-    // The numeric string for numeric questions; "" for every choice type
+    // The numeric string for numeric questions; the model answer for open questions; "" for every choice type
     correctAnswer: z.string(),
+    // 2 to 4 key points for open questions; [] for every other type
+    keyPoints: z.array(z.string()),
     explanation: z.string(),
   }),
 })
@@ -435,19 +453,55 @@ export async function countRejectedSince(topicIds: string[], since: Date): Promi
   return counts
 }
 
-/** Why a candidate must not be shown, or null when it passes the structural checks and the blind solve. */
+/** The model calls of the quality gate. Injectable for tests; the defaults are the real services. */
+export interface GeneratorChecks {
+  blindSolve: typeof blindSolve
+  openSolve: typeof openSolve
+  gradeOpenAnswer: typeof gradeOpenAnswer
+}
+const DEFAULT_CHECKS: GeneratorChecks = { blindSolve, openSolve, gradeOpenAnswer }
+
+/** What the quality gate of a written-answer question stores as the start of the rejection reason. */
+export const OPEN_SOLVE_REASON_PREFIX = `open_solve[${OPEN_SOLVE_PROMPT_VERSION}/${GRADE_OPEN_PROMPT_VERSION}]`
+
+/**
+ * Why a candidate must not be shown, or null when it passes the structural checks and the quality gate. Choice and numeric
+ * questions go through the blind solve. A written-answer question goes through `openSolve` (a student with the same grounding
+ * window answers it) and `gradeOpenAnswer` on that answer: it passes only when the question is answerable and the answer scores 1.
+ */
 async function rejectionReason(candidate: {
   questionText: string
   exerciseType: string
   choices: string[]
   correctAnswer: string
   explanation: string
-}, derivationIssue?: ValidationIssue): Promise<string | null> {
+  keyPoints?: string[]
+}, derivationIssue: ValidationIssue | undefined, ctx: { groundingContext: string; language: string; checks: GeneratorChecks }): Promise<string | null> {
   const issues = derivationIssue ? [derivationIssue] : validateExerciseStructure(candidate)
   if (issues.length > 0) return `structural: ${summarizeIssues(issues)} | ${issues.map((i) => i.message).join(' ')}`
-  const solved = await blindSolve(candidate)
+  if (candidate.exerciseType === 'open') return openRejectionReason({ ...candidate, keyPoints: candidate.keyPoints ?? [] }, ctx)
+  const solved = await ctx.checks.blindSolve(candidate)
   if (!solved.passed) return `blind_solve[${BLIND_SOLVE_PROMPT_VERSION}]: ${solved.reason}`
   return null
+}
+
+async function openRejectionReason(
+  candidate: { questionText: string; correctAnswer: string; keyPoints: string[] },
+  ctx: { groundingContext: string; language: string; checks: GeneratorChecks },
+): Promise<string | null> {
+  const solved = await ctx.checks.openSolve({ questionText: candidate.questionText, groundingContext: ctx.groundingContext, language: ctx.language })
+  if (!solved.answerable) return `${OPEN_SOLVE_REASON_PREFIX}: not_answerable: ${solved.issue.trim() || 'no reason given'}`
+  if (!solved.answer.trim()) return `${OPEN_SOLVE_REASON_PREFIX}: the solver gave no answer`
+  const graded = await ctx.checks.gradeOpenAnswer(
+    { questionText: candidate.questionText, modelAnswer: candidate.correctAnswer, keyPoints: candidate.keyPoints, studentAnswer: solved.answer, language: ctx.language },
+    { attempts: EXAM_GRADE_ATTEMPTS },
+  )
+  // Not a verdict on the question: the grader could not be reached. Nothing is stored for it.
+  if (!graded) throw new Error('The written-answer check could not be completed.')
+  if (graded.isCorrect) return null
+  const missing = graded.feedback.keyPoints.filter((k) => k.status !== 'covered').map((k) => `${k.status}: ${k.point}`)
+  const wrong = graded.feedback.misconceptions
+  return `${OPEN_SOLVE_REASON_PREFIX}: mismatch (score ${graded.score})${graded.offTask ? ', solver off task' : ''}${missing.length ? ` | key points not covered by the solver: ${missing.join('; ')}` : ''}${wrong.length ? ` | solver misconceptions: ${wrong.join('; ')}` : ''}`
 }
 
 /**
@@ -461,16 +515,20 @@ async function rejectionReason(candidate: {
  *
  * `styleTopicIds` (default `poolTopicIds`) is the fallback list for style examples; the study interface passes
  * the whole session topic list there while the grounding pool may be narrower.
+ *
+ * `checks` replaces the model calls of the quality gate (tests).
  */
 export async function generateExerciseForTopic(args: {
   primaryTopicId: string
   poolTopicIds: string[]
   existingExerciseIds: string[]
   styleTopicIds?: string[]
-}): Promise<Exercise & { topic: Topic }> {
+  typePosition?: number
+}, checks: Partial<GeneratorChecks> = {}): Promise<Exercise & { topic: Topic }> {
+  const gate: GeneratorChecks = { ...DEFAULT_CHECKS, ...checks }
   for (let attempt = 1; attempt <= MAX_GENERATION_ATTEMPTS; attempt++) {
     // Rebuilt for each attempt: rejected rows count as existing exercises of the topic, so a retry reads another window
-    const { prompt, topicData } = await buildGenerationPrompt(args)
+    const { prompt, topicData, bucketContext, profile } = await buildGenerationPrompt(args)
 
     const { object } = await generateObject({
       model: textModel(),
@@ -478,8 +536,12 @@ export async function generateExerciseForTopic(args: {
       schema: generatedExerciseSchema,
     })
 
-    const { contentKind, logisticsReason, correctChoiceIndexes, ...modelEx } = object.newExercise
+    const { contentKind, logisticsReason, correctChoiceIndexes, keyPoints: modelKeyPoints, ...modelEx } = object.newExercise
     let genEx = modelEx
+    const isOpen = genEx.exerciseType === 'open'
+    // Key points exist for written-answer questions only
+    const keyPoints = isOpen ? (modelKeyPoints ?? []).map((k) => k.trim()).filter(Boolean) : []
+    if (isOpen) genEx = { ...genEx, correctAnswer: genEx.correctAnswer.trim() }
 
     if (contentKind === 'logistics') {
       // Not study material: keep one marker row (never selected, never shown) so no later session targets this topic,
@@ -508,13 +570,17 @@ export async function generateExerciseForTopic(args: {
     const derived = deriveChoiceAnswer(genEx.exerciseType, genEx.choices, correctChoiceIndexes, genEx.correctAnswer)
     genEx = { ...genEx, correctAnswer: derived.ok ? derived.correctAnswer : '' }
 
-    // Randomize choices to remove the model's position bias
+    // Randomize choices to remove the model's position bias (a written-answer question has none)
     let finalChoices = genEx.choices
     if (genEx.exerciseType === 'single_choice' || genEx.exerciseType === 'multiple_choice' || genEx.exerciseType === 'dropdown') {
       finalChoices = shuffleArray(genEx.choices)
     }
 
-    const rejection = await rejectionReason({ ...genEx, choices: finalChoices }, derived.ok ? undefined : derived.issue)
+    const rejection = await rejectionReason(
+      { ...genEx, choices: finalChoices, ...(isOpen ? { keyPoints } : {}) },
+      derived.ok ? undefined : derived.issue,
+      { groundingContext: bucketContext, language: profile.contentLanguage, checks: gate },
+    )
     const data = {
       id: `gen-${crypto.randomUUID()}`,
       topicId: topicData.id,
@@ -525,6 +591,7 @@ export async function generateExerciseForTopic(args: {
       explanation: genEx.explanation,
       origin: 'generated',
       promptVersion: GENERATE_EXERCISE_PROMPT_VERSION,
+      ...(isOpen ? { keyPoints: JSON.stringify(keyPoints) } : {}),
     }
     if (!rejection) {
       return prisma.exercise.create({ data: { ...data, status: 'active' }, include: { topic: true } })

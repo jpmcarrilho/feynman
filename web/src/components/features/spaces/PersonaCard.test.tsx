@@ -303,4 +303,101 @@ describe('PersonaCard', () => {
     await flush()
     expect(onRenamed).toHaveBeenCalledWith('Organic chemistry')
   })
+
+  describe('open answer share', () => {
+    const legacy = () => profile({
+      questionTypeMix: { single_choice: 0.4, multiple_choice: 0.2, numeric: 0, dropdown: 0.4, open: 0 },
+      quantitativeQuestionTypeMix: { single_choice: 1 / 6, multiple_choice: 1 / 3, numeric: 1 / 3, dropdown: 1 / 6, open: 0 },
+      quantitative: true,
+      questionTypeCycles: { quantitative: ['numeric', 'multiple_choice'], qualitative: ['single_choice', 'dropdown'] },
+    })
+
+    it('shows a fifth, named share in both mixes, with the default 20% and 10%', async () => {
+      vi.useFakeTimers()
+      await renderCard(step({ profile: profile({ quantitative: true }) }))
+      const open = screen.getAllByLabelText('Open answer (written) (%)')
+      expect(open).toHaveLength(2)
+      expect(open[0]).toHaveValue(20)
+      expect(open[1]).toHaveValue(10)
+      for (const group of screen.getAllByRole('group', { name: /Question types for/ })) {
+        expect(within(group).getAllByRole('spinbutton')).toHaveLength(5)
+        // five inputs wrap on two columns on a phone and sit in one row from the sm breakpoint on
+        expect(group.querySelector('.grid')?.className).toMatch(/grid-cols-2/)
+        expect(group.querySelector('.grid')?.className).toMatch(/sm:grid-cols-5/)
+      }
+    })
+
+    it('keeps the typed share and scales the others to fill the rest, in whole percents that add up to 100', async () => {
+      vi.useFakeTimers()
+      a.accept.mockResolvedValue({ ok: true, starters: 'requested' })
+      a.status.mockResolvedValue(status('pending'))
+      await renderCard(step())
+      const group = screen.getAllByRole('group', { name: /Question types for conceptual/ })[0]
+      const values = () => within(group).getAllByRole('spinbutton').map((i) => Number((i as HTMLInputElement).value))
+      expect(values()).toEqual([30, 25, 0, 25, 20])
+      const open = screen.getAllByLabelText('Open answer (written) (%)')[0]
+      fireEvent.change(open, { target: { value: '50' } })
+      expect(open).toHaveValue(50) // the typed value stays, also after leaving the field
+      fireEvent.blur(open)
+      expect(open).toHaveValue(50)
+      expect(values()).toEqual([19, 16, 0, 15, 50])
+      expect(values().reduce((x, y) => x + y, 0)).toBe(100)
+      fireEvent.change(open, { target: { value: '80' } })
+      fireEvent.blur(open)
+      expect(values().reduce((x, y) => x + y, 0)).toBe(100)
+      expect(open).toHaveValue(80)
+      fireEvent.click(screen.getByRole('button', { name: 'Accept tutor' }))
+      await flush()
+      const [, sent] = a.accept.mock.calls[0]
+      expect(TutorProfileSchema.safeParse(sent).success).toBe(true)
+      expect(sent.questionTypeMix.open).toBeCloseTo(0.8, 10)
+      expect(sent.questionTypeMix.numeric).toBe(0)
+      expect(screen.queryByText(/scaled to add up/)).not.toBeInTheDocument()
+    })
+
+    it('editing a share of a profile with a fixed order clears the order and says so', async () => {
+      vi.useFakeTimers()
+      a.accept.mockResolvedValue({ ok: true, starters: 'not_needed' })
+      a.status.mockResolvedValue(status('done', 4))
+      await renderCard(step({ mode: 'accepted', rationale: null, starterStatus: 'done', profile: legacy() }))
+      expect(screen.getByText(/asks its question types in a fixed order\. If you change any share/)).toBeInTheDocument()
+      // typing the value that is already shown is not an edit
+      const same = screen.getAllByLabelText('Single choice (%)')[0]
+      fireEvent.change(same, { target: { value: '40' } })
+      fireEvent.blur(same)
+      expect(screen.getByText(/asks its question types in a fixed order/)).toBeInTheDocument()
+      expect(screen.getByRole('button', { name: 'Save changes' })).toBeDisabled()
+
+      const open = screen.getAllByLabelText('Open answer (written) (%)')[0]
+      fireEvent.change(open, { target: { value: '25' } })
+      fireEvent.blur(open)
+      expect(screen.getByText('The original fixed order of question types is replaced by these shares when you save.')).toBeInTheDocument()
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      await flush()
+      const [, sent] = a.accept.mock.calls[0]
+      expect(sent.questionTypeCycles).toBeNull()
+      expect(sent.questionTypeMix.open).toBeCloseTo(0.25, 10)
+    })
+
+    it('keeps the fixed order when no share is edited', async () => {
+      vi.useFakeTimers()
+      a.accept.mockResolvedValue({ ok: true, starters: 'not_needed' })
+      a.status.mockResolvedValue(status('done', 4))
+      await renderCard(step({ mode: 'accepted', rationale: null, starterStatus: 'done', profile: legacy() }))
+      fireEvent.change(screen.getByLabelText('Content language'), { target: { value: 'pt-BR' } })
+      fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+      await flush()
+      expect(a.accept.mock.calls[0][1].questionTypeCycles).toEqual({ quantitative: ['numeric', 'multiple_choice'], qualitative: ['single_choice', 'dropdown'] })
+    })
+
+    it('stays read-only for a fixed-order tutor of an imported studyspace, with its five disabled shares', async () => {
+      vi.useFakeTimers()
+      await renderCard(step({ mode: 'accepted', readOnly: true, rationale: null, profile: legacy() }))
+      for (const input of screen.getAllByLabelText('Open answer (written) (%)')) {
+        expect(input).toBeDisabled()
+        expect(input).toHaveValue(0)
+      }
+      expect(screen.getByText(/shares above are shown for reference only/)).toBeInTheDocument()
+    })
+  })
 })
