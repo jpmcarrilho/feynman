@@ -107,6 +107,24 @@ describe('explainMistake action', () => {
     expect(result).toBe(mockExplanation)
   })
 
+  it('builds the persona from the profile of the topic course when topicId is given', async () => {
+    vi.mocked(generateText).mockResolvedValueOnce({ text: 'ok' } as never)
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce({ courseId: 'course-x' } as never)
+    vi.mocked(prisma.course.findUnique).mockResolvedValueOnce({
+      id: 'course-x',
+      code: 'chem1',
+      title: 'Organic chemistry',
+      profile: null,
+    } as never)
+
+    await explainMistake({ questionText: 'Q?', choices: ['a'], correctAnswer: 'a', userAnswer: 'b', topicId: 'topic-x' })
+
+    const prompt = vi.mocked(generateText).mock.calls[0][0].prompt as string
+    // No stored profile and not a legacy code: the neutral default for the course title
+    expect(prompt).toContain('You are a patient and rigorous tutor for Organic chemistry.')
+    expect(prompt).not.toContain('MIT')
+  })
+
   it('handles errors gracefully', async () => {
     vi.mocked(generateText).mockRejectedValueOnce(new Error('API Error'))
 

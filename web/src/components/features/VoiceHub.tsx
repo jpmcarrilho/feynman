@@ -5,6 +5,8 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Mic, MicOff, Volume2, AlertCircle, Send, Loader2, Sparkles, PanelRightClose } from 'lucide-react'
 import { FeynmanLogo } from './FeynmanLogo'
+import { chatModeSwitchMessage, CHAT_MODE_LABELS, CHAT_MODE_HINTS } from '@/lib/prompts'
+import { ChatModeEnum, type TutorChatMode, type TutorProfile } from '@/lib/studyspace/profile'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
@@ -24,9 +26,14 @@ interface VoiceHubProps {
   onGeneratePlan?: () => void;
   isGeneratingPlan?: boolean;
   onToggleClose?: () => void;
+  /** Tutor chat mode selector. Rendered only when chatMode, onChatModeChange and chatModeProfile are given, and never in exam sessions. */
+  chatMode?: TutorChatMode;
+  onChatModeChange?: (mode: TutorChatMode) => void;
+  chatModeProfile?: TutorProfile;
+  sessionMode?: string | null;
 }
 
-export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose }: VoiceHubProps) {
+export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan = false, onToggleClose, chatMode, onChatModeChange, chatModeProfile, sessionMode }: VoiceHubProps) {
   const { isConnected, isConnecting, error, messages, connect, disconnect, sendText, isMuted, setMuted } = liveAPI
   
   const [inputText, setInputText] = useState('')
@@ -55,6 +62,17 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
   useEffect(() => {
     scrollToBottom()
   }, [messages])
+
+  const showChatModes = !!chatMode && !!onChatModeChange && !!chatModeProfile && sessionMode !== 'exam'
+
+  const selectChatMode = (mode: TutorChatMode) => {
+    if (!chatMode || !onChatModeChange || !chatModeProfile || mode === chatMode) return
+    onChatModeChange(mode)
+    // One hidden message tells the connected tutor about the switch; the exercise context is not re-sent
+    if (isConnected && typeof liveAPI.sendContext === 'function') {
+      liveAPI.sendContext(chatModeSwitchMessage(chatModeProfile, mode, sessionMode), { interrupt: false })
+    }
+  }
 
   return (
     <Card className="w-full h-full flex flex-col shadow-none border-0 rounded-none bg-card text-charcoal-graphite">
@@ -91,6 +109,30 @@ export function VoiceHub({ liveAPI, onViewFile, onGeneratePlan, isGeneratingPlan
               </div>
         </div>
       </CardHeader>
+
+      {showChatModes && (
+        <div className="shrink-0 px-4 pt-3" data-testid="chat-mode-selector">
+          <div role="radiogroup" aria-label="Tutor mode" className="grid grid-cols-3 gap-1 rounded-lg bg-muted/50 p-1">
+            {ChatModeEnum.options.map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={chatMode === mode}
+                title={CHAT_MODE_HINTS[mode]}
+                onClick={() => selectChatMode(mode)}
+                className={`rounded-md px-2 py-1 text-xs font-semibold transition-colors ${
+                  chatMode === mode
+                    ? 'bg-background text-fountain-ink shadow-sm'
+                    : 'text-charcoal-graphite/60 hover:text-charcoal-graphite'
+                }`}
+              >
+                {CHAT_MODE_LABELS[mode]}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
       
       <CardContent className="flex-1 overflow-hidden flex flex-col p-4 pt-4">
         {error && (

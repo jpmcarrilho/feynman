@@ -21,6 +21,7 @@ function legacyBase(subject: string, tutorIdentity: string, calibrationModule: s
     tutorIdentity,
     tone: 'socratic_professor',
     toneNotes: 'Ask before telling; probe reasoning; rigorous.',
+    defaultChatMode: 'probe',
     analogyDomains: ['everyday markets', 'water flows', 'balance scales'],
     quantitative: true,
     questionTypeMix: LEGACY_QUALITATIVE_MIX,
@@ -35,6 +36,22 @@ function legacyBase(subject: string, tutorIdentity: string, calibrationModule: s
     examPreset: { label: examLabel, questionCount },
     questionTypeCycles: { quantitative: [...LEGACY_CYCLES.quantitative], qualitative: [...LEGACY_CYCLES.qualitative] },
   }
+}
+
+/**
+ * Persona for places that are not tied to one course yet (the global study interface, planner and
+ * global diagnosis before spaces exist). Keeps the meaning of the instruction that was hard-coded before.
+ */
+export const LEGACY_VOICE_PROFILE: TutorProfile = {
+  ...legacyBase(
+    'MIT MicroMasters courses',
+    'a professor for MIT MicroMasters courses',
+    'Week_13_Comprehensive_Review',
+    '14.750x Final',
+    32,
+  ),
+  calibrationModule: null,
+  examPreset: null,
 }
 
 export const LEGACY_COURSE_TITLES: Record<string, string> = {

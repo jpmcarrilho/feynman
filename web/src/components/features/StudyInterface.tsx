@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useEffect, useMemo, useRef } from 'react'
+import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { Button } from '@/components/ui/button'
 import { Flashcard } from './Flashcard'
 import { SessionTimer } from './SessionTimer'
@@ -49,6 +49,15 @@ import {
   PanelRightOpen
 } from 'lucide-react'
 import { useLiveAPI } from '@/hooks/useLiveAPI'
+import {
+  voiceSystemInstruction,
+  voiceExerciseContextMessage,
+  voicePlannerContextMessage,
+  voiceDashboardContextMessage,
+} from '@/lib/prompts'
+import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
+import type { TutorChatMode } from '@/lib/studyspace/profile'
+import { getChatMode, setChatMode, subscribeChatMode } from '@/lib/studyspace/chatMode'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
 import { FeynmanLogo } from './FeynmanLogo'
 import { ConfigureSessionDialog } from './ConfigureSessionDialog'
@@ -98,6 +107,11 @@ const safeRemoveItem = (key: string) => {
 };
 
 const EXAM_DIAGNOSIS_FILE = 'inline:exam-diagnosis.md'
+
+// Module-level so the instruction string is stable across renders. T19 replaces the legacy persona with the space profile.
+const VOICE_SYSTEM_INSTRUCTION = voiceSystemInstruction(LEGACY_VOICE_PROFILE)
+// localStorage key suffix for the chat mode (feynman_chat_mode_legacy) until studyspaces exist in the UI
+const CHAT_MODE_SCOPE = 'legacy'
 
 export function StudyInterface() {
   const [topics, setTopics] = useState<any[]>([])
@@ -174,14 +188,17 @@ export function StudyInterface() {
     }
   }, [currentExercise?.choices]);
 
-  const liveAPI = useLiveAPI(`You are a helpful, encouraging, and brilliant professor for MIT MicroMasters courses, embodying the Feynman learning philosophy. You are currently acting as an interactive learning guide and Socratic Examiner.
+  // Until studyspaces exist in the UI (T19) the tutor uses the global legacy persona and one chat mode key.
+  const liveAPI = useLiveAPI(VOICE_SYSTEM_INSTRUCTION)
 
-Adhere strictly to these teaching guidelines:
-1. Dynamic Socratic Exploration: Act like a supportive MIT mentor. Encourage the student to think through problems and share their logic when they are trying to solve them, rather than immediately giving away the answers.
-2. HELP & STUCK MANDATE (CRITICAL): If the student explicitly states "I don't know", "I am stuck", "Please explain", "Explain it to me", "Help", or similar, you MUST IMMEDIATELY stop the Socratic questioning. Break character and provide a beautifully clear, step-by-step, intuitive explanation of the concepts, correct answer, and logic. Never keep asking a student to explain or defend their logic when they state they do not know or are stuck.
-3. Proactive Encouraging Challenges: Before a student selects an option, you can guide them with gentle, leading questions to analyze the context (e.g., "In this scenario, how do you think we should calculate standard errors?"). If they aren't sure, offer them a small hint or explain the core intuition first.
-4. Feynman Technique Analogy: When explaining complex concepts or equations, make them extremely easy to understand by using simple language and colorful, intuitive analogies (e.g., water pipes, bongo drums, or visual sketches). Remain clear, concise, and highly educational.
-5. Loop Prevention: If the student has already shared their reasoning, asks for direct confirmation, or submits their answer, break the Socratic exploration immediately to validate them and explain the correct concepts clearly and rewardingly. Avoid repetitive Socratic prompting.`)
+  // The mode lives in a small external store (memory + localStorage `feynman_chat_mode_legacy`). The exercise-context
+  // effect reads it with getChatMode() instead of depending on it, so a mode change never re-sends the exercise context.
+  const chatMode = useSyncExternalStore(
+    subscribeChatMode,
+    () => getChatMode(CHAT_MODE_SCOPE, LEGACY_VOICE_PROFILE.defaultChatMode),
+    () => LEGACY_VOICE_PROFILE.defaultChatMode
+  )
+  const handleChatModeChange = (mode: TutorChatMode) => setChatMode(CHAT_MODE_SCOPE, mode)
 
   const loadActivePlan = async () => {
     try {
@@ -194,7 +211,7 @@ Adhere strictly to these teaching guidelines:
         setPlannerChat([
           {
             role: 'assistant',
-            content: "Welcome to your AI Curriculum Planner Workspace! I am your Socratic Academic Advisor.\n\nI've analyzed your performance history and found some critical focus areas: JPAL Data Logistics (33%), Sampling & Power (44%), and Leaders (44%).\n\nHow should we structure your timeline? Tell me your available daily hours (e.g. 'I want 3 sessions a day, 2 hours each, from Tuesday to Friday'), or click on one of the suggested pre-ideas below to design your curriculum!"
+            content: "Welcome to your AI Curriculum Planner Workspace! I am your Socratic Academic Advisor.\n\nHow should we structure your timeline? Tell me your available daily hours (e.g. 'I want 3 sessions a day, 2 hours each, from Tuesday to Friday'), or click on one of the suggested pre-ideas below to design your curriculum!"
           }
         ]);
       }
@@ -930,36 +947,6 @@ Adhere strictly to these teaching guidelines:
 
   const lastContextKeyRef = useRef<string | null>(null)
 
-  const buildExerciseContextMessage = (
-    exercise: { topic?: { title?: string | null } | null; questionText: string },
-    choices: string[],
-    mode: string | undefined,
-    unitsText: string
-  ) => {
-  let contextMsg = `[SYSTEM MESSAGE: The student has navigated to a new exercise.
-Topic: ${exercise.topic?.title || 'Unknown'}
-Question: ${exercise.questionText}
-Choices: ${choices.join(', ')}
-Active Mode: ${mode === 'exam' ? 'Timed Socratic Oral Defense Exam' : 'Interactive Practice'}]
-
-<private_knowledge>
-This is your private, hidden reference library. Use this context to formulate Socratic, probing questions and guide the student, but NEVER reveal, repeat, or summarize this text out loud.
-If the student struggles, guide them to use analogies or explain concepts in their own words. Always reference exact file sources using clickable markdown links to the localPath.
-Format links exactly like this:
-- For Slides: [Slides File Title](/api/file?path=URL_ENCODED_LOCAL_PATH#page=PAGE_NUMBER)
-- For Transcripts/Readings: [Transcript Title](/api/file?path=URL_ENCODED_LOCAL_PATH&highlight=SHORT_QUOTE)
-`;
-
-      contextMsg += unitsText;
-
-      contextMsg += `\n</private_knowledge>
-
-Now, act as the Thesis Examiner. Initiate oral defense. Welcome them to the question, challenge them on what they are thinking, and probe their initial intuition BEFORE they select any draft answer. Do not read the choices out loud. Ask them to explain the concepts in their own words!`;
-
-
-  return contextMsg
-  }
-
   // Prefetch the exercise context whether or not the voice tutor is connected,
   // so it is already cached when the connection comes up.
   const [cachedContext, setCachedContext] = useState<{ key: string; unitsText: string } | null>(null)
@@ -994,7 +981,15 @@ Now, act as the Thesis Examiner. Initiate oral defense. Welcome them to the ques
       if (!cachedContext || cachedContext.key !== key) return
       lastContextKeyRef.current = key
       liveAPI.sendContext(
-        buildExerciseContextMessage(currentExercise, parsedChoices, session.mode, cachedContext.unitsText),
+        voiceExerciseContextMessage(LEGACY_VOICE_PROFILE, {
+          topicTitle: currentExercise.topic?.title,
+          questionText: currentExercise.questionText,
+          choices: parsedChoices,
+          sessionMode: session.mode,
+          unitsText: cachedContext.unitsText,
+          // The mode in effect right now, read here (not a dependency) so a mode change never re-runs this effect
+          chatMode: getChatMode(CHAT_MODE_SCOPE, LEGACY_VOICE_PROFILE.defaultChatMode),
+        }),
         { interrupt: true }
       )
     } else if (!session) {
@@ -1002,13 +997,10 @@ Now, act as the Thesis Examiner. Initiate oral defense. Welcome them to the ques
       if (lastContextKeyRef.current === key) return
       lastContextKeyRef.current = key
       if (activeTab === 'plan') {
-        const contextMsg = `[SYSTEM MESSAGE: The student is currently on the "Study Plan" tab, designing their personalized multi-day timeline curriculum preparing for their MicroMasters exams.
-The student has stated they can study 2 hours in the morning, 2 hours in the afternoon, and 2 hours at night, Monday to Sunday (a 6-hour daily study block).
-Converse with them as a warm Socratic Academic Advisor. Talk to them about opportunity costs of this rigorous schedule, discuss study methodologies (like Active Recall and Spaced Repetition), probe their study habits, and help them refine the plan.
-If they ask to change or generate a study plan, guide them to click the gold "Plan" button in the chat header to compile/re-compile the curriculum timeline on screen!]`;
+        const contextMsg = voicePlannerContextMessage();
         liveAPI.sendContext(contextMsg, { interrupt: false })
       } else {
-        const contextMsg = `[SYSTEM MESSAGE: The student is currently browsing their main dashboard. They can configure and start custom practice sessions, review their histories, or go to the "Study Plan" tab to design a multi-day schedule.]`;
+        const contextMsg = voiceDashboardContextMessage();
         liveAPI.sendContext(contextMsg, { interrupt: false })
       }
     }
@@ -1353,7 +1345,7 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
                   <div className="space-y-2 max-w-sm">
                     <h3 className="text-lg font-bold text-charcoal-graphite italic font-display">Professor Grading In Progress</h3>
                     <p className="text-sm text-charcoal-graphite/70">
-                      The MIT Economics Professor is evaluating your exam answers and generating your customized study diagnostic plan. This usually takes 5-15 seconds.
+                      The professor is evaluating your exam answers and generating your customized study diagnostic plan. This usually takes 5-15 seconds.
                     </p>
                   </div>
                 </div>
@@ -1776,6 +1768,10 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
             onViewFile={handleViewFile} 
             onGeneratePlan={handleGeneratePlan}
             isGeneratingPlan={isGeneratingPlan}
+            chatMode={chatMode}
+            onChatModeChange={handleChatModeChange}
+            chatModeProfile={LEGACY_VOICE_PROFILE}
+            sessionMode={session?.mode}
           />
         </TabsContent>
 
@@ -1854,6 +1850,10 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
             onGeneratePlan={handleGeneratePlan}
             isGeneratingPlan={isGeneratingPlan}
             onToggleClose={() => setIsProfessorSidebarHidden(true)}
+            chatMode={chatMode}
+            onChatModeChange={handleChatModeChange}
+            chatModeProfile={LEGACY_VOICE_PROFILE}
+            sessionMode={session?.mode}
           />
         )}
       </div>

@@ -3,6 +3,10 @@ import { z } from 'zod'
 export const TypeEnum = z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown'])
 export type QuestionType = z.infer<typeof TypeEnum>
 
+// How the tutor answers in the chat/voice panel (section 5.7). The student can switch it at any time.
+export const ChatModeEnum = z.enum(['probe', 'guide', 'explain'])
+export type TutorChatMode = z.infer<typeof ChatModeEnum>
+
 export const QuestionTypeMixSchema = z.object({
   single_choice: z.number().min(0).max(1),
   multiple_choice: z.number().min(0).max(1),
@@ -14,9 +18,12 @@ export const TutorProfileSchema = z.object({
   version: z.literal(1),
   subject: z.string().min(1).max(120), // "Development economics: political economy"
   level: z.enum(['intro', 'undergraduate', 'graduate', 'professional']),
-  tutorIdentity: z.string().min(1).max(200), // one line: "an MIT economics professor who teaches political economy"
+  tutorIdentity: z.string().min(1).max(200), // one line: "an economics professor who teaches political economy"
   tone: z.enum(['socratic_professor', 'patient_coach', 'exam_driller']),
   toneNotes: z.string().max(300).default(''),
+  // Chat mode used until the student picks another one. Stored profiles written before this field existed
+  // do not have it; parseProfile fills it from the tone preset.
+  defaultChatMode: ChatModeEnum,
   analogyDomains: z.array(z.string().max(40)).max(5),
   quantitative: z.boolean(),
   questionTypeMix: QuestionTypeMixSchema, // used for non-quantitative topics
@@ -47,16 +54,24 @@ export const ProfileSuggestionSchema = z.object({
 })
 export type ProfileSuggestion = z.infer<typeof ProfileSuggestionSchema>
 
-export const PRESETS: Record<TutorProfile['tone'], { label: string; toneNotes: string }> = {
-  socratic_professor: { label: 'Socratic professor', toneNotes: 'Ask before telling; probe reasoning; rigorous.' },
-  patient_coach: { label: 'Patient coach', toneNotes: 'Short steps, frequent encouragement, more hints before questions.' },
-  exam_driller: { label: 'Exam driller', toneNotes: 'Exam-style questions, time awareness, concise corrections.' },
+export const PRESETS: Record<TutorProfile['tone'], { label: string; toneNotes: string; defaultChatMode: TutorChatMode }> = {
+  socratic_professor: { label: 'Socratic professor', toneNotes: 'Ask before telling; probe reasoning; rigorous.', defaultChatMode: 'probe' },
+  patient_coach: { label: 'Patient coach', toneNotes: 'Short steps, frequent encouragement, more hints before questions.', defaultChatMode: 'guide' },
+  exam_driller: { label: 'Exam driller', toneNotes: 'Exam-style questions, time awareness, concise corrections.', defaultChatMode: 'probe' },
 }
 
 export function parseProfile(json: string | null | undefined): TutorProfile | null {
   if (!json) return null
   try {
-    const result = TutorProfileSchema.safeParse(JSON.parse(json))
+    const raw: unknown = JSON.parse(json)
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      const obj = raw as Record<string, unknown>
+      // Profiles stored before defaultChatMode existed: derive it from the tone preset.
+      if (obj.defaultChatMode === undefined && typeof obj.tone === 'string' && obj.tone in PRESETS) {
+        obj.defaultChatMode = PRESETS[obj.tone as TutorProfile['tone']].defaultChatMode
+      }
+    }
+    const result = TutorProfileSchema.safeParse(raw)
     return result.success ? result.data : null
   } catch {
     return null
@@ -72,6 +87,7 @@ export function defaultProfile(course: { title: string; goal?: string | null }):
     tutorIdentity: `a patient and rigorous tutor for ${subject}`.slice(0, 200),
     tone: 'socratic_professor',
     toneNotes: PRESETS.socratic_professor.toneNotes,
+    defaultChatMode: PRESETS.socratic_professor.defaultChatMode,
     analogyDomains: [],
     quantitative: false,
     questionTypeMix: { single_choice: 0.4, multiple_choice: 0.3, numeric: 0, dropdown: 0.3 },
@@ -88,7 +104,7 @@ export function defaultProfile(course: { title: string; goal?: string | null }):
 }
 
 export function applyPreset(p: TutorProfile, tone: TutorProfile['tone']): TutorProfile {
-  return { ...p, tone, toneNotes: PRESETS[tone].toneNotes }
+  return { ...p, tone, toneNotes: PRESETS[tone].toneNotes, defaultChatMode: PRESETS[tone].defaultChatMode }
 }
 
 const TYPE_ORDER: QuestionType[] = ['single_choice', 'numeric', 'multiple_choice', 'dropdown']

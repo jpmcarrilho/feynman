@@ -1,7 +1,7 @@
 'use server'
 
 import { generateText, generateObject } from 'ai'
-import { google } from '@ai-sdk/google'
+import { textModel } from '@/lib/ai'
 import { prisma } from '@/lib/db'
 import { createSessionSummary } from '@/services/summaryService'
 import { getCourseArtifactsService, generateWeekSummaryService } from '@/services/artifactsService'
@@ -10,6 +10,17 @@ import fs from 'fs'
 import path from 'path'
 import { requireAuth } from '@/server/auth'
 import { buildVoiceContext } from '@/services/voiceContext'
+import { getCourseWithProfile, getProfileForTopic, getProfileForCourses } from '@/services/studyspaceService'
+import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
+import {
+  explainMistakePrompt,
+  enrichExercisePrompt,
+  generateExercisePrompt,
+  examDiagnosisPrompt,
+  globalDiagnosisPrompt,
+  plannerChatPrompt,
+  studyPlanPrompt,
+} from '@/lib/prompts'
 
 // Fields the session list, results dialog and plan view read. No chatLog, diagnosis, draftAnswers or flaggedIds.
 // exerciseIds is selected only so the server can turn it into exerciseCount (see withExerciseCount).
@@ -92,34 +103,24 @@ export async function explainMistake({
   correctAnswer,
   userAnswer,
   explanation,
-  topicTitle
+  topicTitle,
+  topicId
 }: {
   questionText: string,
   choices: string[],
   correctAnswer: string,
   userAnswer: string,
   explanation?: string | null,
-  topicTitle?: string
+  topicTitle?: string,
+  topicId?: string
 }) {
   await requireAuth()
-  const prompt = `You are an expert tutor for the MIT DEDP MicroMasters.
-The student answered a multiple choice question incorrectly.
-
-Topic: ${topicTitle || 'Unknown'}
-Question: ${questionText}
-Choices:
-${choices.map(c => `- ${c}`).join('\n')}
-
-Correct Answer: ${correctAnswer}
-Student's Answer: ${userAnswer}
-
-Official Explanation: ${explanation || 'None provided.'}
-
-Your task: Gently explain to the student why their answer is incorrect and why the correct answer is right. Use the official explanation if available, but break it down so it's easy to understand. Be encouraging.`
+  const profile = topicId ? await getProfileForTopic(topicId) : LEGACY_VOICE_PROFILE
+  const prompt = explainMistakePrompt(profile, { questionText, choices, correctAnswer, userAnswer, explanation, topicTitle })
 
   try {
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'), // You can also use gemini-2.0-flash
+      model: textModel(),
       prompt,
     })
     return text
@@ -304,55 +305,16 @@ export async function enrichExerciseWithContext(exercise: any) {
       }
     } catch (e) {}
 
-    const prompt = `You are an expert curriculum developer and professor at MIT.
-We have a question from an MIT MicroMasters course that was extracted directly from a sequential series of exercises.
-Because it is played standalone in a flashcard interface, some questions might lack context because they refer to specific research papers, case studies, concrete programs/policies (e.g., the Balsakhi program, the GoBifo study, the Extra Teacher Program), figures, or lecture experiments.
-
-Your task is to review the question and decide if it actually needs context, and then re-generate it accordingly.
-
-Lecture Transcripts / Lesson Context:
-${contextText}
-
-Original Question Text:
-${exercise.questionText}
-
-Exercise Type: ${exercise.exerciseType}
-Choices/Options:
-${parsedChoices.map(c => `- ${c}`).join('\n')}
-Correct Answer: ${exercise.correctAnswer}
-
-Instructions & Constraints:
-
-1. CRITICAL: AVOID ADDING UNNECESSARY CONTEXT OR CONCEPTUAL THEORY:
-   - If the question is a general, purely theoretical, or conceptual question (e.g., "In a cluster randomized evaluation, doubling the sample size will...", "What is statistical power?", or general math/statistics/economics questions), it is already fully self-contained!
-   - For general theoretical/conceptual questions, do NOT add generic textbook preambles, and do NOT explain the theory. You must return the original question text exactly as is (do not summarize, explain, or prepend any generic textbook theory).
-   - ONLY enrich the question if it refers to a concrete, specific real-world case study, a particular research paper/author, a specific program/policy, a specific dataset, or a particular experiment from the lectures that is missing its setup context.
-
-2. RECONSTRUCT MISSING TABLES & DATA:
-   - If the original question refers to a Table (e.g., "Table 1", "Table 2", "according to the table") or a set of regression estimates, and the provided Lesson Context contains those estimates, values, or regression coefficients, you MUST reconstruct that table as a beautiful, clean Markdown table directly inside the enriched question text!
-   - Ensure all column headers and values are accurate based on the context. If the exact table isn't in the context, but the values are described, construct a parallel simplified representation.
-
-3. NEUTRALITY & NO HINTS:
-   - The re-generated text MUST NOT be biased, leading, or hint at the correct answer in any way! It must remain completely neutral and objective.
-   - Do NOT contain, define, explain, or suggest the correct answer, nor rule out any of the incorrect options.
-
-4. CONTEXT INTEGRATION (When needed):
-   - When the question refers to a concrete study/paper/case study (e.g., "Balsakhi program", "GoBifo"), ONLY append the necessary, specific setup details of that program, paper, or research scenario from the lecture transcripts.
-   - Do NOT add a generic textbook lecture summary. Only describe the concrete program/paper setup itself.
-   - Keep the underlying logic, question, options/choices, and correct answer exactly the same.
-   - Remove relative references like "above", "in the video", "in the lecture" and replace them with the concrete name of the program, policy, or dataset being discussed.
-   - Ensure the resulting question text is clear, professional, and directly answerable.
-
-Respond with a JSON object that contains the re-generated question text.
-
-JSON Schema:
-{
-  "enrichedQuestionText": string
-}
-`;
+    const course = await getCourseWithProfile(topicData.courseId);
+    const prompt = enrichExercisePrompt(course?.profile ?? LEGACY_VOICE_PROFILE, {
+      contextText: contextText ?? '',
+      exercise,
+      choices: parsedChoices,
+      courseCode: course?.code,
+    });
 
     const { object } = await generateObject({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       schema: z.object({
         enrichedQuestionText: z.string()
       }),
@@ -1071,75 +1033,20 @@ export async function generateNextExercise(sessionId: string, topicIds: string[]
       .map((ex, idx) => `Question ${idx + 1}: ${ex.questionText}`)
       .join('\n\n');
 
+    const course = await getCourseWithProfile(topicData.courseId);
+    const profile = course?.profile ?? LEGACY_VOICE_PROFILE;
+
     const { object } = await generateObject({
-      model: google('gemini-3.6-flash'),
-      prompt: `You are an MIT economics professor.
-Your goal is to generate EXACTLY 1 NEW exercise for an MIT economics course. The question MUST test concepts and terminology specifically from the Target Topic: "${topicData.title}" in "${topicData.week}".
-
-Here is the primary target content:
-${bucketContext}
-
-CRITICAL WEEK & TOPICS INTEGRITY RULE:
-The generated question, its choices, correct answer, and explanation MUST be based directly on concepts from "${topicData.title}" (in "${topicData.week}"). You may use the other topics from "${topicData.week}" provided in the content for background enhancement, but you MUST NOT write a question about a different week or general topic.
-
-CRITICAL DIFFICULTY & RIGOR CALIBRATION (MIT MicroMasters Final Exam Level):
-The target question you generate must match the high analytical depth, multi-step logical reasoning, and mathematical complexity found on actual MIT final exams.
-To calibrate this difficulty, review these "Comprehensive Review" example questions representing the true final-exam-level rigor and question length:
-${rigorExercisesContext || "No specific comprehensive review style examples available."}
-
-However, do NOT copy their topic. Your generated question MUST test concepts from the Target Topic "${topicData.title}", matching the style, formatting, and academic level of these local week style examples:
-${existingExercisesContext}
-
-CRITICAL: Do NOT copy the specific questions or concepts from the local week style examples listed above. Focus your question entirely on testing the concept of "${topicData.title}".
-
-Here are the questions that are ALREADY present in the student's active study session. You MUST NOT repeat, duplicate, or ask about the exact same concepts or scenarios tested in these questions:
-${alreadyAskedQuestionsText || "No questions have been asked yet in this session."}
-
-CRITICAL DEDUPLICATION RULES:
-1. Review the "ALREADY present" questions listed above. Your newly generated question MUST NOT test the same concept, use the same core scenario, or ask the same question as any of them. It must be completely distinct and test a different concept or scenario from the Target Topic: "${topicData.title}".
-2. The new question MUST be about the concepts described in the Target Topic. Do NOT generate questions about other topics in the surrounding context or style examples.
-3. Ensure that the question covers a concept or uses a scenario from the Target Topic. Every question MUST be completely self-contained (invent hypothetical scenarios or markdown data tables if a concept requires it).
-
-CRITICAL VARIANT GENERATION RULES (VARIATION & RIGOR):
-1. CONCEPTUAL PARALLELISM WITH VARIATION: Use the style examples in the database to generate a conceptually parallel but completely fresh exercise. Do NOT clone existing questions. Instead, adapt their core economic, statistical, or data collection principles into a new, original scenario.
-2. VARY SCENARIOS, TITLES, & SETUPS: Change the titles of researchers, names of programs, policies, geographic locations, and experimental setups. If an existing question uses Olken's corruption study in Indonesia, your new question should describe a parallel hypothetical or actual evaluation in another context (e.g., an educational audit in India or construction in Kenya) to test the same underlying statistical principles.
-3. VARY MATHEMATICAL & CALCULATION PARAMETERS: If the exercise requires any calculations (such as Wald estimates, standard errors, coefficients, utility functions, or regression equations), you MUST change the specific numeric variables, equations, or coefficients. The student should be forced to calculate a completely new result (do not repeat the numerical formulas, values, or options from the examples).
-4. VARY THEORETICAL PERSPECTIVES & ANGLES: Look at the topic from another perspective or analytical angle. For example, if the existing question tests the "exclusion restriction" of an IV, your new question can test the "reduced form", "first stage strength", or discuss why "parallel trends" or "omitted variable bias" would fail in a similar model. If an existing question is from a citizen-candidate perspective, look at it from the voter's perspective, or modify the cost of entry parameter.
-
-CRITICAL GROUNDING AND TRUTHFULNESS RULES:
-1. STRICT GROUNDING: The generated question, choices, correct answer, and official explanation MUST be 100% strictly grounded in and derived from the provided Target Topic content above.
-2. NO EXTERNAL TERMS: You MUST NOT introduce or test any external concepts, acronyms, economic terms, or advanced terminology that are not explicitly defined, mentioned, or discussed in the provided Target Topic Content.
-3. NO EXTRAPOLATIONS: Do not assume the student knows prerequisite or external context that is not directly present in the provided lecture notes/transcript. If a term is not in the provided text, you must not use or refer to it.
-
-CRITICAL SELF-CONTAINEDNESS MANDATE (NO OUTSIDE KNOWLEDGE ASSUMPTION):
-1. MANDATORY CONTEXTUAL BACKGROUND: If your generated question mentions, tests, or refers to any specific research paper, author, academic study, historical event, or public policy (such as Acemoglu et al. 2001, Dell 2010, Olken 2007, Ferraz & Finan 2008, the Balsakhi program, or the Mita system), you MUST explicitly include a clear, 2-3 sentence introductory background summary of that study directly inside the question text itself.
-2. BACKGROUND SETUP SPECIFICS: This summary must explain the study's primary setup (e.g., who/what was studied and where), the methodology used (e.g., differences-in-differences, RCT, or RD design), and any critical parameters.
-3. LOGICAL ANSWERABILITY: Every question must be completely self-contained. A student who has never read the referenced paper or memorized its details must be able to understand the scenario and answer the question successfully purely by using logical reasoning, scientific principles, and the contextual details you have provided in the question text.
-4. NO TRIVIA OR ROTE MEMORIZATION: Avoid testing rote memorization of paper titles or isolated facts. Instead, test the conceptual economic, statistical, or logical principles within the paper's framework, which you must explain in the setup.
-
-COMPREHENSIVE REVIEW SYNTHESIS METHODOLOGY (HOW TO EXTRACT FROM CONTENT):
-You must extract high-signal concepts from the provided Target Topic content and synthesize them into questions that mirror the style, depth, and layout of MIT MicroMasters Comprehensive Review exams:
-1. EMPIRICAL/ECONOMETRIC SYNTHESIS: 
-   - Identify the regression equation or causal identification strategy mentioned in the text (e.g. Difference-in-Differences, Instrumental Variables, or Regression Discontinuity).
-   - Write a self-contained question that explicitly presents the regression equation (using clean LaTeX formatting, e.g., \( Y_{ic} = \alpha + \beta \text{Treatment}_c + \gamma X_i + \epsilon_{ic} \)), defines what each variable represents, and asks about the interpretation, bias, or sign of the coefficients (\(\beta\)).
-2. THEORETICAL/MICROECONOMIC SYNTHESIS:
-   - Identify the economic actor's decisions, payoffs, costs of effort, or utility functions described in the text (e.g., citizen-candidate entry costs, politician rent-seeking, or taxpayer bribe negotiation).
-   - Present the math clearly (e.g., utility \( U_i = p(e) \cdot B - C(e) \)), explain each parameter, and ask questions requiring the student to identify the correct objective function, utility constraint, or the sign/implication of a derivative (e.g., \(\dfrac{db}{dr}\)).
-3. RESEARCH METHODOLOGY & LOGISTICS SYNTHESIS:
-   - Identify the survey design, field pilot, quality control, or IRB ethical principles discussed in the text (e.g., attrition bias, Minimum Detectable Effect standard deviations, dual-entry discrepancies, spot checks, or behavioral trust games).
-   - Present a concrete, self-contained operational scenario (e.g., "A research team is administering surveys in-house...") and ask the student to identify the specific operational issue (e.g., differential coverage bias, social desirability, or telescoping), calculate the MDE, or explain the logical survey skip patterns.
-
-CRITICAL FORMATTING & STRUCTURE INSTRUCTIONS:
-1. EMPIRICAL DATA TABLES: When generating questions for empirical or measurement weeks, you are strongly encouraged to construct a realistic, clean Markdown data table representing survey audit discrepancies, sample allocation matrices, standard deviation blocks, or regression output coefficients. The question must then require the student to analyze, calculate, or interpret values directly from this Markdown table.
-2. NO PLACEHOLDERS: Do not use spinner or loading image placeholders. All images, tables, and references must be fully specified or represented in text/markdown.
-
-CRITICAL FORMAT SELECTION:
-You MUST generate an exercise of type: "${targetType}".
-Follow these rules strictly based on the target type:
-- If "${targetType}" is "single_choice": Create a standard multiple choice question. 'choices' MUST contain exactly 4 options. 'correctAnswer' MUST be the exact matching string of the single correct answer.
-- If "${targetType}" is "multiple_choice": Create a multiple-response check-box question (multiple correct answers allowed). 'choices' MUST contain 4 or 5 options. 'correctAnswer' MUST be a JSON array string containing all of the correct option texts (e.g. '["Option A", "Option C"]').
-- If "${targetType}" is "numeric": Create a question requiring a numerical response. The 'choices' array MUST be completely empty ([]). The 'correctAnswer' MUST be a clean numeric string (e.g. "0.8" or "-0.07"). The 'questionText' should explicitly tell the student: "Please enter your numeric response rounded to two decimal places (for example, -0.07)".
-- If "${targetType}" is "dropdown": Create a fill-in-the-blank sentence. The 'questionText' MUST contain exactly one "[Dropdown 1]" placeholder. The 'choices' array MUST contain 3 to 5 options that could fit in that blank. The 'correctAnswer' MUST be the exact correct literal word/option.`,
+      model: textModel(),
+      prompt: generateExercisePrompt(profile, {
+        topic: { title: topicData.title, week: topicData.week, isQuantitative: topicData.isQuantitative },
+        courseCode: course?.code,
+        bucketContext,
+        rigorExamples: rigorExercisesContext,
+        styleExamples: existingExercisesContext,
+        alreadyAsked: alreadyAskedQuestionsText,
+        targetType,
+      }),
       schema: z.object({
         newExercise: z.object({
           questionText: z.string(),
@@ -1234,7 +1141,7 @@ export async function generateExamDiagnosis(sessionId: string) {
     for (const log of session.logs) {
       const ex = log.exercise;
       const topic = ex.topic;
-      const tTitle = topic?.title || "General Economics";
+      const tTitle = topic?.title || "General";
       const localPath = topic?.localPath || "";
       const week = topic?.week || "";
 
@@ -1359,51 +1266,21 @@ Official Explanation: ${w.explanation || "No explanation available."}
 Source File Path: ${w.localPath}`;
     }).join('\n\n');
 
-    const prompt = `You are a brilliant MIT MicroMasters economics professor.
-The student has completed a timed mock exam graded under a proportional partial credit "one wrong cancels one right" scoring protocol. You need to write a deeply professional, encouraging, and detailed analytical diagnostic report.
-
---- EXAM RESULTS OVERVIEW ---
-Overall Proportional Score: ${examScoreSum.toFixed(2)}/${totalCount} (${scorePct}%)
-Mode: ${session.mode} (Timed Exam)
-
---- TOPIC BREAKDOWNS ---
-${topicSummaryString}
-
---- DETAILED WRONG ANSWERS & COGNITIVE MISTAKES ---
-${wrongAnswersString || "No wrong answers! Perfect score!"}
-
-Your output MUST be a gorgeous Markdown document structured exactly as follows:
-
-# Timed Exam Diagnostic Report
-
-## 1. Executive Performance Summary
-Provide a 2-3 sentence overview of their performance. Be encouraging but academically rigorous. Highlight their immediate strengths.
-
-## 2. Topic-by-Topic Mastery Breakdown
-For each tested topic, assign one of these levels:
-- **High Mastery** (Accuracy >= 80%): Short description of what they understand.
-- **Developing Mastery** (Accuracy 50% - 79%): Identify small conceptual gaps.
-- **Critical Remediation Needed** (Accuracy < 50%): Highlight foundational gaps.
-
-## 3. Deep Error Deconstruction
-Review each wrong answer. Explain the *cognitive trap* or economic misinterpretation they fell into (e.g., confusing OLS correlation with causality, failing to solve the first-order conditions, or forgetting how selection bias affects simple difference measures). Explain the underlying economic intuition clearly.
-
-## 4. Tailored Study Plan & Grounding Map
-Generate a clear, numbered list of study tasks.
-For each task, refer to the exact lecture file (using its localPath) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
-Format the links EXACTLY like this:
-- For Slides PDFs: [Source Lecture Slides Title](/api/file?path=URL_ENCODED_LOCAL_PATH#page=ESTIMATED_PAGE_NUMBER) (choose an estimated page number, e.g., 5, where the concept is taught)
-- For Transcripts/Readings: [Source Lecture Title](/api/file?path=URL_ENCODED_LOCAL_PATH&highlight=SHORT_UNIQUE_QUOTE_FROM_TEXT) (choose a 5-10 word unique quote from the text that they should review)
-
-Example:
-1. **Review Multi-stage Randomization**: Read page 15 of [Leaders and Democratic Institutions](/api/file?path=${encodeURIComponent('/Users/name/slides.pdf')}#page=15) to understand how the standard errors cluster.
-2. **Re-evaluate OLS Coefficients**: Review the transcript [OLS Basics](/api/file?path=${encodeURIComponent('/Users/name/transcript.txt')}&highlight=estimate%20the%20OLS%20equation) to brush up on standard error interpretation.
-
-Ensure that ALL file paths used in the links correspond to the actual ones listed in the breakdowns above. If no local file path was provided, use a placeholder. Do NOT invent external domains or paths outside of the provided localPaths.
-`;
+    const examCourse = await getCourseWithProfile(
+      session.logs.find((l) => l.exercise?.topic?.courseId)?.exercise.topic?.courseId ?? ''
+    );
+    const prompt = examDiagnosisPrompt(examCourse?.profile ?? LEGACY_VOICE_PROFILE, {
+      courseCode: examCourse?.code,
+      scoreSum: examScoreSum,
+      totalCount,
+      scorePct,
+      sessionMode: session.mode,
+      topicSummary: topicSummaryString,
+      wrongAnswers: wrongAnswersString,
+    });
 
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       prompt
     });
 
@@ -1484,7 +1361,7 @@ export async function generateGlobalDiagnosis() {
       }
       return {
         ...wt,
-        courseCode: detail?.course?.code || "DEDP",
+        courseCode: detail?.course?.code || "Unknown",
         content
       };
     });
@@ -1503,48 +1380,15 @@ Lecture Material Content Summary:
 ${wt.content}`;
     }).join('\n\n');
 
-    const prompt = `You are a brilliant MIT MicroMasters economics professor acting as a Socratic Academic Advisor.
-The student wants a comprehensive **Global Learning Diagnosis & Personalized Study Plan** based on their performance across ALL study and exam sessions.
-
---- GLOBAL PERFORMANCE METRICS ---
-${allTopicsSummary}
-
---- RELEVANT CLASS CONTENT TRANSCRIPTIONS / SLIDES FOR WEAKEST AREAS ---
-${weakTopicsContext || "No weak areas found! Perfect accuracy across all topics!"}
-
-Your output MUST be a beautiful, highly thorough Markdown document structured exactly as follows:
-
-# Global Learning Diagnostic Report
-
-## 1. Executive Learning Profile
-Provide a 3-4 sentence comprehensive analysis of their learning journey across both MITx courses (14.750x and JPAL102x). Identify high-level patterns (e.g. "strong on theoretical RCT layouts, but struggling on mathematical modeling, statistical sampling power, or empirical identification strategies"). Be encouraging but highly rigorous.
-
-## 2. Global Topic Mastery Heatmap
-Categorize their active topics into:
-- **High Mastery** (Accuracy >= 75%)
-- **Developing Mastery** (Accuracy 60% - 74%)
-- **Critical Conceptual Gaps** (Accuracy < 60%)
-
-## 3. Core Conceptual Gaps & Error Deconstructions
-Analyze their weakest areas. Ground your explanations directly in the provided lecture transcriptions/slides above!
-Detail the *precise theoretical or mathematical mistakes* they are making (e.g., explaining why adding more individual observations to clustered samples does not solve power issues if the Intra-cluster Correlation is high, or explaining Olken's media study designs in Indonesia, or Ferraz & Finan's re-election incentive model). Ensure this section is academically rich and deeply informative.
-
-## 4. Tailored Remedial Syllabus & Clickable Grounding Map
-Generate a clear, numbered list of study tasks linking directly to their weak areas.
-For each task, refer to the exact lecture file (using its localPath) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
-Format the links EXACTLY like this:
-- For Slides PDFs: [Source Lecture Slides Title](/api/file?path=URL_ENCODED_LOCAL_PATH#page=ESTIMATED_PAGE_NUMBER) (choose an estimated page number, e.g., 5, where the concept is taught)
-- For Transcripts/Readings: [Source Lecture Title](/api/file?path=URL_ENCODED_LOCAL_PATH&highlight=SHORT_UNIQUE_QUOTE_FROM_TEXT) (choose a 5-10 word unique quote from the text that they should review)
-
-Example:
-1. **Review Multi-stage Randomization**: Read page 15 of [Leaders and Democratic Institutions](/api/file?path=${encodeURIComponent('/Users/name/slides.pdf')}#page=15) to understand how the standard errors cluster.
-2. **Re-evaluate OLS Coefficients**: Review the transcript [OLS Basics](/api/file?path=${encodeURIComponent('/Users/name/transcript.txt')}&highlight=estimate%20the%20OLS%20equation) to brush up on standard error interpretation.
-
-Ensure that ALL file paths used in the links correspond to the actual ones listed in the breakdowns above. Do NOT invent external domains or paths outside of the provided localPaths.
-`;
+    const scope = await getProfileForCourses(Object.values(topicStats).map(t => t.course));
+    const prompt = globalDiagnosisPrompt(scope.profile, {
+      courseCodes: scope.courses.map(c => c.code),
+      topicLines: allTopicsSummary,
+      weakTopicContent: weakTopicsContext,
+    });
 
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       prompt
     });
 
@@ -1594,23 +1438,13 @@ export async function generatePlannerResponse(messages: any[], accuracyStats: an
       return `${m.role === 'user' ? 'Student' : 'Professor (Planner)'}: ${m.content}`;
     }).join('\n');
 
-    const prompt = `You are an elite, warm MIT MicroMasters academic planner and Socratic curriculum advisor.
-You are chatting with a student inside their "Study Plan Creator Workspace" to help them formulate their personalized study schedule timeline.
-
-Here is the conversation history so far:
-${formattedHistory}
-
-Here is their current learning accuracy and heatmaps:
-${JSON.stringify(accuracyStats)}
-
-Your goal is to reply in 3-4 sentences. Be encouraging, intellectually rigorous, and follow these socratic guidelines:
-1. Challenge their schedule: If they propose studying 6 hours a day or a very compact timeline, ask them about sustainability and the opportunity costs (what are they giving up?).
-2. Discuss pedagogical techniques: Remind them of the importance of Active Recall and Spaced Repetition (e.g. testing themselves using timed mocks rather than passive reading).
-3. Keep it brief: Be extremely concise, warm, and encourage them to click the "Compile Timeline Schedule" button when they feel ready to see the visual days/slots pre-created!
-`;
+    const prompt = plannerChatPrompt(LEGACY_VOICE_PROFILE, {
+      history: formattedHistory,
+      stats: JSON.stringify(accuracyStats),
+    });
 
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       prompt
     });
 
@@ -1653,28 +1487,17 @@ export async function generateStructuredStudyPlan(chatMessages: any[], accuracyS
       `ID: "${t.id}" | Course: "${t.courseId}" | Week: "${t.week}" | Title: "${t.title}"`
     ).join('\n');
 
-    const prompt = `You are an elite MIT MicroMasters academic advisor and syllabus curriculum designer.
-A student wants you to create a structured, multi-day, personalized timeline Study Plan (curriculum) to prepare for their exams.
-
-Here is their conversation history, containing their specific study preferences, available hours, and constraints:
-${JSON.stringify(chatMessages)}
-
-Here is their current learning accuracy and heatmaps:
-${JSON.stringify(accuracyStats)}
-
-Here is the exact Catalog of Topics available in the database (including their correct IDs, weeks, and titles):
-${topicsCatalog}
-
-CRITICAL PLANNING RULES:
-1. Identify their weakest areas from the accuracy stats (prioritize areas with accuracy < 60%).
-2. Schedule a chronological timeline (e.g. Tuesday through Friday, Morning/Afternoon/Night slots).
-3. For each scheduled slot, you MUST assign actual, correct topic IDs from the provided database Catalog above. DO NOT invent topic IDs. Look at the Week or Title of the weak area, find its matching IDs in the Catalog, and insert those IDs inside the 'topicIds' array.
-4. On the final days, schedule timed Mock Exams (using 'mode': 'exam') targeting Comprehensive Reviews (assign topics IDs matching Week 13/Week 16 comprehensive reviews).
-5. Compile a type-safe JSON StudyPlan object matching the requested schema.
-`;
+    const scope = await getProfileForCourses(dbTopics.map(t => t.courseId));
+    const calibrationModules = [...new Set(scope.courses.map(c => c.calibrationModule).filter((m): m is string => !!m))];
+    const prompt = studyPlanPrompt(scope.profile, {
+      history: JSON.stringify(chatMessages),
+      stats: JSON.stringify(accuracyStats),
+      topicCatalog: topicsCatalog,
+      calibrationModules,
+    });
 
     const { object } = await generateObject({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       schema: StudyPlanSchema,
       prompt
     });
@@ -1802,7 +1625,7 @@ export async function getTopicsWithPerformance() {
         week: t.week,
         className: t.className,
         unit: t.unit,
-        courseCode: t.course?.code || "DEDP",
+        courseCode: t.course?.code || "Unknown",
         course: t.course ? { id: t.course.id, code: t.course.code, title: t.course.title } : null,
         totalExercises,
         uniquelyCompleted,
@@ -1856,7 +1679,7 @@ export async function getTopicEvolutionData() {
     const topicTotals: Record<string, number> = {};
 
     allExercises.forEach(e => {
-      const cCode = e.topic?.course?.code || "DEDP";
+      const cCode = e.topic?.course?.code || "Unknown";
       const wName = e.topic?.week || "General";
       const wTitle = `${cCode} - ${wName.replace(/_+/g, ' ').trim()}`;
       const tTitle = e.topic?.title || "General";
@@ -1879,7 +1702,7 @@ export async function getTopicEvolutionData() {
       return {
         ...l,
         formattedDate,
-        courseCode: l.exercise?.topic?.course?.code || "DEDP",
+        courseCode: l.exercise?.topic?.course?.code || "Unknown",
         weekTitle: wCleaned,
         topicTitle: l.exercise?.topic?.title || "General"
       };
