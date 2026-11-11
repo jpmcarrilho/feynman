@@ -209,7 +209,8 @@ describe('generateNextExercise action', () => {
         questionText: 'Test generated question?',
         exerciseType: 'single_choice',
         choices: ['A', 'B', 'C', 'D'],
-        correctAnswer: 'A',
+        correctChoiceIndexes: [0],
+        correctAnswer: '',
         explanation: 'Because it is correct.'
       }
     }
@@ -291,7 +292,7 @@ describe('generateNextExercise action', () => {
       args?.where?.status === 'rejected' && !(args.where as Record<string, unknown>).reportedReason ? [{ topicId: 'topic-1' }, { topicId: 'topic-1' }, { topicId: 'topic-1' }] : []) as never)
     vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
     vi.mocked(generateObject)
-      .mockResolvedValueOnce({ object: { newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctAnswer: 'A', explanation: 'E' } } } as never)
+      .mockResolvedValueOnce({ object: { newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctChoiceIndexes: [0], correctAnswer: '', explanation: 'E' } } } as never)
       .mockResolvedValueOnce({ object: { answerable: true, issue: '', answer: ['A'] } } as never)
     vi.mocked(prisma.exercise.create).mockResolvedValue({ id: 'ex-new' } as never)
 

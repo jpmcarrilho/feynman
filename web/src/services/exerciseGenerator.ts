@@ -4,7 +4,7 @@ import type { Exercise, Topic } from '@prisma/client'
 import { textModel } from '@/lib/ai'
 import { prisma } from '@/lib/db'
 import { generateExercisePrompt, GENERATE_EXERCISE_PROMPT_VERSION, BLIND_SOLVE_PROMPT_VERSION } from '@/lib/prompts'
-import { validateExerciseStructure, summarizeIssues } from '@/lib/exerciseValidation'
+import { validateExerciseStructure, summarizeIssues, deriveChoiceAnswer, type ValidationIssue } from '@/lib/exerciseValidation'
 import { blindSolve } from '@/services/blindSolve'
 import { pickQuestionType, type TutorProfile } from '@/lib/studyspace/profile'
 import { getCourseWithProfile } from '@/services/studyspaceService'
@@ -413,6 +413,10 @@ export const generatedExerciseSchema = z.object({
     questionText: z.string(),
     exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
     choices: z.array(z.string()),
+    // 0-based indexes into `choices` of the correct options (one for single_choice and dropdown, one or more for
+    // multiple_choice, none for numeric). Code derives the stored answer from them; the model never retypes option text.
+    correctChoiceIndexes: z.array(z.number().int()),
+    // The numeric string for numeric questions; "" for every choice type
     correctAnswer: z.string(),
     explanation: z.string(),
   }),
@@ -438,8 +442,8 @@ async function rejectionReason(candidate: {
   choices: string[]
   correctAnswer: string
   explanation: string
-}): Promise<string | null> {
-  const issues = validateExerciseStructure(candidate)
+}, derivationIssue?: ValidationIssue): Promise<string | null> {
+  const issues = derivationIssue ? [derivationIssue] : validateExerciseStructure(candidate)
   if (issues.length > 0) return `structural: ${summarizeIssues(issues)} | ${issues.map((i) => i.message).join(' ')}`
   const solved = await blindSolve(candidate)
   if (!solved.passed) return `blind_solve[${BLIND_SOLVE_PROMPT_VERSION}]: ${solved.reason}`
@@ -474,7 +478,8 @@ export async function generateExerciseForTopic(args: {
       schema: generatedExerciseSchema,
     })
 
-    const { contentKind, logisticsReason, ...genEx } = object.newExercise
+    const { contentKind, logisticsReason, correctChoiceIndexes, ...modelEx } = object.newExercise
+    let genEx = modelEx
 
     if (contentKind === 'logistics') {
       // Not study material: keep one marker row (never selected, never shown) so no later session targets this topic,
@@ -499,13 +504,17 @@ export async function generateExerciseForTopic(args: {
       throw new GenerationError('not_study_material', 'This topic holds course rules or administration rather than study material, so no question is generated from it.')
     }
 
+    // The stored answer comes from the indexes, never from text the model typed (indexes refer to the order written)
+    const derived = deriveChoiceAnswer(genEx.exerciseType, genEx.choices, correctChoiceIndexes, genEx.correctAnswer)
+    genEx = { ...genEx, correctAnswer: derived.ok ? derived.correctAnswer : '' }
+
     // Randomize choices to remove the model's position bias
     let finalChoices = genEx.choices
     if (genEx.exerciseType === 'single_choice' || genEx.exerciseType === 'multiple_choice' || genEx.exerciseType === 'dropdown') {
       finalChoices = shuffleArray(genEx.choices)
     }
 
-    const rejection = await rejectionReason({ ...genEx, choices: finalChoices })
+    const rejection = await rejectionReason({ ...genEx, choices: finalChoices }, derived.ok ? undefined : derived.issue)
     const data = {
       id: `gen-${crypto.randomUUID()}`,
       topicId: topicData.id,

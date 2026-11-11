@@ -103,7 +103,7 @@ JSON Schema:
 }
 
 /** Bump whenever the text of generateExercisePrompt changes (stored on generated exercises from T14 on). */
-export const GENERATE_EXERCISE_PROMPT_VERSION = 'gen-v5'
+export const GENERATE_EXERCISE_PROMPT_VERSION = 'gen-v6'
 
 export function generateExercisePrompt(
   profile: TutorProfile,
@@ -183,8 +183,8 @@ ${g.formatRules.length + 1}. MATH AND SYMBOLS: Write every mathematical expressi
 CRITICAL FORMAT SELECTION:
 You MUST generate an exercise of type: "${targetType}".
 Follow these rules strictly based on the target type:
-- If "${targetType}" is "single_choice": Create a standard multiple choice question. 'choices' MUST contain exactly 4 options. 'correctAnswer' MUST be the exact matching string of the single correct answer.
-- If "${targetType}" is "multiple_choice": Create a multiple-response check-box question (multiple correct answers allowed). 'choices' MUST contain 4 or 5 options. 'correctAnswer' MUST be a JSON array string containing all of the correct option texts (e.g. '["Option A", "Option C"]').
-- If "${targetType}" is "numeric": Create a question requiring a numerical response. The 'choices' array MUST be completely empty ([]). The 'correctAnswer' MUST be a clean numeric string (e.g. "0.8" or "-0.07"). The 'questionText' should explicitly tell the student: "Please enter your numeric response rounded to two decimal places (for example, -0.07)".
-- If "${targetType}" is "dropdown": Create a fill-in-the-blank sentence. The 'questionText' MUST contain exactly one "[Dropdown 1]" placeholder. The 'choices' array MUST contain 3 to 5 options that could fit in that blank. The 'correctAnswer' MUST be the exact correct literal word/option.`
+- If "${targetType}" is "single_choice": Create a standard multiple choice question. 'choices' MUST contain exactly 4 options. 'correctChoiceIndexes' MUST contain exactly one number: the 0-based position in 'choices' of the correct option (the first option is 0). 'correctAnswer' MUST be an empty string "".
+- If "${targetType}" is "multiple_choice": Create a multiple-response check-box question (multiple correct answers allowed). 'choices' MUST contain 4 or 5 options. 'correctChoiceIndexes' MUST list the 0-based positions in 'choices' of ALL the correct options, each at most once, and not every option (for example [0, 2]). 'correctAnswer' MUST be an empty string "". Never copy or JSON-encode option texts into 'correctAnswer'.
+- If "${targetType}" is "numeric": Create a question requiring a numerical response. The 'choices' array MUST be completely empty ([]). 'correctChoiceIndexes' MUST be an empty list ([]). The 'correctAnswer' MUST be a clean numeric string (e.g. "0.8" or "-0.07"). The 'questionText' should explicitly tell the student: "Please enter your numeric response rounded to two decimal places (for example, -0.07)".
+- If "${targetType}" is "dropdown": Create a fill-in-the-blank sentence. The 'questionText' MUST contain exactly one "[Dropdown 1]" placeholder. The 'choices' array MUST contain 3 to 5 options that could fit in that blank. 'correctChoiceIndexes' MUST contain exactly one number: the 0-based position in 'choices' of the correct option. 'correctAnswer' MUST be an empty string "".\n\nThe 'correctChoiceIndexes' positions refer to the order of 'choices' exactly as you write it, and the choices are shuffled by the app afterwards. For a question that is not study material ("logistics"), 'correctChoiceIndexes' is an empty list.`
 }

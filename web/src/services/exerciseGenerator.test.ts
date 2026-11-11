@@ -26,6 +26,8 @@ import {
   generatedExerciseSchema,
 } from './exerciseGenerator'
 import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
+import { validateExerciseStructure } from '@/lib/exerciseValidation'
+import { gradeAnswer } from '@/lib/grading'
 import { defaultProfile, type TutorProfile } from '@/lib/studyspace/profile'
 
 vi.mock('ai', () => ({ generateText: vi.fn(), generateObject: vi.fn() }))
@@ -40,7 +42,7 @@ vi.mock('@/lib/db', () => ({
 }))
 
 const generated = {
-  newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctAnswer: 'A', explanation: 'E' },
+  newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctChoiceIndexes: [0], correctAnswer: '', explanation: 'E' },
 }
 const solvedRight = { answerable: true, issue: '', answer: ['A'] }
 
@@ -167,7 +169,7 @@ describe('generateExerciseForTopic validation', () => {
 
   it('sends the solver only what the student sees: no topic content, answer key or explanation', async () => {
     setup({ content: 'SECRET-TOPIC-CONTENT' }, defaultProfile({ title: 'Course' }))
-    mockModel({ newExercise: { ...generated.newExercise, correctAnswer: 'ANSWER-KEY-D', choices: ['A', 'B', 'C', 'ANSWER-KEY-D'], explanation: 'EXPLAIN-TEXT' } }, { answerable: true, issue: '', answer: ['ANSWER-KEY-D'] })
+    mockModel({ newExercise: { ...generated.newExercise, correctChoiceIndexes: [3], correctAnswer: '', choices: ['A', 'B', 'C', 'ANSWER-KEY-D'], explanation: 'EXPLAIN-TEXT' } }, { answerable: true, issue: '', answer: ['ANSWER-KEY-D'] })
     await generateExerciseForTopic(args)
     const prompt = solverCalls()[0][0].prompt as string
     expect(prompt).toContain('Q?')
@@ -210,7 +212,7 @@ describe('generateExerciseForTopic validation', () => {
   it('rejects a question the solver says cannot be answered from its own text (exam rules example)', async () => {
     setup({}, defaultProfile({ title: 'Course' }))
     mockModel(
-      { newExercise: { questionText: 'According to the exam rules, which materials are you allowed to bring to the final?', exerciseType: 'single_choice', choices: ['A calculator', 'Open notes', 'A laptop', 'Nothing'], correctAnswer: 'A calculator', explanation: 'The rules say so.' } },
+      { newExercise: { questionText: 'According to the exam rules, which materials are you allowed to bring to the final?', exerciseType: 'single_choice', choices: ['A calculator', 'Open notes', 'A laptop', 'Nothing'], correctChoiceIndexes: [0], correctAnswer: '', explanation: 'The rules say so.' } },
       { answerable: false, issue: 'The exam rules are not stated in the question.', answer: ['A calculator'] },
     )
     await expect(generateExerciseForTopic(args)).rejects.toMatchObject({ code: 'validation_failed' })
@@ -231,7 +233,7 @@ describe('generateExerciseForTopic validation', () => {
 
   it('stores one marker row, skips the blind solve and does not retry when the model says the content is logistics', async () => {
     setup({}, defaultProfile({ title: 'Course' }))
-    mockModel({ newExercise: { contentKind: 'logistics', logisticsReason: 'Exam rules and submission limits.', questionText: '', exerciseType: 'single_choice', choices: [], correctAnswer: '', explanation: '' } })
+    mockModel({ newExercise: { contentKind: 'logistics', logisticsReason: 'Exam rules and submission limits.', questionText: '', exerciseType: 'single_choice', choices: [], correctChoiceIndexes: [], correctAnswer: '', explanation: '' } })
     await expect(generateExerciseForTopic(args)).rejects.toMatchObject({ code: 'not_study_material' })
     expect(vi.mocked(generateObject)).toHaveBeenCalledTimes(1)
     expect(solverCalls()).toHaveLength(0)
@@ -257,8 +259,8 @@ describe('generateExerciseForTopic validation', () => {
     await generateExerciseForTopic(args)
     expect(promptOf()).toContain('FIRST, JUDGE THE TARGET CONTENT')
     expect(promptOf()).toMatch(/honor code/)
-    expect(generatedExerciseSchema.safeParse({ newExercise: { contentKind: 'logistics', logisticsReason: 'x', questionText: '', exerciseType: 'single_choice', choices: [], correctAnswer: '', explanation: '' } }).success).toBe(true)
-    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v5')
+    expect(generatedExerciseSchema.safeParse({ newExercise: { contentKind: 'logistics', logisticsReason: 'x', questionText: '', exerciseType: 'single_choice', choices: [], correctChoiceIndexes: [], correctAnswer: '', explanation: '' } }).success).toBe(true)
+    expect(GENERATE_EXERCISE_PROMPT_VERSION).toBe('gen-v6')
   })
 
   it('lets a solver error propagate and stores nothing for that attempt', async () => {
@@ -267,6 +269,88 @@ describe('generateExerciseForTopic validation', () => {
     vi.mocked(generateObject).mockResolvedValueOnce({ object: generated } as never).mockRejectedValueOnce(new Error('provider down'))
     await expect(generateExerciseForTopic(args)).rejects.toThrow('provider down')
     expect(prisma.exercise.create).not.toHaveBeenCalled()
+  })
+})
+
+describe('correct answers are derived from correctChoiceIndexes', () => {
+  const args = { primaryTopicId: 't1', poolTopicIds: ['t1'], existingExerciseIds: [] as string[] }
+  const created = () => vi.mocked(prisma.exercise.create).mock.calls.map((c) => c[0].data as Record<string, unknown>)
+  const latexChoices = ['$\\frac{\\sigma}{\\sqrt{n}}$', '$\\beta$', '$\\theta$', '$1{,}5$', '$\\nu$']
+  const base = { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Which of these are correct?', exerciseType: 'multiple_choice', choices: latexChoices, correctChoiceIndexes: [0, 2, 4], correctAnswer: '', explanation: 'Because.' }
+  const solved = (answer: string[]) => ({ answerable: true, issue: '', answer })
+
+  it('stores a multiple-choice key that parses to exactly the selected LaTeX option strings, and it validates and grades', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: base }, solved([latexChoices[0], latexChoices[2], latexChoices[4]]))
+    await generateExerciseForTopic(args)
+    const row = created()[0]
+    expect(row.status).toBe('active')
+    const stored = row.correctAnswer as string
+    expect(JSON.parse(stored)).toEqual([latexChoices[0], latexChoices[2], latexChoices[4]])
+    // byte for byte: the backslash sequences stayed backslashes, not \f \t \n control characters
+    expect(stored).toBe(JSON.stringify([latexChoices[0], latexChoices[2], latexChoices[4]]))
+    expect(stored).not.toMatch(/[\u0000-\u001f]/)
+    const ex = { questionText: base.questionText, exerciseType: 'multiple_choice', choices: JSON.parse(row.choices as string) as string[], correctAnswer: stored, explanation: 'Because.' }
+    expect(validateExerciseStructure(ex)).toEqual([])
+    expect(gradeAnswer(ex, JSON.stringify([latexChoices[4], latexChoices[0], latexChoices[2]])).isCorrect).toBe(true)
+    expect(gradeAnswer(ex, JSON.stringify([latexChoices[0], latexChoices[2]])).isCorrect).toBe(false)
+  })
+
+  it('ignores whatever the model wrote in correctAnswer for a choice type', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: { ...base, correctAnswer: '["$\\beta$"' } }, solved([latexChoices[0], latexChoices[2], latexChoices[4]]))
+    await generateExerciseForTopic(args)
+    expect(JSON.parse(created()[0].correctAnswer as string)).toEqual([latexChoices[0], latexChoices[2], latexChoices[4]])
+  })
+
+  it('derives the exact option text for single choice and dropdown', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: { ...base, exerciseType: 'single_choice', choices: ['one', 'two', 'three', '$\\theta$'], correctChoiceIndexes: [3] } }, solved(['$\\theta$']))
+    await generateExerciseForTopic(args)
+    expect(created()[0]).toMatchObject({ status: 'active', correctAnswer: '$\\theta$' })
+
+    vi.mocked(prisma.exercise.create).mockClear()
+    mockModel({ newExercise: { ...base, exerciseType: 'dropdown', questionText: 'The mean is [Dropdown 1].', choices: ['biased', 'unbiased', 'noisy'], correctChoiceIndexes: [1] } }, solved(['unbiased']))
+    await generateExerciseForTopic(args)
+    expect(created()[0]).toMatchObject({ status: 'active', correctAnswer: 'unbiased' })
+  })
+
+  it('keeps a numeric answer as written', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    mockModel({ newExercise: { ...base, exerciseType: 'numeric', choices: [], correctChoiceIndexes: [], correctAnswer: '2.5', questionText: 'Compute it. Please enter your numeric response rounded to two decimal places (for example, -0.07)' } }, solved(['2.5']))
+    await generateExerciseForTopic(args)
+    expect(created()[0]).toMatchObject({ status: 'active', correctAnswer: '2.5' })
+  })
+
+  it.each([
+    ['out of range', 'multiple_choice', [0, 7]],
+    ['negative', 'single_choice', [-1]],
+    ['duplicate', 'multiple_choice', [1, 1]],
+    ['empty for a choice type', 'multiple_choice', []],
+    ['two for a single choice', 'single_choice', [0, 1]],
+    ['non-integer', 'single_choice', [0.5]],
+    ['non-empty for numeric', 'numeric', [0]],
+  ])('rejects %s indexes as a structural failure, retries, and never runs a blind solve', async (_name, exerciseType, correctChoiceIndexes) => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    const numeric = exerciseType === 'numeric'
+    mockModel({ newExercise: { ...base, exerciseType, choices: numeric ? [] : latexChoices, correctChoiceIndexes, correctAnswer: numeric ? '2.5' : '' } })
+    await expect(generateExerciseForTopic(args)).rejects.toMatchObject({ code: 'validation_failed' })
+    expect(created()).toHaveLength(MAX_GENERATION_ATTEMPTS)
+    expect(created().every((r) => r.status === 'rejected')).toBe(true)
+    expect(created()[0].reportedReason).toMatch(/^structural: invalid_correct_choice_indexes \|/)
+    expect(vi.mocked(generateObject)).toHaveBeenCalledTimes(MAX_GENERATION_ATTEMPTS)
+  })
+
+  it('asks for indexes in the schema and in the prompt, and never for option text or JSON in correctAnswer', async () => {
+    setup({}, defaultProfile({ title: 'Course' }))
+    await generateExerciseForTopic(args)
+    const prompt = vi.mocked(generateObject).mock.calls[0][0].prompt as string
+    expect(prompt).toContain('correctChoiceIndexes')
+    expect(prompt).toMatch(/0-based position/)
+    expect(prompt).not.toMatch(/JSON array string/)
+    expect(prompt).toContain('Never copy or JSON-encode option texts')
+    expect(generatedExerciseSchema.safeParse({ newExercise: { ...generated.newExercise, correctChoiceIndexes: undefined } }).success).toBe(false)
+    expect(generatedExerciseSchema.safeParse({ newExercise: { ...generated.newExercise, correctChoiceIndexes: [1.5] } }).success).toBe(false)
   })
 })
 

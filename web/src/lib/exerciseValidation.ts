@@ -228,6 +228,41 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
   return issues
 }
 
+/** Issue code of a bad `correctChoiceIndexes` list (model output of generation and of question import). */
+export const INVALID_CHOICE_INDEXES = 'invalid_correct_choice_indexes'
+
+/**
+ * The stored `correctAnswer` of a question whose model output names the correct options by their 0-based index in
+ * `choices`, so the model never retypes or JSON-encodes option text (LaTeX backslashes break both):
+ *   - single_choice, dropdown: exactly one index; the answer is that option's text, byte for byte;
+ *   - multiple_choice: one or more distinct indexes; the answer is JSON.stringify of the selected option texts in
+ *     choice order;
+ *   - numeric: no indexes; `fallback` (the numeric string the model wrote) is returned unchanged.
+ * Anything else is a structural problem with code INVALID_CHOICE_INDEXES. Unknown types are left to
+ * validateExerciseStructure (the fallback is returned).
+ */
+export function deriveChoiceAnswer(
+  type: string,
+  choices: string[],
+  indexes: number[],
+  fallback: string,
+): { ok: true; correctAnswer: string } | { ok: false; issue: ValidationIssue } {
+  const fail = (message: string) => ({ ok: false as const, issue: { code: INVALID_CHOICE_INDEXES, message } })
+  const list = Array.isArray(indexes) ? indexes : []
+  if (type === 'numeric') {
+    return list.length === 0 ? { ok: true, correctAnswer: fallback } : fail('A numeric question must have no correct choice indexes.')
+  }
+  if (type !== 'single_choice' && type !== 'multiple_choice' && type !== 'dropdown') return { ok: true, correctAnswer: fallback }
+  if (list.length === 0) return fail('No correct choice index was given.')
+  const bad = list.find((i) => !Number.isInteger(i) || i < 0 || i >= choices.length)
+  if (bad !== undefined) return fail(`Correct choice index ${bad} is out of range (0-${choices.length - 1}).`)
+  if (new Set(list).size !== list.length) return fail('The same correct choice index is listed twice.')
+  if (type !== 'multiple_choice') {
+    return list.length === 1 ? { ok: true, correctAnswer: choices[list[0]] } : fail(`${type} needs exactly one correct choice index, got ${list.length}.`)
+  }
+  return { ok: true, correctAnswer: JSON.stringify([...list].sort((a, b) => a - b).map((i) => choices[i])) }
+}
+
 /** One-line summary of issues for audit storage. */
 export function summarizeIssues(issues: ValidationIssue[]): string {
   return issues.map((i) => i.code).join(',')

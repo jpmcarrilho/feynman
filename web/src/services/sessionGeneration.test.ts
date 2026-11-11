@@ -21,8 +21,8 @@ vi.mock('@/lib/db', () => ({
 const tx = prisma as unknown as { $transaction: ReturnType<typeof vi.fn> }
 
 const topic = (id: string) => ({ id, title: id, courseId: 'c1', week: 'W1', content: 'body', order: 1, summary: null, isQuantitative: false })
-const gen = { newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctAnswer: 'A', explanation: 'E' } }
-const logistics = { newExercise: { contentKind: 'logistics', logisticsReason: 'Exam rules.', questionText: '', exerciseType: 'single_choice', choices: [], correctAnswer: '', explanation: '' } }
+const gen = { newExercise: { contentKind: 'subject_matter', logisticsReason: '', questionText: 'Q?', exerciseType: 'single_choice', choices: ['A', 'B', 'C', 'D'], correctChoiceIndexes: [0], correctAnswer: '', explanation: 'E' } }
+const logistics = { newExercise: { contentKind: 'logistics', logisticsReason: 'Exam rules.', questionText: '', exerciseType: 'single_choice', choices: [], correctChoiceIndexes: [], correctAnswer: '', explanation: '' } }
 const solved = { answerable: true, issue: '', answer: ['A'] }
 
 function setupTopics(ids: string[]) {
