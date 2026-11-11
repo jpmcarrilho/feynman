@@ -454,7 +454,8 @@ export async function createStudySession(
 
   // Enrich selected exercises that need context
   selected = await Promise.all(selected.map(async (ex) => {
-    if (await needsContextEnrichment(ex.questionText)) {
+    // enrichedAt replaces the in-band marker (stripped by the studyspaces backfill)
+    if (!ex.enrichedAt && await needsContextEnrichment(ex.questionText)) {
       return enrichExerciseWithContext(ex);
     }
     return ex;
