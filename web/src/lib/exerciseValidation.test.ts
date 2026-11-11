@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { validateExerciseStructure, latexProblems, type ValidatableExercise } from './exerciseValidation'
+import { validateExerciseStructure, latexProblems, deriveChoiceAnswer, type ValidatableExercise } from './exerciseValidation'
 
 const single: ValidatableExercise = {
   questionText: 'Which of these is a prime number?',
@@ -195,5 +195,51 @@ describe('latexProblems', () => {
     expect(latexProblems('It costs $100 per year or $50 per month')).toContain('currency_read_as_math')
     expect(latexProblems('It costs $100 per year')).toEqual([])
     expect(latexProblems('Let $x$ and $y$ be reals')).toEqual([])
+  })
+})
+
+describe('open questions', () => {
+  const open: ValidatableExercise = {
+    questionText: 'Explain why a fixed-effects regression removes time-invariant differences between groups.',
+    exerciseType: 'open',
+    choices: [],
+    correctAnswer: 'Fixed effects subtract each unit\'s mean from every variable, so anything constant within a unit over time cancels out.',
+    explanation: 'A common mistake is to think fixed effects control for time-varying confounders.',
+    keyPoints: ['Subtracts the unit mean from each variable', 'Anything constant within a unit cancels', 'Time-varying confounders remain'],
+  }
+  const codes = (over: Partial<ValidatableExercise>) => validateExerciseStructure({ ...open, ...over }).map((i) => i.code)
+
+  it('accepts a well-formed open question, with key points as an array or as the stored JSON', () => {
+    expect(codes({})).toEqual([])
+    expect(codes({ keyPoints: JSON.stringify(open.keyPoints), choices: '[]' })).toEqual([])
+  })
+
+  it.each([
+    ['choices', { choices: ['a', 'b', 'c'] }, 'open_has_choices'],
+    ['a dropdown placeholder', { questionText: 'Explain [Dropdown 1] in two sentences.' }, 'open_has_placeholder'],
+    ['"which of the following"', { questionText: 'Which of the following explains fixed effects?' }, 'open_which_of_following'],
+    ['a too-short model answer', { correctAnswer: 'Because of means.' }, 'model_answer_length'],
+    ['a too-long model answer', { correctAnswer: 'x'.repeat(1501) }, 'model_answer_length'],
+    ['one key point', { keyPoints: ['Subtracts the unit mean'] }, 'key_point_count'],
+    ['five key points', { keyPoints: ['point one', 'point two', 'point three', 'point four', 'point five'] }, 'key_point_count'],
+    ['no key points', { keyPoints: null }, 'key_point_count'],
+    ['duplicate key points', { keyPoints: ['Same point here', 'same  point here'] }, 'duplicate_key_points'],
+    ['a tiny key point', { keyPoints: ['ok', 'A proper second key point'] }, 'key_point_length'],
+    ['a huge key point', { keyPoints: ['y'.repeat(301), 'A proper second key point'] }, 'key_point_length'],
+    ['bare LaTeX in the model answer', { correctAnswer: 'The estimator is \\hat{\\beta} computed after demeaning each unit over time.' }, 'latex_bare_latex'],
+    ['bare LaTeX in a key point', { keyPoints: ['Uses \\bar{x} per unit', 'A proper second key point'] }, 'latex_bare_latex'],
+    ['an empty explanation', { explanation: '' }, 'empty_explanation'],
+  ] as [string, Partial<ValidatableExercise>, string][])('rejects %s', (_name, over, code) => {
+    expect(codes(over)).toContain(code)
+  })
+
+  it('does not treat "select all that apply" prose as a type mismatch', () => {
+    expect(codes({ questionText: 'Select all that apply is a phrase used in quizzes; explain why it needs several answers.' })).not.toContain('type_mismatch')
+  })
+
+  it('deriveChoiceAnswer treats open like numeric: no indexes, the written answer is kept', () => {
+    expect(deriveChoiceAnswer('open', [], [], 'the model answer')).toEqual({ ok: true, correctAnswer: 'the model answer' })
+    const bad = deriveChoiceAnswer('open', [], [0], 'x')
+    expect(bad.ok).toBe(false)
   })
 })

@@ -66,6 +66,8 @@ function parseChoices(choices: GradableExercise['choices']): string[] {
  * always used.
  */
 export function resolveExerciseType(ex: Pick<GradableExercise, 'exerciseType' | 'choices' | 'questionText'>): string {
+  // A written question is never re-read as another type, whatever its text says ("select all that apply" in prose)
+  if (ex.exerciseType === 'open') return 'open'
   const choices = parseChoices(ex.choices)
   if (choices.some((c) => /^\[Dropdown \d+\]/.test(c))) return 'dropdown'
   const text = (ex.questionText ?? '').toLowerCase()
@@ -272,6 +274,9 @@ export function gradeAnswer(ex: GradableExercise, userAnswer: string | null | un
       return gradeNumeric(ex, answer)
     case 'dropdown':
       return gradeDropdown(ex, answer)
+    case 'open':
+      // Written answers are graded by the model (services/openGrading.ts), never by this synchronous grader.
+      return ZERO
     default:
       return gradeSingle(ex, answer)
   }

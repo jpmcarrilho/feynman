@@ -88,6 +88,7 @@ model Exercise {
   originalQuestionText String?       // NEW: text before enrichment
   enrichedAt           DateTime?     // NEW: replaces the "<!-- enriched -->" marker
   reportedReason       String?       // NEW
+  keyPoints            String?       // JSON string[] (2 to 4 points) for exerciseType "open"; null for every other type
   createdAt            DateTime      @default(now())      // NEW
   topic                Topic         @relation(fields: [topicId], references: [id], onDelete: Cascade) // NEW delete rule
   logs                 ExerciseLog[]
@@ -160,6 +161,8 @@ model ExerciseLog {
   score      Float?       // NEW: 0..1 partial credit from gradeAnswer()
   assisted   Boolean      @default(false) // NEW: tutor was asked before answering
   userAnswer String?
+  feedback   String?      // JSON { v, keyPoints: [{ point, status }], misconceptions, text, selfScore? } for "open" answers; null otherwise
+  gradedBy   String?      // null (key-graded types and all earlier rows) | "model" | "self" | "pending" (open answer awaiting the model check)
   duration   Int          // seconds; real visible time from T18 on
   timestamp  DateTime     @default(now())
   session    StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade) // NEW delete rule (was RESTRICT)

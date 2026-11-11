@@ -1,4 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { gradeAnswer } from '@/lib/grading'
+import type { OpenFeedback } from '@/lib/openAnswer'
 import {
   submitExamForSession,
   finalizeOverdueExams,
@@ -13,6 +15,8 @@ import {
   setFlaggedFor,
   setCurrentPositionFor,
   logAnswerForSession,
+  logOpenAnswerForSession,
+  openAnswerPreconditions,
   getSessionResultsFor,
   EXAM_GRACE_MS,
   recordStudyTimeFor,
@@ -700,5 +704,186 @@ describe('getSessionResultsFor', () => {
     expect(sel.select.exercise.select).toEqual({ id: true, questionText: true, exerciseType: true, choices: true, correctAnswer: true })
     // the type and choices travel with each item so an answer can be shown as the card shows it
     expect(r[0]).toMatchObject({ exerciseType: 'multiple_choice', choices: '["A","B"]', correctAnswer: '["A"]' })
+  })
+})
+
+// ---------------------------------------------------------------------------------------------------------------
+// Written ("open") questions
+// ---------------------------------------------------------------------------------------------------------------
+
+const openEx = (id: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  exerciseType: 'open',
+  choices: '[]',
+  correctAnswer: 'Model answer.',
+  questionText: 'Explain it.',
+  ...extra,
+})
+const feedback: OpenFeedback = { v: 1, keyPoints: [{ point: 'p', status: 'covered' }], misconceptions: [], text: 'Well done.' }
+
+describe('submitExamForSession with written answers', () => {
+  const mixed = () => {
+    const rows = [
+      ex('e1', 'A'),
+      ex('e2', '["X","Y"]', { exerciseType: 'multiple_choice', choices: '["X","Y","Z"]' }),
+      ex('e3', '0.8', { exerciseType: 'numeric', choices: '[]' }),
+      ex('e4', 'one half', { exerciseType: 'dropdown', choices: '["one half","one third","one quarter"]', questionText: 'Coin: [Dropdown 1].' }),
+      openEx('e5'),
+      openEx('e6'),
+    ]
+    tx.sessionExercise.findMany.mockResolvedValue(rows.map((r) => ({ exerciseId: r.id, draftAnswer: null })))
+    tx.exercise.findMany.mockResolvedValue(rows)
+    return rows
+  }
+  const answers = { e1: 'A', e2: '["X"]', e3: '0.80', e4: '{"[Dropdown 1]":"one half"}', e5: 'A written answer that is long enough.', e6: '   ' }
+
+  it('logs a non-empty written answer as pending with no score, and an empty one as 0 with no grader', async () => {
+    mixed()
+    const r = await submitExamForSession('s1', answers)
+    const rows = (tx.exerciseLog.createMany.mock.calls[0][0] as { data: Record<string, unknown>[] }).data
+    const byId = new Map(rows.map((x) => [x.exerciseId, x]))
+    expect(byId.get('e5')).toMatchObject({ isCorrect: false, score: null, gradedBy: 'pending', userAnswer: 'A written answer that is long enough.' })
+    expect(byId.get('e6')).toMatchObject({ isCorrect: false, score: 0, userAnswer: '   ' })
+    expect(byId.get('e6')).not.toHaveProperty('gradedBy')
+    // pending counts 0 in the totals
+    expect(r).toEqual({ scoreSum: 3.5, total: 6, correctCount: 3 })
+  })
+
+  it('leaves the scores of the four key-graded types exactly as the grader gives them, with no new fields', async () => {
+    const rows = mixed()
+    await submitExamForSession('s1', answers)
+    const written = (tx.exerciseLog.createMany.mock.calls[0][0] as { data: Record<string, unknown>[] }).data
+    for (const exercise of rows.slice(0, 4)) {
+      const expected = gradeAnswer(exercise, answers[exercise.id as keyof typeof answers])
+      const row = written.find((x) => x.exerciseId === exercise.id)!
+      expect([row.score, row.isCorrect]).toEqual([expected.score, expected.isCorrect])
+      expect(row).not.toHaveProperty('gradedBy')
+      expect(row).not.toHaveProperty('feedback')
+    }
+    expect(written.slice(0, 4).map((x) => x.score)).toEqual([1, 0.5, 1, 1])
+  })
+})
+
+describe('logAnswerForSession refuses written questions', () => {
+  it('writes nothing for an open exercise, whatever the answer', async () => {
+    tx.studySession.findUnique.mockResolvedValue({ status: 'active', mode: 'study' })
+    tx.sessionExercise.findUnique.mockResolvedValue({ exercise: openEx('e1') })
+    expect(await logAnswerForSession('s', 'e1', 'A long written answer to the question.')).toBeNull()
+    expect(tx.exerciseLog.create).not.toHaveBeenCalled()
+    expect(tx.sessionExercise.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('logOpenAnswerForSession', () => {
+  const grade = { score: 0.5, isCorrect: false, gradedBy: 'model' as const, feedback }
+  beforeEach(() => {
+    tx.studySession.findUnique.mockResolvedValue({ status: 'active', mode: 'study', startTime: NOW })
+    tx.sessionExercise.findUnique.mockResolvedValue({ exercise: openEx('e1'), timeSpentSec: 10 })
+    tx.exerciseLog.create.mockResolvedValue({})
+  })
+
+  it('logs the grade with gradedBy and the feedback JSON, sharing the duration and assisted rules', async () => {
+    const r = await logOpenAnswerForSession('s', 'e1', 'My written answer.', grade, { durationSec: 5, assisted: true })
+    expect(r).toEqual({ score: 0.5, isCorrect: false, gradedBy: 'model', feedback })
+    const data = tx.exerciseLog.create.mock.calls[0][0].data
+    expect(data).toMatchObject({ sessionId: 's', exerciseId: 'e1', isCorrect: false, score: 0.5, assisted: true, userAnswer: 'My written answer.', gradedBy: 'model' })
+    expect(data.duration).toBeGreaterThanOrEqual(10)
+    expect(JSON.parse(data.feedback)).toEqual(feedback)
+  })
+
+  it('refuses a question that is not open, an exam, a finished session and a non-item', async () => {
+    tx.sessionExercise.findUnique.mockResolvedValueOnce({ exercise: ex('e1', 'A') })
+    expect(await logOpenAnswerForSession('s', 'e1', 'x', grade)).toBeNull()
+    tx.studySession.findUnique.mockResolvedValueOnce({ status: 'active', mode: 'exam' })
+    expect(await logOpenAnswerForSession('s', 'e1', 'x', grade)).toBeNull()
+    tx.studySession.findUnique.mockResolvedValueOnce({ status: 'completed', mode: 'study' })
+    expect(await logOpenAnswerForSession('s', 'e1', 'x', grade)).toBeNull()
+    tx.sessionExercise.findUnique.mockResolvedValueOnce(null)
+    expect(await logOpenAnswerForSession('s', 'e1', 'x', grade)).toBeNull()
+    expect(tx.exerciseLog.create).not.toHaveBeenCalled()
+  })
+
+  it('returns the stored result when the answer was logged first elsewhere (first attempt wins)', async () => {
+    db.$transaction.mockRejectedValueOnce(Object.assign(new Error('Unique'), { code: 'P2002' }))
+    db.exerciseLog.findUnique.mockResolvedValue({ score: 1, isCorrect: true, gradedBy: 'self', feedback: JSON.stringify({ v: 1, keyPoints: [], misconceptions: [], text: '', selfScore: 1 }) })
+    expect(await logOpenAnswerForSession('s', 'e1', 'x', grade)).toEqual({
+      score: 1,
+      isCorrect: true,
+      gradedBy: 'self',
+      feedback: { v: 1, keyPoints: [], misconceptions: [], text: '', selfScore: 1 },
+    })
+  })
+})
+
+describe('openAnswerPreconditions', () => {
+  const item = (over: Record<string, unknown> = {}) => ({
+    exercise: { exerciseType: 'open', questionText: 'Q?', correctAnswer: 'Model.', keyPoints: '["one","two"]', topic: { course: { profile: null } }, ...over },
+  })
+  beforeEach(() => {
+    db.studySession.findUnique.mockResolvedValue({ status: 'active', mode: 'study' })
+    db.sessionExercise.findUnique.mockResolvedValue(item())
+    db.exerciseLog.findUnique.mockResolvedValue(null)
+  })
+
+  it('gives the grader its inputs for an unanswered open item of an active study session', async () => {
+    expect(await openAnswerPreconditions('s', 'e1')).toEqual({
+      ok: true,
+      existing: null,
+      exercise: { questionText: 'Q?', modelAnswer: 'Model.', keyPoints: ['one', 'two'] },
+      language: 'en',
+    })
+  })
+
+  it('returns the stored result, without the exercise, once it is answered (also after the session ended)', async () => {
+    db.studySession.findUnique.mockResolvedValue({ status: 'completed', mode: 'study' })
+    db.exerciseLog.findUnique.mockResolvedValue({ score: 0.5, isCorrect: false, gradedBy: 'model', feedback: JSON.stringify(feedback) })
+    expect(await openAnswerPreconditions('s', 'e1')).toEqual({
+      ok: true,
+      existing: { score: 0.5, isCorrect: false, gradedBy: 'model', feedback },
+      exercise: null,
+      language: 'en',
+    })
+  })
+
+  it.each([
+    ['an unknown session', () => db.studySession.findUnique.mockResolvedValue(null), 'not_found'],
+    ['a question that is not an item', () => db.sessionExercise.findUnique.mockResolvedValue(null), 'not_item'],
+    ['a question that is not open', () => db.sessionExercise.findUnique.mockResolvedValue(item({ exerciseType: 'single_choice' })), 'not_open'],
+    ['a finished session', () => db.studySession.findUnique.mockResolvedValue({ status: 'completed', mode: 'study' }), 'not_active'],
+    ['an exam', () => db.studySession.findUnique.mockResolvedValue({ status: 'active', mode: 'exam' }), 'not_active'],
+  ])('refuses %s', async (_name, arrange, reason) => {
+    arrange()
+    expect(await openAnswerPreconditions('s', 'e1')).toEqual({ ok: false, reason })
+  })
+})
+
+describe('session state and results carry the written-answer details only on written answers', () => {
+  it('adds gradedBy and the parsed feedback to a graded open log and nothing to other logs', async () => {
+    db.studySession.findUnique.mockResolvedValue({
+      id: 's', courseId: 'c1', title: 'T', mode: 'study', status: 'active', timeLimit: null, deadline: null, targetCount: 2,
+      topicIds: '["t1"]', currentPosition: 0, sourcingMix: 50, startTime: NOW, endTime: null, studyPlanId: null,
+    })
+    const row = (id: string) => ({ id, topicId: 't1', questionText: 'Q', exerciseType: 'single_choice', choices: '[]', correctAnswer: 'A', explanation: null, status: 'active', topic: { id: 't1' } })
+    db.sessionExercise.findMany.mockResolvedValue([
+      { position: 0, draftAnswer: null, flagged: false, exercise: row('a') },
+      { position: 1, draftAnswer: null, flagged: false, exercise: row('b') },
+    ])
+    db.exerciseLog.findMany.mockResolvedValue([
+      { exerciseId: 'a', isCorrect: false, score: 0.5, userAnswer: 'text', gradedBy: 'model', feedback: JSON.stringify(feedback) },
+      { exerciseId: 'b', isCorrect: true, score: 1, userAnswer: 'A', gradedBy: null, feedback: null },
+    ])
+    const st = await buildSessionState('s', undefined, NOW)
+    expect(st?.items[0].log).toEqual({ isCorrect: false, score: 0.5, userAnswer: 'text', gradedBy: 'model', feedback })
+    expect(st?.items[1].log).toEqual({ isCorrect: true, score: 1, userAnswer: 'A' })
+    expect(db.sessionExercise.findMany.mock.calls[0][0].select.exercise.select.keyPoints).toBe(true)
+  })
+
+  it('a pending written answer reads as a score of 0 with gradedBy pending', async () => {
+    db.sessionExercise.findMany.mockResolvedValue([
+      { position: 0, exercise: { id: 'a', questionText: 'QA', exerciseType: 'open', choices: '[]', correctAnswer: 'M' } },
+    ])
+    db.exerciseLog.findMany.mockResolvedValue([{ exerciseId: 'a', isCorrect: false, score: null, userAnswer: 'text', gradedBy: 'pending', feedback: null }])
+    const r = await getSessionResultsFor('s')
+    expect(r[0].log).toEqual({ isCorrect: false, score: 0, userAnswer: 'text', gradedBy: 'pending', feedback: null })
   })
 })

@@ -3,6 +3,7 @@ export { fileLinkInstructions, voiceFileLinkInstructions } from './linkInstructi
 export { subjectGuidance, LEGACY_COURSE_CODES } from './legacySubjectGuidance'
 export { explainMistakePrompt, enrichExercisePrompt, capEnrichmentContext, ENRICH_CONTEXT_MAX_CHARS, generateExercisePrompt, GENERATE_EXERCISE_PROMPT_VERSION } from './exercise'
 export { blindSolvePrompt, BLIND_SOLVE_PROMPT_VERSION } from './blindSolve'
+export { gradeOpenAnswerPrompt, GRADE_OPEN_PROMPT_VERSION } from './openAnswer'
 export { examDiagnosisPrompt, globalDiagnosisPrompt } from './diagnosis'
 export { plannerChatPrompt, studyPlanPrompt } from './planner'
 export { moduleSummaryPrompt } from './summary'

@@ -248,3 +248,25 @@ describe('the "Select an option" placeholder stored as a choice', () => {
     expect(answerDisplayLines(ex, JSON.stringify({ '[Dropdown 1]': 'First stage' }))).toEqual(['First stage'])
   })
 })
+
+describe('open (written) questions', () => {
+  const open: GradableExercise = {
+    exerciseType: 'open',
+    choices: '[]',
+    correctAnswer: 'A fixed-effects regression removes anything constant within a unit over time.',
+    questionText: 'Explain why a fixed-effects regression removes time-invariant differences between groups.',
+  }
+  it('gradeAnswer gives zero: the model grades written answers, never this grader', () => {
+    expect(gradeAnswer(open, 'Because the unit means are subtracted out of every variable.')).toEqual({ score: 0, isCorrect: false })
+    expect(gradeAnswer(open, open.correctAnswer)).toEqual({ score: 0, isCorrect: false })
+    expect(gradeAnswer(open, '')).toEqual({ score: 0, isCorrect: false })
+  })
+  it('is never re-read as another type, even when its text says "select all that apply"', () => {
+    expect(resolveExerciseType(open)).toBe('open')
+    expect(resolveExerciseType({ ...open, questionText: 'Select all that apply and explain.' })).toBe('open')
+    expect(resolveExerciseType({ ...open, choices: '["[Dropdown 1] a"]' })).toBe('open')
+  })
+  it('shows the student\'s text as it is', () => {
+    expect(answerDisplayLines(open, 'My answer.')).toEqual(['My answer.'])
+  })
+})

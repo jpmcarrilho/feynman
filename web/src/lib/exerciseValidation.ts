@@ -14,8 +14,9 @@
  *     `JSON.parse(correctAnswer).includes(choice)` (exact strings).
  */
 import { gradeAnswer, normalize, resolveExerciseType } from '@/lib/grading'
+import { MODEL_ANSWER_MAX_CHARS, OPEN_KEY_POINTS, parseKeyPoints } from '@/lib/openAnswer'
 
-export type ExerciseKind = 'single_choice' | 'multiple_choice' | 'numeric' | 'dropdown'
+export type ExerciseKind = 'single_choice' | 'multiple_choice' | 'numeric' | 'dropdown' | 'open'
 
 export interface ValidatableExercise {
   questionText: string
@@ -24,6 +25,8 @@ export interface ValidatableExercise {
   choices: string[] | string
   correctAnswer: string
   explanation?: string | null
+  /** Open questions only: the key points as an array or the stored JSON string. */
+  keyPoints?: string[] | string | null
 }
 
 export interface ValidationIssue {
@@ -45,6 +48,9 @@ export interface ValidationOptions {
 }
 /** Single choice with a stated answer may have two options (true/false) when the question was imported. */
 export const IMPORTED_SINGLE_CHOICE_MIN = 2
+
+/** Length limits of the stored parts of an open question (the model answer's upper limit is MODEL_ANSWER_MAX_CHARS). */
+export const OPEN_ANSWER_LIMITS = { modelAnswerMin: 40, keyPointMin: 5, keyPointMax: 300 } as const
 
 export const DROPDOWN_PLACEHOLDER = '[Dropdown 1]'
 
@@ -130,7 +136,7 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
   const add = (code: string, message: string) => issues.push({ code, message })
 
   const type = ex.exerciseType as ExerciseKind
-  if (!['single_choice', 'multiple_choice', 'numeric', 'dropdown'].includes(type)) {
+  if (!['single_choice', 'multiple_choice', 'numeric', 'dropdown', 'open'].includes(type)) {
     add('unknown_type', `Unknown exercise type "${ex.exerciseType}".`)
     return issues
   }
@@ -153,6 +159,11 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
   // LaTeX in the texts that are rendered with markdown + KaTeX
   const rendered: [string, string][] = [['question', questionText], ['explanation', ex.explanation ?? '']]
   if (type !== 'dropdown') choices.forEach((c, i) => rendered.push([`choice ${i + 1}`, c]))
+  const keyPoints = type === 'open' ? parseKeyPoints(ex.keyPoints) : []
+  if (type === 'open') {
+    rendered.push(['model answer', ex.correctAnswer ?? ''])
+    keyPoints.forEach((k, i) => rendered.push([`key point ${i + 1}`, k]))
+  }
   for (const [where, text] of rendered) {
     for (const p of latexProblems(text)) add(`latex_${p}`, `${where}: ${p.replace(/_/g, ' ')}.`)
   }
@@ -198,6 +209,23 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
       const t = answer.trim()
       if (!PLAIN_NUMBER.test(t) || !Number.isFinite(Number(t))) add('answer_not_number', 'The correct answer is not a plain finite number.')
       else if (!gradeAnswer(gradable, t).isCorrect) add('ungradable_answer', 'The correct number does not grade as correct.')
+      break
+    }
+    case 'open': {
+      if (choices.length > 0) add('open_has_choices', 'An open question must have no choices.')
+      if (/\[Dropdown \d+\]|\[BLANK\]/.test(questionText)) add('open_has_placeholder', 'An open question cannot contain a [Dropdown n] or [BLANK] placeholder.')
+      if (/which\s+of\s+the\s+following/i.test(questionText)) add('open_which_of_following', 'An open question cannot ask "which of the following".')
+      const len = answer.trim().length
+      if (len < OPEN_ANSWER_LIMITS.modelAnswerMin || len > MODEL_ANSWER_MAX_CHARS) {
+        add('model_answer_length', `The model answer needs ${OPEN_ANSWER_LIMITS.modelAnswerMin}-${MODEL_ANSWER_MAX_CHARS} characters, has ${len}.`)
+      }
+      if (keyPoints.length < OPEN_KEY_POINTS.min || keyPoints.length > OPEN_KEY_POINTS.max) {
+        add('key_point_count', `An open question needs ${OPEN_KEY_POINTS.min}-${OPEN_KEY_POINTS.max} key points, has ${keyPoints.length}.`)
+      }
+      if (hasDuplicates(keyPoints)) add('duplicate_key_points', 'Two key points are the same.')
+      if (keyPoints.some((k) => k.length < OPEN_ANSWER_LIMITS.keyPointMin || k.length > OPEN_ANSWER_LIMITS.keyPointMax)) {
+        add('key_point_length', `A key point needs ${OPEN_ANSWER_LIMITS.keyPointMin}-${OPEN_ANSWER_LIMITS.keyPointMax} characters.`)
+      }
       break
     }
     case 'dropdown': {
@@ -249,8 +277,8 @@ export function deriveChoiceAnswer(
 ): { ok: true; correctAnswer: string } | { ok: false; issue: ValidationIssue } {
   const fail = (message: string) => ({ ok: false as const, issue: { code: INVALID_CHOICE_INDEXES, message } })
   const list = Array.isArray(indexes) ? indexes : []
-  if (type === 'numeric') {
-    return list.length === 0 ? { ok: true, correctAnswer: fallback } : fail('A numeric question must have no correct choice indexes.')
+  if (type === 'numeric' || type === 'open') {
+    return list.length === 0 ? { ok: true, correctAnswer: fallback } : fail(`A ${type} question must have no correct choice indexes.`)
   }
   if (type !== 'single_choice' && type !== 'multiple_choice' && type !== 'dropdown') return { ok: true, correctAnswer: fallback }
   if (list.length === 0) return fail('No correct choice index was given.')

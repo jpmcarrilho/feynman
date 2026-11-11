@@ -1,5 +1,7 @@
 import { prisma } from '@/lib/db'
 import { gradeAnswer, logScore } from '@/lib/grading'
+import { parseKeyPoints, parseOpenFeedback, type GradedBy, type OpenFeedback } from '@/lib/openAnswer'
+import { parseProfile } from '@/lib/studyspace/profile'
 
 const MAX_ANSWER_LENGTH = 20_000
 /** Most seconds one save may add to a question's time. */
@@ -60,6 +62,7 @@ export const EXERCISE_CLIENT_SELECT = {
   originalQuestionText: true,
   enrichedAt: true,
   reportedReason: true,
+  keyPoints: true,
   createdAt: true,
   topic: {
     select: {
@@ -99,6 +102,17 @@ export function parseIdList(raw: string | null | undefined): string[] {
 // Types returned to the client
 // ---------------------------------------------------------------------------------------------------------------
 
+/**
+ * Written-answer details of a log. Present only on logs that have a `gradedBy` (open answers); logs of the four
+ * key-graded types, and every log written before open questions, carry neither field.
+ */
+export type OpenLogExtras = { gradedBy?: GradedBy; feedback?: OpenFeedback | null }
+
+/** The extras of a stored log row (nothing for a key-graded or older log). */
+function openLogExtras(log: { gradedBy?: string | null; feedback?: string | null }): OpenLogExtras {
+  return log.gradedBy ? { gradedBy: log.gradedBy as GradedBy, feedback: parseOpenFeedback(log.feedback) } : {}
+}
+
 export type ClientExercise = {
   id: string
   topicId: string
@@ -116,7 +130,7 @@ export type SessionStateItem = {
   exercise: ClientExercise
   draftAnswer: string | null
   flagged: boolean
-  log: { isCorrect: boolean; score: number; userAnswer: string | null } | null
+  log: ({ isCorrect: boolean; score: number; userAnswer: string | null } & OpenLogExtras) | null
 }
 
 export type SessionState = {
@@ -195,22 +209,35 @@ async function submitOnce(sessionId: string, answers: Record<string, string> | u
     const have = new Map(existing.map((l) => [l.exerciseId, l]))
 
     const created: { exerciseId: string; score: number; isCorrect: boolean }[] = []
-    const data = []
+    const data: {
+      sessionId: string
+      exerciseId: string
+      isCorrect: boolean
+      score: number | null
+      userAnswer: string
+      duration: number
+      gradedBy?: GradedBy
+    }[] = []
     for (const ex of exercises) {
       if (have.has(ex.id)) continue
       const raw = Object.prototype.hasOwnProperty.call(passed, ex.id) ? passed[ex.id] : draftById.get(ex.id)
       // Unanswered questions are logged too, with an empty answer (the same value the exam flow has always stored)
       const userAnswer = typeof raw === 'string' ? raw.slice(0, MAX_ANSWER_LENGTH) : ''
-      const g = gradeAnswer(ex, userAnswer)
+      // A written answer is checked by the model after the exam is submitted: until then it is `pending` with no score
+      // (logScore counts it 0 everywhere). An empty one is simply 0 (gradedBy stays null). The other types grade here.
+      const isOpen = ex.exerciseType === 'open'
+      const pendingOpen = isOpen && userAnswer.trim() !== ''
+      const g = pendingOpen ? { score: 0, isCorrect: false } : gradeAnswer(ex, userAnswer)
       created.push({ exerciseId: ex.id, score: g.score, isCorrect: g.isCorrect })
       data.push({
         sessionId,
         exerciseId: ex.id,
         isCorrect: g.isCorrect,
-        score: g.score,
+        score: pendingOpen ? null : g.score,
         userAnswer,
         duration: logDuration(timeById.get(ex.id), session.startTime, now),
         // The proctor gives no help in an exam, so there is nothing to record: the default (false) stays
+        ...(pendingOpen ? { gradedBy: 'pending' as const } : {}),
       })
     }
     if (data.length > 0) await tx.exerciseLog.createMany({ data })
@@ -420,7 +447,7 @@ export async function buildSessionState(sessionId: string, courseId?: string, no
     }),
     prisma.exerciseLog.findMany({
       where: { sessionId },
-      select: { exerciseId: true, isCorrect: true, score: true, userAnswer: true },
+      select: { exerciseId: true, isCorrect: true, score: true, userAnswer: true, gradedBy: true, feedback: true },
     }),
   ])
   const logByExercise = new Map(logs.map((l) => [l.exerciseId, l]))
@@ -436,7 +463,7 @@ export async function buildSessionState(sessionId: string, courseId?: string, no
       exercise: i.exercise as unknown as ClientExercise,
       draftAnswer: i.draftAnswer,
       flagged: i.flagged,
-      log: log ? { isCorrect: log.isCorrect, score: logScore(log), userAnswer: log.userAnswer } : null,
+      log: log ? { isCorrect: log.isCorrect, score: logScore(log), userAnswer: log.userAnswer, ...openLogExtras(log) } : null,
     }
   })
 
@@ -603,9 +630,78 @@ export async function setCurrentPositionFor(sessionId: string, position: number,
   return res.count > 0 ? { ok: true } : { ok: false, reason: 'not_active' }
 }
 
+/** What a study answer is stored as: the grade, and for a written answer who graded it and the feedback. */
+type StudyLogDecision = { score: number; isCorrect: boolean; gradedBy?: GradedBy; feedback?: OpenFeedback }
+type StudyLogExercise = { exerciseType: string; choices: string; correctAnswer: string; questionText: string }
+
+/**
+ * Writes the log of one answer of an active study session in one transaction, first attempt wins. `decide` sees the
+ * session item's exercise and returns what to store, or null to refuse (nothing is written). A repeat for the same
+ * (sessionId, exerciseId) returns the stored result. Shared by logAnswerForSession and logOpenAnswerForSession so the
+ * duration and `assisted` handling cannot differ.
+ */
+async function writeStudyLog(
+  sessionId: string,
+  exerciseId: string,
+  userAnswer: string,
+  opts: { durationSec?: number; assisted?: boolean } | undefined,
+  decide: (exercise: StudyLogExercise) => StudyLogDecision | null,
+): Promise<StudyLogDecision | null> {
+  if (typeof userAnswer !== 'string' || typeof sessionId !== 'string' || typeof exerciseId !== 'string') return null
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const session = await tx.studySession.findUnique({ where: { id: sessionId }, select: { status: true, mode: true, startTime: true } })
+      if (!session || session.status !== 'active' || session.mode === 'exam') return null
+      const item = await tx.sessionExercise.findUnique({
+        where: { sessionId_exerciseId: { sessionId, exerciseId } },
+        select: { timeSpentSec: true, exercise: { select: { exerciseType: true, choices: true, correctAnswer: true, questionText: true } } },
+      })
+      if (!item) return null
+      const decision = decide(item.exercise)
+      if (!decision) return null
+      const stored = Math.max(0, item.timeSpentSec ?? 0)
+      const duration = Math.min(MAX_LOG_DURATION_SEC, stored + boundedIncrement(opts?.durationSec, stored, session.startTime, new Date()))
+      await tx.exerciseLog.create({
+        data: {
+          sessionId,
+          exerciseId,
+          isCorrect: decision.isCorrect,
+          score: decision.score,
+          assisted: opts?.assisted === true,
+          userAnswer,
+          duration,
+          ...(decision.gradedBy ? { gradedBy: decision.gradedBy, feedback: JSON.stringify(decision.feedback ?? null) } : {}),
+        },
+      })
+      if (duration !== stored) await tx.sessionExercise.update({ where: { sessionId_exerciseId: { sessionId, exerciseId } }, data: { timeSpentSec: duration } })
+      return decision
+    })
+  } catch (error) {
+    // First attempt wins: a second log for the same (sessionId, exerciseId) violates the unique index
+    if ((error as { code?: string })?.code === 'P2002') {
+      const existing = await prisma.exerciseLog.findUnique({
+        where: { sessionId_exerciseId: { sessionId, exerciseId } },
+        select: { score: true, isCorrect: true, gradedBy: true, feedback: true },
+      })
+      return existing ? storedDecision(existing) : null
+    }
+    console.error('Failed to log answer (likely stale session):', error instanceof Error ? error.message : error)
+    return null
+  }
+}
+
+function storedDecision(log: { score: number | null; isCorrect: boolean; gradedBy?: string | null; feedback?: string | null }): StudyLogDecision {
+  return {
+    score: logScore(log),
+    isCorrect: log.isCorrect,
+    ...(log.gradedBy ? { gradedBy: log.gradedBy as GradedBy, feedback: parseOpenFeedback(log.feedback) ?? undefined } : {}),
+  }
+}
+
 /**
  * Grades and logs one answer of a study session on the server. Accepted only for an item of an active study session
- * (an exam collects drafts and is graded by the submit); anything else returns null and writes nothing.
+ * (an exam collects drafts and is graded by the submit); anything else returns null and writes nothing. A written
+ * ("open") question is refused here too: it is checked by the model through logOpenAnswerForSession.
  * First attempt wins: a repeat for the same (sessionId, exerciseId) returns the stored result.
  *
  * `opts.durationSec` is the visible seconds not yet saved with recordStudyTimeFor (the client sends what it still
@@ -620,44 +716,84 @@ export async function logAnswerForSession(
   userAnswer: string,
   opts?: { durationSec?: number; assisted?: boolean },
 ): Promise<{ score: number; isCorrect: boolean } | null> {
-  if (typeof userAnswer !== 'string' || typeof sessionId !== 'string' || typeof exerciseId !== 'string') return null
-  try {
-    return await prisma.$transaction(async (tx) => {
-      const session = await tx.studySession.findUnique({ where: { id: sessionId }, select: { status: true, mode: true, startTime: true } })
-      if (!session || session.status !== 'active' || session.mode === 'exam') return null
-      const item = await tx.sessionExercise.findUnique({
-        where: { sessionId_exerciseId: { sessionId, exerciseId } },
-        select: { timeSpentSec: true, exercise: { select: { exerciseType: true, choices: true, correctAnswer: true, questionText: true } } },
-      })
-      if (!item) return null
-      const graded = gradeAnswer(item.exercise, userAnswer)
-      const stored = Math.max(0, item.timeSpentSec ?? 0)
-      const duration = Math.min(MAX_LOG_DURATION_SEC, stored + boundedIncrement(opts?.durationSec, stored, session.startTime, new Date()))
-      await tx.exerciseLog.create({
-        data: {
-          sessionId,
-          exerciseId,
-          isCorrect: graded.isCorrect,
-          score: graded.score,
-          assisted: opts?.assisted === true,
-          userAnswer,
-          duration,
-        },
-      })
-      if (duration !== stored) await tx.sessionExercise.update({ where: { sessionId_exerciseId: { sessionId, exerciseId } }, data: { timeSpentSec: duration } })
-      return graded
-    })
-  } catch (error) {
-    // First attempt wins: a second log for the same (sessionId, exerciseId) violates the unique index
-    if ((error as { code?: string })?.code === 'P2002') {
-      const existing = await prisma.exerciseLog.findUnique({
-        where: { sessionId_exerciseId: { sessionId, exerciseId } },
-        select: { score: true, isCorrect: true },
-      })
-      return existing ? { score: logScore(existing), isCorrect: existing.isCorrect } : null
+  const decision = await writeStudyLog(sessionId, exerciseId, userAnswer, opts, (exercise) =>
+    exercise.exerciseType === 'open' ? null : gradeAnswer(exercise, userAnswer),
+  )
+  return decision ? { score: decision.score, isCorrect: decision.isCorrect } : null
+}
+
+/** A written answer's stored result, as the answer route returns it. */
+export type OpenAnswerResult = { score: number; isCorrect: boolean; gradedBy: GradedBy; feedback: OpenFeedback | null }
+
+function toOpenAnswerResult(log: { score: number | null; isCorrect: boolean; gradedBy?: string | null; feedback?: string | null }): OpenAnswerResult {
+  return {
+    score: logScore(log),
+    isCorrect: log.isCorrect,
+    gradedBy: (log.gradedBy ?? 'model') as GradedBy,
+    feedback: parseOpenFeedback(log.feedback),
+  }
+}
+
+/**
+ * Logs a written answer of an active study session together with its grade (`model`, or `self` when the student scored
+ * it after the model could not check it). Same rules as logAnswerForSession (first attempt wins, duration, `assisted`);
+ * refuses anything that is not an `open` exercise. Returns null (nothing written) for a session that ended meanwhile.
+ */
+export async function logOpenAnswerForSession(
+  sessionId: string,
+  exerciseId: string,
+  userAnswer: string,
+  grade: { score: number; isCorrect: boolean; gradedBy: Exclude<GradedBy, 'pending'>; feedback: OpenFeedback },
+  opts?: { durationSec?: number; assisted?: boolean },
+): Promise<OpenAnswerResult | null> {
+  const decision = await writeStudyLog(sessionId, exerciseId, userAnswer, opts, (exercise) =>
+    exercise.exerciseType === 'open' ? grade : null,
+  )
+  return decision
+    ? { score: decision.score, isCorrect: decision.isCorrect, gradedBy: decision.gradedBy ?? grade.gradedBy, feedback: decision.feedback ?? null }
+    : null
+}
+
+export type OpenAnswerPreconditions =
+  | { ok: false; reason: 'not_found' | 'not_active' | 'not_item' | 'not_open' }
+  | {
+      ok: true
+      /** The stored result when this question was already answered (no model call is made then); the session may have ended since. */
+      existing: OpenAnswerResult | null
+      /** What the grader needs; read only for a question that is still to be answered. */
+      exercise: { questionText: string; modelAnswer: string; keyPoints: string[] } | null
+      language: string
     }
-    console.error('Failed to log answer (likely stale session):', error instanceof Error ? error.message : error)
-    return null
+
+/**
+ * Everything the answer route checks before it calls the model: the question is an `open` item of the session; if it
+ * already has a log, that log; otherwise the session must be an active study session. Reads only.
+ */
+export async function openAnswerPreconditions(sessionId: string, exerciseId: string): Promise<OpenAnswerPreconditions> {
+  const session = await prisma.studySession.findUnique({ where: { id: sessionId }, select: { status: true, mode: true } })
+  if (!session) return { ok: false, reason: 'not_found' }
+  const item = await prisma.sessionExercise.findUnique({
+    where: { sessionId_exerciseId: { sessionId, exerciseId } },
+    select: {
+      exercise: {
+        select: { exerciseType: true, questionText: true, correctAnswer: true, keyPoints: true, topic: { select: { course: { select: { profile: true } } } } },
+      },
+    },
+  })
+  if (!item) return { ok: false, reason: 'not_item' }
+  if (item.exercise.exerciseType !== 'open') return { ok: false, reason: 'not_open' }
+  const language = parseProfile(item.exercise.topic.course?.profile)?.contentLanguage ?? 'en'
+  const log = await prisma.exerciseLog.findUnique({
+    where: { sessionId_exerciseId: { sessionId, exerciseId } },
+    select: { score: true, isCorrect: true, gradedBy: true, feedback: true },
+  })
+  if (log) return { ok: true, existing: toOpenAnswerResult(log), exercise: null, language }
+  if (session.status !== 'active' || session.mode === 'exam') return { ok: false, reason: 'not_active' }
+  return {
+    ok: true,
+    existing: null,
+    exercise: { questionText: item.exercise.questionText, modelAnswer: item.exercise.correctAnswer, keyPoints: parseKeyPoints(item.exercise.keyPoints) },
+    language,
   }
 }
 
@@ -674,7 +810,7 @@ export type SessionResultItem = {
   choices: string
   correctAnswer: string
   /** null: the question was never answered (no log). */
-  log: { isCorrect: boolean; score: number; userAnswer: string | null } | null
+  log: ({ isCorrect: boolean; score: number; userAnswer: string | null } & OpenLogExtras) | null
 }
 
 /**
@@ -688,7 +824,7 @@ export async function getSessionResultsFor(sessionId: string): Promise<SessionRe
       orderBy: { position: 'asc' },
       select: { position: true, exercise: { select: { id: true, questionText: true, exerciseType: true, choices: true, correctAnswer: true } } },
     }),
-    prisma.exerciseLog.findMany({ where: { sessionId }, select: { exerciseId: true, isCorrect: true, score: true, userAnswer: true } }),
+    prisma.exerciseLog.findMany({ where: { sessionId }, select: { exerciseId: true, isCorrect: true, score: true, userAnswer: true, gradedBy: true, feedback: true } }),
   ])
   const logByExercise = new Map(logs.map((l) => [l.exerciseId, l]))
   return items.map((i) => {
@@ -700,7 +836,7 @@ export async function getSessionResultsFor(sessionId: string): Promise<SessionRe
       exerciseType: i.exercise.exerciseType,
       choices: i.exercise.choices,
       correctAnswer: i.exercise.correctAnswer,
-      log: log ? { isCorrect: log.isCorrect, score: logScore(log), userAnswer: log.userAnswer } : null,
+      log: log ? { isCorrect: log.isCorrect, score: logScore(log), userAnswer: log.userAnswer, ...openLogExtras(log) } : null,
     }
   })
 }
