@@ -4,6 +4,17 @@ import { gradeAnswer, logScore } from '@/lib/grading'
 // Visible time per question is measured from T18 on; until then every log keeps the 30 s it has always had.
 const DEFAULT_DURATION_SEC = 30
 const MAX_ANSWER_LENGTH = 20_000
+const MAX_SECONDS_PER_SAVE = 3600
+
+/**
+ * How long after an exam's deadline the server still accepts the student's last draft saves and flags (a save that
+ * left the browser just before the clock ran out can arrive late). Past deadline + grace, stored drafts are final:
+ * answers passed to a submit are ignored, saves are rejected, and any read finalizes the exam with the stored drafts.
+ */
+export const EXAM_GRACE_MS = 30_000
+
+/** Most overdue exams one read finalizes (a backlog is worked off over several reads). */
+const MAX_FINALIZE_PER_CALL = 20
 
 export interface ExamSubmission {
   /** Sum of per-question scores (partial credit), 0..total. */
@@ -14,6 +25,38 @@ export interface ExamSubmission {
   correctCount: number
 }
 
+// Every exercise column plus the topic without its (up to 830k chars) content.
+export const EXERCISE_CLIENT_SELECT = {
+  id: true,
+  topicId: true,
+  questionText: true,
+  exerciseType: true,
+  choices: true,
+  correctAnswer: true,
+  explanation: true,
+  isGraded: true,
+  origin: true,
+  status: true,
+  promptVersion: true,
+  originalQuestionText: true,
+  enrichedAt: true,
+  reportedReason: true,
+  createdAt: true,
+  topic: {
+    select: {
+      id: true,
+      courseId: true,
+      title: true,
+      week: true,
+      className: true,
+      unit: true,
+      resourceType: true,
+      isQuantitative: true,
+      course: { select: { id: true, code: true, title: true } },
+    },
+  },
+} as const
+
 const GRADING_SELECT = {
   id: true,
   exerciseType: true,
@@ -22,7 +65,8 @@ const GRADING_SELECT = {
   questionText: true,
 } as const
 
-function parseIds(raw: string | null): string[] {
+/** Parses a JSON string[] column defensively. */
+export function parseIdList(raw: string | null | undefined): string[] {
   if (!raw) return []
   try {
     const parsed = JSON.parse(raw)
@@ -32,18 +76,86 @@ function parseIds(raw: string | null): string[] {
   }
 }
 
-async function submitOnce(sessionId: string, answers: Record<string, string>): Promise<ExamSubmission | null> {
+// ---------------------------------------------------------------------------------------------------------------
+// Types returned to the client
+// ---------------------------------------------------------------------------------------------------------------
+
+export type ClientExercise = {
+  id: string
+  topicId: string
+  questionText: string
+  exerciseType: string
+  choices: string | null
+  correctAnswer: string
+  explanation: string | null
+  status: string
+  topic: { id: string; courseId: string; title: string; week: string | null; course: { id: string; code: string; title: string } | null } & Record<string, unknown>
+} & Record<string, unknown>
+
+export type SessionStateItem = {
+  position: number
+  exercise: ClientExercise
+  draftAnswer: string | null
+  flagged: boolean
+  log: { isCorrect: boolean; score: number; userAnswer: string | null } | null
+}
+
+export type SessionState = {
+  session: {
+    id: string
+    courseId: string | null
+    title: string | null
+    mode: string
+    status: string
+    timeLimit: number | null
+    /** ISO time the exam ends (server clock); null for study sessions and for sessions without a limit. */
+    deadline: string | null
+    targetCount: number | null
+    /** The topics the session draws from. Empty = every topic of the session's course. */
+    topicIds: string[]
+    currentPosition: number
+    sourcingMix: number
+    startTime: string
+    endTime: string | null
+    studyPlanId: string | null
+  }
+  items: SessionStateItem[]
+  /** Questions still to be generated (targetCount - items); 0 once the session is over. */
+  missingCount: number
+  /** Server clock when this state was read (ISO). Clients derive their offset from it. */
+  serverNow: string
+}
+
+/** Why a small session action did nothing. */
+export type RejectReason = 'invalid' | 'not_found' | 'not_active' | 'not_item' | 'not_exam' | 'deadline_passed'
+export type MutationResult = { ok: true } | { ok: false; reason: RejectReason }
+
+// ---------------------------------------------------------------------------------------------------------------
+// Exam submission
+// ---------------------------------------------------------------------------------------------------------------
+
+async function submitOnce(sessionId: string, answers: Record<string, string> | undefined, now: Date): Promise<ExamSubmission | null> {
   return prisma.$transaction(async (tx) => {
     const session = await tx.studySession.findUnique({
       where: { id: sessionId },
-      select: { id: true, mode: true, status: true, exerciseIds: true },
+      select: { id: true, mode: true, status: true, deadline: true },
     })
     if (!session || session.mode !== 'exam' || session.status === 'cancelled') return null
 
-    const ids = parseIds(session.exerciseIds)
+    const items = await tx.sessionExercise.findMany({
+      where: { sessionId },
+      orderBy: { position: 'asc' },
+      select: { exerciseId: true, draftAnswer: true },
+    })
+    const ids = items.map((i) => i.exerciseId)
     const rows = ids.length > 0 ? await tx.exercise.findMany({ where: { id: { in: ids } }, select: GRADING_SELECT }) : []
     const byId = new Map(rows.map((r) => [r.id, r]))
+    const draftById = new Map(items.map((i) => [i.exerciseId, i.draftAnswer]))
     const exercises = ids.map((id) => byId.get(id)).filter((e): e is (typeof rows)[number] => !!e)
+
+    // Answers passed by the caller count only until deadline + grace; they never add answers for non-items (the loop
+    // walks the session's own items). Everything else uses the drafts stored on the server.
+    const passed = answers && (!session.deadline || now.getTime() <= session.deadline.getTime() + EXAM_GRACE_MS) ? answers : {}
 
     const existing = await tx.exerciseLog.findMany({
       where: { sessionId },
@@ -55,7 +167,7 @@ async function submitOnce(sessionId: string, answers: Record<string, string>): P
     const data = []
     for (const ex of exercises) {
       if (have.has(ex.id)) continue
-      const raw = Object.prototype.hasOwnProperty.call(answers, ex.id) ? answers[ex.id] : ''
+      const raw = Object.prototype.hasOwnProperty.call(passed, ex.id) ? passed[ex.id] : draftById.get(ex.id)
       // Unanswered questions are logged too, with an empty answer (the same value the exam flow has always stored)
       const userAnswer = typeof raw === 'string' ? raw.slice(0, MAX_ANSWER_LENGTH) : ''
       const g = gradeAnswer(ex, userAnswer)
@@ -72,7 +184,7 @@ async function submitOnce(sessionId: string, answers: Record<string, string>): P
     if (data.length > 0) await tx.exerciseLog.createMany({ data })
 
     if (session.status !== 'completed') {
-      await tx.studySession.update({ where: { id: sessionId }, data: { status: 'completed', endTime: new Date() } })
+      await tx.studySession.update({ where: { id: sessionId }, data: { status: 'completed', endTime: now } })
     }
 
     const examIds = new Set(exercises.map((e) => e.id))
@@ -88,17 +200,428 @@ async function submitOnce(sessionId: string, answers: Record<string, string>): P
 }
 
 /**
- * Grades every exercise of the exam on the server, creates the logs and completes the session in one transaction.
- * Safe to repeat: existing logs are kept, a completed session stays as it is, and a unique-constraint race between
- * two simultaneous submits is retried once (the second pass finds the rows and only reads).
+ * Grades every item of the exam on the server, creates the logs and completes the session in one transaction.
+ * Answers come from the drafts stored on the server; `answers` (optional) overrides them per exercise until the
+ * deadline plus the grace period. Safe to repeat: existing logs are kept, a completed session stays as it is, and a
+ * unique-constraint race between two simultaneous submits is retried once (the second pass finds the rows and only reads).
  * Returns null for an unknown session, a non-exam session or a cancelled exam.
  */
-export async function submitExamForSession(sessionId: string, answers: Record<string, string>): Promise<ExamSubmission | null> {
-  const safeAnswers = answers && typeof answers === 'object' ? answers : {}
+export async function submitExamForSession(
+  sessionId: string,
+  answers?: Record<string, string>,
+  now: Date = new Date(),
+): Promise<ExamSubmission | null> {
+  const safeAnswers = answers && typeof answers === 'object' ? answers : undefined
   try {
-    return await submitOnce(sessionId, safeAnswers)
+    return await submitOnce(sessionId, safeAnswers, now)
   } catch (error) {
-    if ((error as { code?: string })?.code === 'P2002') return submitOnce(sessionId, safeAnswers)
+    if ((error as { code?: string })?.code === 'P2002') return submitOnce(sessionId, safeAnswers, now)
     throw error
   }
+}
+
+/**
+ * Finalizes active exams whose deadline passed more than the grace period ago, with the drafts stored on the server.
+ * Every exam runs in its own idempotent transaction, so concurrent callers (two tabs, a list read and a state read)
+ * are harmless: the loser finds the work done. Failures are logged and never fail the read that triggered this.
+ * Scope: one session, one course, or (neither) all.
+ */
+export async function finalizeOverdueExams(
+  scope: { sessionId?: string; courseId?: string } = {},
+  now: Date = new Date(),
+): Promise<number> {
+  let done = 0
+  try {
+    const rows = await prisma.studySession.findMany({
+      where: {
+        status: 'active',
+        mode: 'exam',
+        deadline: { lt: new Date(now.getTime() - EXAM_GRACE_MS) },
+        ...(scope.sessionId ? { id: scope.sessionId } : {}),
+        ...(scope.courseId ? { courseId: scope.courseId } : {}),
+      },
+      select: { id: true },
+      take: MAX_FINALIZE_PER_CALL,
+    })
+    for (const row of rows) {
+      try {
+        if (await submitExamForSession(row.id, undefined, now)) done++
+      } catch (e) {
+        console.error('Failed to finalize overdue exam:', e instanceof Error ? e.message : e)
+      }
+    }
+  } catch (e) {
+    console.error('Failed to look for overdue exams:', e instanceof Error ? e.message : e)
+  }
+  return done
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Creating, ending and reading sessions
+// ---------------------------------------------------------------------------------------------------------------
+
+export interface NewSessionInput {
+  courseId: string | null
+  title: string
+  mode: 'study' | 'exam'
+  timeLimit: number | null
+  sourcingMix: number
+  topicIds: string[]
+  targetCount: number
+  exerciseIds: string[]
+  now?: Date
+}
+
+/** Creates the session and its positional items (0..n-1) in one transaction. exerciseIds is no longer written. */
+export async function createSessionWithItems(input: NewSessionInput) {
+  const now = input.now ?? new Date()
+  const deadline = input.mode === 'exam' && input.timeLimit ? new Date(now.getTime() + input.timeLimit * 1000) : null
+  return prisma.$transaction(async (tx) => {
+    const session = await tx.studySession.create({
+      data: {
+        status: 'active',
+        courseId: input.courseId,
+        title: input.title,
+        mode: input.mode,
+        timeLimit: input.timeLimit,
+        sourcingMix: input.sourcingMix,
+        topicIds: JSON.stringify(input.topicIds),
+        targetCount: input.targetCount,
+        deadline,
+        currentPosition: 0,
+        startTime: now,
+      },
+    })
+    if (input.exerciseIds.length > 0) {
+      await tx.sessionExercise.createMany({
+        data: input.exerciseIds.map((exerciseId, position) => ({ sessionId: session.id, exerciseId, position })),
+      })
+    }
+    return session
+  })
+}
+
+/**
+ * Ends the student's previous active session(s) in a scope before a new one starts, without destroying answers:
+ * a study session is marked completed (its logs and chat stay), an exam is submitted with the drafts stored on the
+ * server (graded, so nothing is lost). Sessions that belong to a study plan are plan items waiting to be studied and
+ * are left alone. Returns the ids that were ended.
+ */
+export async function endPreviousActiveSessions(scope: { courseId?: string }, now: Date = new Date()): Promise<string[]> {
+  const rows = await prisma.studySession.findMany({
+    where: {
+      status: 'active',
+      studyPlanId: null,
+      mode: { not: 'global_diagnosis' },
+      ...(scope.courseId ? { courseId: scope.courseId } : {}),
+    },
+    select: { id: true, mode: true },
+  })
+  const ended: string[] = []
+  for (const row of rows) {
+    if (row.mode === 'exam') {
+      await submitExamForSession(row.id, undefined, now)
+    } else {
+      await prisma.studySession.updateMany({ where: { id: row.id, status: 'active' }, data: { status: 'completed', endTime: now } })
+    }
+    ended.push(row.id)
+  }
+  return ended
+}
+
+/** Marks an active study session completed. An exam is submitted instead (graded with its stored drafts). */
+export async function completeSession(sessionId: string, now: Date = new Date()): Promise<boolean> {
+  const session = await prisma.studySession.findUnique({ where: { id: sessionId }, select: { mode: true, status: true } })
+  if (!session) return false
+  if (session.mode === 'exam') return (await submitExamForSession(sessionId, undefined, now)) !== null
+  if (session.status !== 'active') return true
+  await prisma.studySession.updateMany({ where: { id: sessionId, status: 'active' }, data: { status: 'completed', endTime: now } })
+  return true
+}
+
+/** Cancels an active session. A completed or already cancelled session is left as it is. */
+export async function cancelSession(sessionId: string, now: Date = new Date()): Promise<boolean> {
+  const res = await prisma.studySession.updateMany({ where: { id: sessionId, status: 'active' }, data: { status: 'cancelled', endTime: now } })
+  return res.count > 0
+}
+
+/**
+ * A timed exam that has no deadline yet (pre-created by a study plan) gets its clock the first time it is opened.
+ * Conditional write: two simultaneous opens set it once.
+ */
+async function startClockIfNeeded(sessionId: string, now: Date): Promise<void> {
+  const s = await prisma.studySession.findUnique({ where: { id: sessionId }, select: { mode: true, status: true, deadline: true, timeLimit: true } })
+  if (!s || s.mode !== 'exam' || s.status !== 'active' || s.deadline || !s.timeLimit) return
+  await prisma.studySession.updateMany({
+    where: { id: sessionId, status: 'active', deadline: null },
+    data: { deadline: new Date(now.getTime() + s.timeLimit * 1000) },
+  })
+}
+
+const SESSION_STATE_SELECT = {
+  id: true,
+  courseId: true,
+  title: true,
+  mode: true,
+  status: true,
+  timeLimit: true,
+  deadline: true,
+  targetCount: true,
+  topicIds: true,
+  currentPosition: true,
+  sourcingMix: true,
+  startTime: true,
+  endTime: true,
+  studyPlanId: true,
+} as const
+
+/** Builds the full state of one session from SessionExercise rows. Null when it does not exist (or, scoped, is another course's). */
+export async function buildSessionState(sessionId: string, courseId?: string, now: Date = new Date()): Promise<SessionState | null> {
+  const session = await prisma.studySession.findUnique({ where: { id: sessionId }, select: SESSION_STATE_SELECT })
+  if (!session || (courseId && session.courseId !== courseId)) return null
+
+  const [items, logs] = await Promise.all([
+    prisma.sessionExercise.findMany({
+      where: { sessionId },
+      orderBy: { position: 'asc' },
+      select: { position: true, draftAnswer: true, flagged: true, exercise: { select: EXERCISE_CLIENT_SELECT } },
+    }),
+    prisma.exerciseLog.findMany({
+      where: { sessionId },
+      select: { exerciseId: true, isCorrect: true, score: true, userAnswer: true },
+    }),
+  ])
+  const logByExercise = new Map(logs.map((l) => [l.exerciseId, l]))
+
+  // Sessions from before topicIds existed: the pool is the topics of the session's own questions, never the whole database
+  const stored = session.topicIds === null ? null : parseIdList(session.topicIds)
+  const topicIds = stored ?? [...new Set(items.map((i) => i.exercise.topicId))]
+
+  const stateItems: SessionStateItem[] = items.map((i) => {
+    const log = logByExercise.get(i.exercise.id)
+    return {
+      position: i.position,
+      exercise: i.exercise as unknown as ClientExercise,
+      draftAnswer: i.draftAnswer,
+      flagged: i.flagged,
+      log: log ? { isCorrect: log.isCorrect, score: logScore(log), userAnswer: log.userAnswer } : null,
+    }
+  })
+
+  const target = session.targetCount ?? items.length
+  return {
+    session: {
+      id: session.id,
+      courseId: session.courseId,
+      title: session.title,
+      mode: session.mode,
+      status: session.status,
+      timeLimit: session.timeLimit,
+      deadline: session.deadline ? session.deadline.toISOString() : null,
+      targetCount: session.targetCount,
+      topicIds,
+      currentPosition: session.currentPosition,
+      sourcingMix: session.sourcingMix,
+      startTime: session.startTime.toISOString(),
+      endTime: session.endTime ? session.endTime.toISOString() : null,
+      studyPlanId: session.studyPlanId,
+    },
+    items: stateItems,
+    missingCount: session.status === 'active' ? Math.max(0, target - items.length) : 0,
+    serverNow: now.toISOString(),
+  }
+}
+
+/** State of one session. An overdue exam is finalized first (stored drafts), a plan exam gets its clock on first open. */
+export async function getSessionStateFor(sessionId: string, courseId?: string, now: Date = new Date()): Promise<SessionState | null> {
+  await finalizeOverdueExams({ sessionId }, now)
+  await startClockIfNeeded(sessionId, now)
+  return buildSessionState(sessionId, courseId, now)
+}
+
+/**
+ * The latest active session of a scope (one course, or all courses when none is given). A session pre-created by a
+ * study plan counts only once the student touched it (an answer, draft, flag, a move, or a started clock).
+ */
+export async function getActiveSessionFor(courseId?: string, now: Date = new Date()): Promise<SessionState | null> {
+  await finalizeOverdueExams(courseId ? { courseId } : {}, now)
+  const candidates = await prisma.studySession.findMany({
+    where: { status: 'active', mode: { not: 'global_diagnosis' }, ...(courseId ? { courseId } : {}) },
+    orderBy: { startTime: 'desc' },
+    take: 25,
+    select: {
+      id: true,
+      studyPlanId: true,
+      deadline: true,
+      currentPosition: true,
+      _count: { select: { logs: true } },
+      items: { where: { OR: [{ draftAnswer: { not: null } }, { flagged: true }] }, select: { id: true }, take: 1 },
+    },
+  })
+  const pick = candidates.find((c) => !c.studyPlanId || c._count.logs > 0 || c.items.length > 0 || c.deadline !== null || c.currentPosition > 0)
+  if (!pick) return null
+  return buildSessionState(pick.id, courseId, now)
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Small writes: drafts, flags, position, answers
+// ---------------------------------------------------------------------------------------------------------------
+
+/** Row filter shared by the writes: the session must be active and, for exams, not past deadline + grace. */
+function openSessionFilter(now: Date) {
+  const cutoff = new Date(now.getTime() - EXAM_GRACE_MS)
+  return { status: 'active', OR: [{ deadline: null }, { deadline: { gte: cutoff } }] }
+}
+
+/** Explains why a write that matched no item did nothing. */
+async function whyRejected(sessionId: string, exerciseId: string, now: Date): Promise<RejectReason> {
+  const s = await prisma.studySession.findUnique({ where: { id: sessionId }, select: { status: true, deadline: true } })
+  if (!s) return 'not_found'
+  if (s.status !== 'active') return 'not_active'
+  if (s.deadline && now.getTime() > s.deadline.getTime() + EXAM_GRACE_MS) return 'deadline_passed'
+  const item = await prisma.sessionExercise.findUnique({ where: { sessionId_exerciseId: { sessionId, exerciseId } }, select: { id: true } })
+  return item ? 'not_active' : 'not_item'
+}
+
+/**
+ * Stores the exam draft of one question (null clears it) and adds the visible seconds spent since the last save.
+ * Accepted only for an item of an active exam and until deadline + grace; otherwise nothing changes.
+ * The status and deadline are checked inside the same write, so a draft cannot land after the exam was submitted.
+ */
+export async function saveDraftFor(
+  sessionId: string,
+  exerciseId: string,
+  draftAnswer: string | null,
+  timeSpentDeltaSec: number,
+  now: Date = new Date(),
+): Promise<MutationResult> {
+  if (typeof sessionId !== 'string' || typeof exerciseId !== 'string') return { ok: false, reason: 'invalid' }
+  if (draftAnswer !== null && typeof draftAnswer !== 'string') return { ok: false, reason: 'invalid' }
+  const text = draftAnswer === null || draftAnswer === '' ? null : draftAnswer.slice(0, MAX_ANSWER_LENGTH)
+  const delta = Number.isFinite(timeSpentDeltaSec) ? Math.max(0, Math.min(MAX_SECONDS_PER_SAVE, Math.round(timeSpentDeltaSec))) : 0
+  const res = await prisma.sessionExercise.updateMany({
+    where: { sessionId, exerciseId, session: { mode: 'exam', ...openSessionFilter(now) } },
+    data: delta > 0 ? { draftAnswer: text, timeSpentSec: { increment: delta } } : { draftAnswer: text },
+  })
+  if (res.count > 0) return { ok: true }
+  const reason = await whyRejected(sessionId, exerciseId, now)
+  if (reason === 'not_active') {
+    const s = await prisma.studySession.findUnique({ where: { id: sessionId }, select: { mode: true, status: true } })
+    if (s && s.status === 'active' && s.mode !== 'exam') return { ok: false, reason: 'not_exam' }
+  }
+  return { ok: false, reason }
+}
+
+/** Flags or unflags one question of an active session (an exam until deadline + grace). */
+export async function setFlaggedFor(sessionId: string, exerciseId: string, flagged: boolean, now: Date = new Date()): Promise<MutationResult> {
+  if (typeof sessionId !== 'string' || typeof exerciseId !== 'string' || typeof flagged !== 'boolean') return { ok: false, reason: 'invalid' }
+  const res = await prisma.sessionExercise.updateMany({
+    where: { sessionId, exerciseId, session: openSessionFilter(now) },
+    data: { flagged },
+  })
+  return res.count > 0 ? { ok: true } : { ok: false, reason: await whyRejected(sessionId, exerciseId, now) }
+}
+
+/** Remembers which question the student is on. Clamped to the session's questions; active sessions only. */
+export async function setCurrentPositionFor(sessionId: string, position: number, now: Date = new Date()): Promise<MutationResult> {
+  if (typeof sessionId !== 'string' || !Number.isFinite(position)) return { ok: false, reason: 'invalid' }
+  const s = await prisma.studySession.findUnique({
+    where: { id: sessionId },
+    select: { status: true, targetCount: true, _count: { select: { items: true } } },
+  })
+  if (!s) return { ok: false, reason: 'not_found' }
+  if (s.status !== 'active') return { ok: false, reason: 'not_active' }
+  const last = Math.max(0, Math.max(s.targetCount ?? 0, s._count.items) - 1)
+  const clamped = Math.max(0, Math.min(last, Math.floor(position)))
+  const res = await prisma.studySession.updateMany({ where: { id: sessionId, ...openSessionFilter(now) }, data: { currentPosition: clamped } })
+  return res.count > 0 ? { ok: true } : { ok: false, reason: 'not_active' }
+}
+
+/**
+ * Grades and logs one answer of a study session on the server. Accepted only for an item of an active study session
+ * (an exam collects drafts and is graded by the submit); anything else returns null and writes nothing.
+ * First attempt wins: a repeat for the same (sessionId, exerciseId) returns the stored result.
+ */
+export async function logAnswerForSession(
+  sessionId: string,
+  exerciseId: string,
+  userAnswer: string,
+  opts?: { duration?: number; assisted?: boolean },
+): Promise<{ score: number; isCorrect: boolean } | null> {
+  if (typeof userAnswer !== 'string' || typeof sessionId !== 'string' || typeof exerciseId !== 'string') return null
+  try {
+    return await prisma.$transaction(async (tx) => {
+      const session = await tx.studySession.findUnique({ where: { id: sessionId }, select: { status: true, mode: true } })
+      if (!session || session.status !== 'active' || session.mode === 'exam') return null
+      const item = await tx.sessionExercise.findUnique({
+        where: { sessionId_exerciseId: { sessionId, exerciseId } },
+        select: { exercise: { select: { exerciseType: true, choices: true, correctAnswer: true, questionText: true } } },
+      })
+      if (!item) return null
+      const graded = gradeAnswer(item.exercise, userAnswer)
+      const duration = Math.max(0, Math.min(3600, Math.round(opts?.duration ?? DEFAULT_DURATION_SEC)))
+      await tx.exerciseLog.create({
+        data: {
+          sessionId,
+          exerciseId,
+          isCorrect: graded.isCorrect,
+          score: graded.score,
+          assisted: opts?.assisted ?? false,
+          userAnswer,
+          duration,
+        },
+      })
+      return graded
+    })
+  } catch (error) {
+    // First attempt wins: a second log for the same (sessionId, exerciseId) violates the unique index
+    if ((error as { code?: string })?.code === 'P2002') {
+      const existing = await prisma.exerciseLog.findUnique({
+        where: { sessionId_exerciseId: { sessionId, exerciseId } },
+        select: { score: true, isCorrect: true },
+      })
+      return existing ? { score: logScore(existing), isCorrect: existing.isCorrect } : null
+    }
+    console.error('Failed to log answer (likely stale session):', error instanceof Error ? error.message : error)
+    return null
+  }
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// Results dialog
+// ---------------------------------------------------------------------------------------------------------------
+
+export type SessionResultItem = {
+  position: number
+  exerciseId: string
+  questionText: string
+  correctAnswer: string
+  /** null: the question was never answered (no log). */
+  log: { isCorrect: boolean; score: number; userAnswer: string | null } | null
+}
+
+/**
+ * Every question of a session in position order with its answer, for the results dialog (loaded when the dialog opens,
+ * so the history list itself carries no question text). Unanswered questions have `log: null`.
+ */
+export async function getSessionResultsFor(sessionId: string): Promise<SessionResultItem[]> {
+  const [items, logs] = await Promise.all([
+    prisma.sessionExercise.findMany({
+      where: { sessionId },
+      orderBy: { position: 'asc' },
+      select: { position: true, exercise: { select: { id: true, questionText: true, correctAnswer: true } } },
+    }),
+    prisma.exerciseLog.findMany({ where: { sessionId }, select: { exerciseId: true, isCorrect: true, score: true, userAnswer: true } }),
+  ])
+  const logByExercise = new Map(logs.map((l) => [l.exerciseId, l]))
+  return items.map((i) => {
+    const log = logByExercise.get(i.exercise.id)
+    return {
+      position: i.position,
+      exerciseId: i.exercise.id,
+      questionText: i.exercise.questionText,
+      correctAnswer: i.exercise.correctAnswer,
+      log: log ? { isCorrect: log.isCorrect, score: logScore(log), userAnswer: log.userAnswer } : null,
+    }
+  })
 }

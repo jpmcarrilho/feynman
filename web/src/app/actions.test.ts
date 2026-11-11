@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getTopics, getTopicsWithPerformance, getAnalyticsData, generateGlobalDiagnosis, saveAndDeployStudyPlan, generateStructuredStudyPlan, generatePlannerResponse, generateSessionSummary, getCourseArtifacts, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, reportExercise } from './actions'
+import { explainMistake, generateNextExercise, getTopics, getTopicsWithPerformance, getAnalyticsData, generateGlobalDiagnosis, saveAndDeployStudyPlan, generateStructuredStudyPlan, generatePlannerResponse, generateSessionSummary, getCourseArtifacts, getSessionHistory, getSessionDetail, getStudyPlans, startSession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, finishStudySession, saveDraft, setFlagged, setCurrentPosition, getActiveSession, getSessionState, reportExercise } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 import { defaultProfile } from '@/lib/studyspace/profile'
@@ -7,6 +7,12 @@ import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
 import { enrichInBackground } from '@/services/enrichment'
 import { createSessionSummary } from '@/services/summaryService'
 import { getCourseArtifactsService } from '@/services/artifactsService'
+import { createSessionWithItems, endPreviousActiveSessions, getSessionStateFor, finalizeOverdueExams, logAnswerForSession, completeSession, cancelSession, saveDraftFor, setCurrentPositionFor, getActiveSessionFor } from '@/services/sessionService'
+
+/** startSession input with the defaults the old positional createStudySession had. */
+const si = (over: Partial<Parameters<typeof startSession>[0]> = {}): Parameters<typeof startSession>[0] => ({
+  topicIds: [], count: 1, mode: 'study', timeLimit: null, sourcingMix: 0, weakPct: 60, unstudiedPct: 20, expertPct: 20, ...over,
+})
 
 // Auth: requireAuth always resolves in these tests
 vi.mock('@/server/auth', () => ({
@@ -25,6 +31,26 @@ vi.mock('ai', () => ({
   generateObject: vi.fn(),
 }))
 
+// The session store is covered by services/sessionService.test.ts; here only what the actions pass to it matters.
+// Reads that would add queries to the mocked client (overdue-exam finalization) are stubbed so call indexes stay put.
+vi.mock('@/services/sessionService', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/services/sessionService')>()
+  return {
+    ...actual,
+    finalizeOverdueExams: vi.fn(async () => 0),
+    endPreviousActiveSessions: vi.fn(async () => []),
+    createSessionWithItems: vi.fn(async (input: Record<string, unknown>) => ({ id: 's1', ...input })),
+    getSessionStateFor: vi.fn(async (id: string) => ({ session: { id }, items: [], missingCount: 0, serverNow: 'now' })),
+    getActiveSessionFor: vi.fn(async () => null),
+    saveDraftFor: vi.fn(async () => ({ ok: true })),
+    setFlaggedFor: vi.fn(async () => ({ ok: true })),
+    setCurrentPositionFor: vi.fn(async () => ({ ok: true })),
+    logAnswerForSession: vi.fn(async () => null),
+    completeSession: vi.fn(async () => true),
+    cancelSession: vi.fn(async () => true),
+  }
+})
+
 vi.mock('@/services/summaryService', () => ({ createSessionSummary: vi.fn() }))
 vi.mock('@/services/artifactsService', () => ({ getCourseArtifactsService: vi.fn(async () => []), generateWeekSummaryService: vi.fn() }))
 
@@ -33,8 +59,8 @@ vi.mock('@ai-sdk/google', () => ({
 }))
 
 // Mock the database client
-vi.mock('@/lib/db', () => ({
-  prisma: {
+vi.mock('@/lib/db', () => {
+  const prisma: Record<string, unknown> = {
     course: {
       findUnique: vi.fn(),
     },
@@ -59,8 +85,10 @@ vi.mock('@/lib/db', () => ({
     },
     sessionExercise: {
       deleteMany: vi.fn(),
+      findMany: vi.fn(),
+      aggregate: vi.fn(),
+      create: vi.fn(),
     },
-    $transaction: vi.fn(async (ops: Promise<unknown>[]) => Promise.all(ops)),
     studySession: {
       deleteMany: vi.fn(),
       findMany: vi.fn(),
@@ -68,6 +96,7 @@ vi.mock('@/lib/db', () => ({
       create: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
+      updateMany: vi.fn(),
       delete: vi.fn(),
     },
     exerciseLog: {
@@ -76,8 +105,11 @@ vi.mock('@/lib/db', () => ({
       findMany: vi.fn(),
       deleteMany: vi.fn(),
     },
-  },
-}))
+  }
+  // interactive transactions run against the same mocked client; array transactions resolve their operations
+  prisma.$transaction = vi.fn(async (ops: unknown) => (typeof ops === 'function' ? (ops as (t: unknown) => unknown)(prisma) : Promise.all(ops as Promise<unknown>[])))
+  return { prisma }
+})
 
 let randomSpy: any;
 
@@ -145,7 +177,16 @@ describe('explainMistake action', () => {
   })
 })
 
+const sessionRow = (topicIds: string[] | null, extra: Record<string, unknown> = {}) =>
+  ({ id: 'session-1', status: 'active', courseId: 'course-1', startTime: new Date('2026-11-11T10:00:00Z'), topicIds: topicIds === null ? null : JSON.stringify(topicIds), targetCount: 5, ...extra })
+
 describe('generateNextExercise action', () => {
+  beforeEach(() => {
+    vi.mocked(prisma.sessionExercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.sessionExercise.aggregate).mockResolvedValue({ _max: { position: 0 }, _count: { _all: 1 } } as never)
+    vi.mocked(prisma.sessionExercise.create).mockResolvedValue({} as never)
+  })
+
   it('successfully generates next exercise and updates study session with targetTopicId', async () => {
     const mockTopic = { id: 'topic-1', title: 'Target Topic', courseId: 'course-1', week: 'week-1', content: 'Some content' }
     vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce(mockTopic as any)
@@ -179,10 +220,10 @@ describe('generateNextExercise action', () => {
     }
     vi.mocked(prisma.exercise.create).mockResolvedValueOnce(mockCreatedExercise as any)
 
-    const mockSession = { id: 'session-1', status: 'active', exerciseIds: JSON.stringify(['ex-old']) }
-    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(mockSession as any)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['topic-1']) as never)
+    vi.mocked(prisma.sessionExercise.findMany).mockResolvedValue([{ exerciseId: 'ex-old' }] as never)
 
-    const result = await generateNextExercise('session-1', ['topic-1'], ['ex-old'])
+    const result = await generateNextExercise('session-1')
 
     // Verify it picked the correct target topic ID (topic-1)
     expect(prisma.topic.findUnique).toHaveBeenCalledWith({
@@ -206,11 +247,9 @@ describe('generateNextExercise action', () => {
       include: { topic: true }
     })
 
-    // Verify studySession.update was called
-    expect(prisma.studySession.update).toHaveBeenCalledWith({
-      where: { id: 'session-1' },
-      data: { exerciseIds: JSON.stringify(['ex-old', 'ex-new']) }
-    })
+    // The question is appended as the next positional item; the legacy exerciseIds column is not written
+    expect(prisma.sessionExercise.create).toHaveBeenCalledWith({ data: { sessionId: 'session-1', exerciseId: 'ex-new', position: 1 } })
+    expect(prisma.studySession.update).not.toHaveBeenCalled()
 
     expect(result).toEqual({ exercise: mockCreatedExercise })
   })
@@ -219,12 +258,12 @@ describe('generateNextExercise action', () => {
     const mockTopic = { id: 'topic-1', title: 'Target Topic', courseId: 'course-1', week: 'week-1', content: 'Some content' }
     vi.mocked(prisma.topic.findUnique).mockResolvedValue(mockTopic as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([mockTopic] as never)
-    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 'session-1', status: 'active', startTime: new Date('2026-11-11T10:00:00Z'), exerciseIds: '[]' } as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['topic-1']) as never)
     vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { status?: unknown } }) =>
       args?.where?.status === 'rejected' && !(args.where as Record<string, unknown>).reportedReason ? [{ topicId: 'topic-1' }, { topicId: 'topic-1' }, { topicId: 'topic-1' }] : []) as never)
     vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    const result = await generateNextExercise('session-1', ['topic-1'], [])
+    const result = await generateNextExercise('session-1')
 
     expect(result).toEqual({ error: expect.stringContaining('quality checks') })
     expect(generateObject).not.toHaveBeenCalled()
@@ -239,7 +278,7 @@ describe('generateNextExercise action', () => {
     const t2 = { id: 'topic-2', title: 'Good', courseId: 'course-1', week: 'week-1', content: 'y' }
     vi.mocked(prisma.topic.findUnique).mockImplementation((async (args: { where: { id: string } }) => (args.where.id === 'topic-1' ? t1 : t2)) as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([t1, t2] as never)
-    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 'session-1', status: 'active', startTime: new Date(), exerciseIds: '[]' } as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['topic-1', 'topic-2']) as never)
     vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { status?: unknown } }) =>
       args?.where?.status === 'rejected' && !(args.where as Record<string, unknown>).reportedReason ? [{ topicId: 'topic-1' }, { topicId: 'topic-1' }, { topicId: 'topic-1' }] : []) as never)
     vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
@@ -248,7 +287,7 @@ describe('generateNextExercise action', () => {
       .mockResolvedValueOnce({ object: { answerable: true, issue: '', answer: ['A'] } } as never)
     vi.mocked(prisma.exercise.create).mockResolvedValue({ id: 'ex-new' } as never)
 
-    const result = await generateNextExercise('session-1', ['topic-1', 'topic-2'], [])
+    const result = await generateNextExercise('session-1')
 
     expect(result).toEqual({ exercise: { id: 'ex-new' } })
     expect(vi.mocked(prisma.exercise.create).mock.calls[0][0].data).toMatchObject({ topicId: 'topic-2' })
@@ -259,13 +298,13 @@ describe('generateNextExercise action', () => {
     const mockTopic2 = { ...mockTopic, id: 'topic-2' }
     vi.mocked(prisma.topic.findUnique).mockResolvedValue(mockTopic as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([mockTopic, mockTopic2] as never)
-    vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 'session-1', status: 'active', startTime: new Date(), exerciseIds: '[]' } as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['topic-1', 'topic-2']) as never)
     const rows = [...Array(2).fill({ topicId: 'topic-1' }), ...Array(2).fill({ topicId: 'topic-2' })]
     vi.mocked(prisma.exercise.findMany).mockImplementation((async (args: { where?: { status?: unknown } }) =>
       args?.where?.status === 'rejected' && !(args.where as Record<string, unknown>).reportedReason ? [...rows, ...rows, { topicId: 'topic-1' }] : []) as never)
     vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    const result = await generateNextExercise('session-1', ['topic-1', 'topic-2'], [])
+    const result = await generateNextExercise('session-1')
 
     expect(result).toEqual({ error: expect.stringContaining('Too many') })
     expect(generateObject).not.toHaveBeenCalled()
@@ -281,10 +320,11 @@ describe('generateNextExercise action', () => {
       requestBodyValues: { prompt: 'secret prompt' },
       stack: 'Error: boom\n    at node_modules/ai/dist/index.js:1:1',
     })
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['topic-1']) as never)
     vi.mocked(generateObject).mockRejectedValueOnce(providerError)
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
 
-    const result = await generateNextExercise('session-1', ['topic-1'], [])
+    const result = await generateNextExercise('session-1')
 
     expect(result).toEqual({ error: expect.any(String) })
     const message = (result as { error: string }).error
@@ -292,15 +332,16 @@ describe('generateNextExercise action', () => {
     expect(message.length).toBeLessThan(120)
     expect(logged).toHaveBeenCalledWith('Failed to generate next exercise:', providerError)
     expect(prisma.exercise.create).not.toHaveBeenCalled()
-    expect(prisma.studySession.update).not.toHaveBeenCalled()
+    expect(prisma.sessionExercise.create).not.toHaveBeenCalled()
     logged.mockRestore()
   })
 
   it('returns an error without calling the model when no topic has graded content to generate from', async () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never) // no topic with content
     vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['empty-1', 'empty-2']) as never)
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const result = await generateNextExercise('session-1', ['empty-1', 'empty-2'], [])
+    const result = await generateNextExercise('session-1')
     expect(result).toEqual({ error: expect.stringContaining('graded study material') })
     expect(generateObject).not.toHaveBeenCalled()
     logged.mockRestore()
@@ -309,8 +350,9 @@ describe('generateNextExercise action', () => {
   it('skips topics that only hold ungraded exercises', async () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'survey' }] as never) // has content
     vi.mocked(prisma.exercise.findMany).mockResolvedValue([{ topicId: 'survey', isGraded: false }] as never)
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['survey']) as never)
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
-    const result = await generateNextExercise('session-1', ['survey'], [])
+    const result = await generateNextExercise('session-1')
     expect(result).toEqual({ error: expect.any(String) })
     expect(generateObject).not.toHaveBeenCalled()
     logged.mockRestore()
@@ -325,7 +367,9 @@ describe('generateNextExercise action', () => {
     vi.mocked(generateObject).mockRejectedValueOnce(new Error('stop here'))
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const manyTopics = Array.from({ length: 1322 }, (_, i) => `topic-${i}`)
-    await generateNextExercise('session-1', manyTopics, Array.from({ length: 700 }, (_, i) => `ex-${i}`))
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(manyTopics) as never)
+    vi.mocked(prisma.sessionExercise.findMany).mockResolvedValue(Array.from({ length: 700 }, (_, i) => ({ exerciseId: `ex-${i}` })) as never)
+    await generateNextExercise('session-1')
     const lists = [...vi.mocked(prisma.exercise.findMany).mock.calls, ...vi.mocked(prisma.topic.findMany).mock.calls].map((c) => {
       const where = (c[0] as { where?: Record<string, { in?: string[] } | undefined> })?.where ?? {}
       return Math.max(0, ...Object.values(where).map((v) => v?.in?.length ?? 0))
@@ -334,8 +378,28 @@ describe('generateNextExercise action', () => {
     logged.mockRestore()
   })
 
-  it('returns an error for an empty topic list', async () => {
-    expect(await generateNextExercise('session-1', [], [])).toEqual({ error: expect.any(String) })
+  it('returns an error for a session with an empty pool (a legacy session with no questions), never drawing from the whole database', async () => {
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(null) as never)
+    expect(await generateNextExercise('session-1')).toEqual({ error: expect.any(String) })
+    expect(generateObject).not.toHaveBeenCalled()
+  })
+
+  it('the pool is the session\'s own topics: a resumed session cannot generate from other topics', async () => {
+    const t1 = { id: 'topic-1', title: 'Mine', courseId: 'course-1', week: 'w', content: 'c' }
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValue(sessionRow(['topic-1']) as never)
+    vi.mocked(prisma.topic.findUnique).mockResolvedValue(t1 as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([t1] as never)
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
+    vi.mocked(generateObject).mockRejectedValueOnce(new Error('stop here'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    await generateNextExercise('session-1')
+    // every topic query is restricted to the session's topics
+    for (const c of vi.mocked(prisma.topic.findMany).mock.calls) {
+      const where = (c[0] as { where?: { id?: { in?: string[] } } })?.where
+      if (where?.id?.in) expect(where.id.in).toEqual(['topic-1'])
+    }
+    logged.mockRestore()
   })
 })
 
@@ -399,8 +463,8 @@ describe('payload trimming', () => {
 
   it('getSessionHistory selects list fields only (no chatLog, diagnosis, topic content) and returns exerciseCount', async () => {
     vi.mocked(prisma.studySession.findMany).mockResolvedValueOnce([
-      { id: 's1', mode: 'exam', exerciseIds: '["a","b","c"]', logs: [] },
-      { id: 's2', mode: 'study', exerciseIds: null, logs: [] },
+      { id: 's1', mode: 'exam', items: [{ exerciseId: 'a', position: 0 }, { exerciseId: 'b', position: 1 }, { exerciseId: 'c', position: 2 }], logs: [] },
+      { id: 's2', mode: 'study', items: [], logs: [] },
     ] as never)
 
     const result = await getSessionHistory()
@@ -414,14 +478,38 @@ describe('payload trimming', () => {
     expect(args).toHaveProperty('select.logs.select.exercise.select', {
       id: true, questionText: true, correctAnswer: true, exerciseType: true,
     })
+    expect(args).toHaveProperty('select.items.select', { exerciseId: true, position: true })
+    expect(args).not.toHaveProperty('select.exerciseIds')
     expect(result[0].exerciseCount).toBe(3)
+    // the id list is used on the server only; it never reaches the client
     expect(result[0]).not.toHaveProperty('exerciseIds')
-    expect(result[1].exerciseCount).toBeNull()
+    expect(result[0]).not.toHaveProperty('items')
+    expect(result[1].exerciseCount).toBe(0)
+  })
+
+  it('getSessionHistory lists a session\'s answers in question order (SessionExercise.position), with the position on each log', async () => {
+    vi.mocked(prisma.studySession.findMany).mockResolvedValueOnce([
+      {
+        id: 's1', mode: 'study',
+        items: [{ exerciseId: 'a', position: 0 }, { exerciseId: 'b', position: 1 }, { exerciseId: 'c', position: 2 }],
+        // answered in a different order than the question order
+        logs: [{ id: 'l1', exerciseId: 'c' }, { id: 'l2', exerciseId: 'a' }, { id: 'l3', exerciseId: 'zzz' }],
+      },
+    ] as never)
+    const [s1] = await getSessionHistory()
+    expect(s1.logs.map((l) => [l.exerciseId, l.position])).toEqual([['a', 0], ['c', 2], ['zzz', null]])
+  })
+
+  it('getSessionHistory finalizes overdue exams before listing', async () => {
+    vi.mocked(prisma.studySession.findMany).mockResolvedValueOnce([] as never)
+    await getSessionHistory('cA')
+    expect(finalizeOverdueExams).toHaveBeenCalledWith({ courseId: 'cA' })
+    expect(vi.mocked(finalizeOverdueExams).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(prisma.studySession.findMany).mock.invocationCallOrder[0])
   })
 
   it('getStudyPlans selects sessions with the list select (no chatLog)', async () => {
     vi.mocked(prisma.studyPlan.findMany).mockResolvedValueOnce([
-      { id: 'p1', sessions: [{ id: 's1', exerciseIds: '["a"]', logs: [] }] },
+      { id: 'p1', sessions: [{ id: 's1', items: [{ exerciseId: 'a', position: 0 }], logs: [] }] },
     ] as never)
 
     const plans = await getStudyPlans()
@@ -446,46 +534,59 @@ describe('payload trimming', () => {
     expect(detail).toEqual({ chatLog: '[{"role":"user","text":"hi"}]', diagnosis: 'd' })
   })
 
-  it('getSessionWithExercises loads exercises with a topic select that has no content', async () => {
-    vi.mocked(prisma.studySession.findUnique).mockResolvedValueOnce(
-      { id: 's1', exerciseIds: '["e2","e1"]', logs: [] } as never
-    )
-    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([{ id: 'e1' }, { id: 'e2' }] as never)
-
-    const data = await getSessionWithExercises('s1')
-
-    expect(callArg(prisma.studySession.findUnique)).not.toHaveProperty('select.chatLog')
-    const exArgs = callArg(prisma.exercise.findMany)
-    expect(exArgs).not.toHaveProperty('include')
-    expect(exArgs).not.toHaveProperty('select.topic.select.content')
-    expect(exArgs).toHaveProperty('select.topic.select.course.select.code', true)
-    expect(data?.exercises.map(e => e?.id)).toEqual(['e2', 'e1'])
-    expect(data?.session).not.toHaveProperty('exerciseIds')
-    expect(data?.session.exerciseCount).toBe(2)
-  })
-
-  it('createStudySession returns exercises re-read without topic content', async () => {
+  it('startSession returns the session state read back from the server (questions without topic content)', async () => {
     const candidate = {
       id: 'e1', topicId: 't1', questionText: 'Q', enrichedAt: new Date(),
       topic: { id: 't1', title: 'T', courseId: 'c1', content: 'HUGE' },
     }
-    vi.mocked(prisma.exercise.findMany)
-      .mockResolvedValueOnce([candidate] as never) // candidate pool
-      .mockResolvedValueOnce([{ id: 'e1', topic: { id: 't1' } }] as never) // client select
+    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([candidate] as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
     vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
-    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
 
-    const res = await createStudySession([], 1, 'study', null, 0)
+    const res = await startSession(si())
 
-    const clientArgs = callArg(prisma.exercise.findMany, 1)
-    expect(clientArgs).not.toHaveProperty('select.topic.select.content')
-    expect(clientArgs).toHaveProperty('select.questionText', true)
-    expect(res.exercises).toEqual([{ id: 'e1', topic: { id: 't1' } }])
+    expect(getSessionStateFor).toHaveBeenCalledWith('s1')
+    expect(res.session.id).toBe('s1')
+    // the candidate pool is the only exercise query: the client payload is built by the session service
+    expect(prisma.exercise.findMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('startSession stores the selection, the target and the drawn questions as positional items, and no exerciseIds', async () => {
+    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([
+      { id: 'e1', topicId: 't1', topic: { id: 't1', courseId: 'c1' } },
+      { id: 'e2', topicId: 't1', topic: { id: 't1', courseId: 'c1' } },
+    ] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1', courseId: 'c1', week: 'W', course: { code: 'x' } }] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
+    await startSession(si({ topicIds: ['t1', 't1'], count: 4, mode: 'exam', timeLimit: 900, sourcingMix: 0 }))
+    const input = vi.mocked(createSessionWithItems).mock.calls[0][0]
+    expect(input).toMatchObject({ topicIds: ['t1'], targetCount: 4, mode: 'exam', timeLimit: 900 })
+    expect(input.exerciseIds.length).toBe(2)
+    expect(input).not.toHaveProperty('exercises')
+  })
+
+  it('startSession ends the previous active session of the scope before the new one is stored', async () => {
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'cA' } as never)
+    await startSession(si({ courseId: 'cA' }))
+    expect(endPreviousActiveSessions).toHaveBeenCalledWith({ courseId: 'cA' })
+    expect(vi.mocked(endPreviousActiveSessions).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(createSessionWithItems).mock.invocationCallOrder[0])
+    await startSession(si())
+    expect(endPreviousActiveSessions).toHaveBeenLastCalledWith({})
+  })
+
+  it('startSession cleans odd input: duplicate and non-string topic ids, absurd counts, an unknown mode', async () => {
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
+    await startSession({ ...si({ topicIds: ['a', 'a', 7 as unknown as string], count: 99999, mode: 'weird' as 'study', timeLimit: -5 }) })
+    expect(vi.mocked(createSessionWithItems).mock.calls[0][0]).toMatchObject({ topicIds: ['a'], targetCount: 500, mode: 'study', timeLimit: null })
   })
 })
 
-describe('createStudySession background enrichment', () => {
+describe('startSession background enrichment', () => {
   const row = (id: string, extra: Record<string, unknown> = {}) => ({ id, topicId: 't1', questionText: 'Q', enrichedAt: null, topic: { id: 't1', courseId: 'c1' }, ...extra })
 
   afterEach(() => {
@@ -493,30 +594,28 @@ describe('createStudySession background enrichment', () => {
   })
 
   it('schedules nothing by default (flag off)', async () => {
-    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([row('a'), row('b')] as never).mockResolvedValueOnce([] as never)
+    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([row('a'), row('b')] as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
     vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
-    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
 
-    await createStudySession([], 1, 'study', null, 0, 0, 100, 0)
+    await startSession(si({ weakPct: 0, unstudiedPct: 100, expertPct: 0 }))
 
     expect(enrichInBackground).not.toHaveBeenCalled()
-    // only the candidate pool and the client re-read: no enrichment candidate query
-    expect(prisma.exercise.findMany).toHaveBeenCalledTimes(2)
+    // only the candidate pool: no enrichment candidate query
+    expect(prisma.exercise.findMany).toHaveBeenCalledTimes(1)
   })
 
   it('enriches only never-answered questions that are not in the new session, without waiting for the model (ENRICH_IN_BACKGROUND=1)', async () => {
     process.env.ENRICH_IN_BACKGROUND = '1'
     const pool = [row('a'), row('b'), row('c'), row('answered')]
-    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce(pool as never).mockResolvedValueOnce([] as never)
+    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce(pool as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
     vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([{ exerciseId: 'answered', isCorrect: false }] as never)
-    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
 
-    await createStudySession([], 1, 'study', null, 0, 0, 100, 0)
+    await startSession(si({ weakPct: 0, unstudiedPct: 100, expertPct: 0 }))
 
     expect(generateObject).not.toHaveBeenCalled()
-    const created = JSON.parse((vi.mocked(prisma.studySession.create).mock.calls[0][0] as any).data.exerciseIds) as string[]
+    const created = vi.mocked(createSessionWithItems).mock.calls[0][0].exerciseIds
     expect(created).toHaveLength(1)
     const queued = (vi.mocked(enrichInBackground).mock.calls[0][0] as { id: string }[]).map((e) => e.id).sort()
     expect(queued).toEqual(['a', 'b', 'c'].filter((id) => id !== created[0]))
@@ -524,16 +623,15 @@ describe('createStudySession background enrichment', () => {
   })
 })
 
-describe('createStudySession calibration module', () => {
+describe('startSession calibration module', () => {
   const profileJson = (calibrationModule: string | null) => JSON.stringify({ ...defaultProfile({ title: 'C' }), calibrationModule })
 
   it('draws candidates from the whole course when a selected topic is in the profile calibrationModule', async () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'cal', courseId: 'c1', week: 'Final review', course: { code: 'x' } }] as never)
     vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'c1', code: 'x', title: 'C', profile: profileJson('Final review') } as never)
     vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
-    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
 
-    await createStudySession(['cal'], 5, 'study', null, 50)
+    await startSession(si({ topicIds: ['cal'], count: 5, sourcingMix: 50 }))
 
     expect(prisma.exercise.findMany).toHaveBeenCalledWith({
       where: { topic: { courseId: 'c1' }, isGraded: true, status: 'active' },
@@ -545,9 +643,8 @@ describe('createStudySession calibration module', () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 't1', courseId: 'c1', week: 'Week_13_Comprehensive_Review', course: { code: 'x' } }] as never)
     vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'c1', code: 'x', title: 'C', profile: profileJson(null) } as never)
     vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
-    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
 
-    await createStudySession(['t1'], 5, 'study', null, 50)
+    await startSession(si({ topicIds: ['t1'], count: 5, sourcingMix: 50 }))
 
     expect(prisma.exercise.findMany).toHaveBeenCalledWith({
       where: { topicId: { in: ['t1'] }, isGraded: true, status: 'active' },
@@ -590,16 +687,15 @@ describe('deleteStudyPlan', () => {
   })
 })
 
-describe('createStudySession graded filter', () => {
+describe('startSession graded filter', () => {
   it('queries only graded, active exercises', async () => {
     vi.clearAllMocks()
     vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
     vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
-    vi.mocked(prisma.studySession.create).mockResolvedValue({ id: 's1' } as never)
 
-    await createStudySession(['t1'], 1, 'study', null, 0)
-    await createStudySession([], 1, 'study', null, 0)
+    await startSession(si({ topicIds: ['t1'] }))
+    await startSession(si())
 
     const first = vi.mocked(prisma.exercise.findMany).mock.calls[0][0] as { where: unknown }
     const second = vi.mocked(prisma.exercise.findMany).mock.calls[1][0] as { where?: unknown; data?: Record<string, unknown> }
@@ -608,65 +704,45 @@ describe('createStudySession graded filter', () => {
   })
 })
 
-describe('logAnswer', () => {
-  const exercise = { exerciseType: 'single_choice', choices: '["A","B"]', correctAnswer: 'A', questionText: 'Q?' }
-
-  it('grades on the server and stores isCorrect and score (the client sends no correctness)', async () => {
-    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
-    const r = await logAnswer('s1', 'e1', 'A', { duration: 12 })
-    expect(r).toEqual({ score: 1, isCorrect: true })
-    const data = (vi.mocked(prisma.exerciseLog.create).mock.calls[0][0] as { data: Record<string, unknown> }).data
-    expect(data).toMatchObject({ sessionId: 's1', exerciseId: 'e1', isCorrect: true, score: 1, userAnswer: 'A', duration: 12, assisted: false })
+describe('logAnswer, finish and cancel (thin actions over the session service)', () => {
+  it('logAnswer passes the call to the service, which grades on the server and checks membership and status', async () => {
+    vi.mocked(logAnswerForSession).mockResolvedValueOnce({ score: 1, isCorrect: true })
+    await expect(logAnswer('s1', 'e1', 'A', { duration: 12 })).resolves.toEqual({ score: 1, isCorrect: true })
+    expect(logAnswerForSession).toHaveBeenCalledWith('s1', 'e1', 'A', { duration: 12 })
+    vi.mocked(logAnswerForSession).mockResolvedValueOnce(null)
+    await expect(logAnswer('s1', 'not-an-item', 'A')).resolves.toBeNull()
   })
 
-  it('stores a wrong answer as score 0 whatever the caller believes', async () => {
-    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
-    const r = await logAnswer('s1', 'e1', 'B')
-    expect(r).toEqual({ score: 0, isCorrect: false })
-    expect((vi.mocked(prisma.exerciseLog.create).mock.calls[0][0] as { data: Record<string, unknown> }).data).toMatchObject({ isCorrect: false, score: 0, duration: 30 })
-  })
-
-  it('ignores a non-string answer (stale client passing the old boolean argument)', async () => {
-    await expect(logAnswer('s1', 'e1', true as unknown as string)).resolves.toBeNull()
+  it('cancelStudySession cancels through the service (active sessions only) and writes no logs', async () => {
+    vi.mocked(cancelSession).mockClear()
+    expect(await cancelStudySession('s1')).toBe(true)
+    expect(cancelSession).toHaveBeenCalledWith('s1')
     expect(prisma.exerciseLog.create).not.toHaveBeenCalled()
   })
 
-  it('returns null for an unknown exercise without logging', async () => {
-    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(null as never)
-    await expect(logAnswer('s1', 'nope', 'A')).resolves.toBeNull()
-    expect(prisma.exerciseLog.create).not.toHaveBeenCalled()
+  it('finishStudySession completes through the service (an exam is submitted with its stored drafts)', async () => {
+    expect(await finishStudySession('s1')).toBe(true)
+    expect(completeSession).toHaveBeenCalledWith('s1')
   })
 
-  it('swallows a unique violation (P2002) so the first attempt wins, and returns the stored result', async () => {
-    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
-    vi.mocked(prisma.exerciseLog.create).mockRejectedValueOnce(Object.assign(new Error('Unique constraint'), { code: 'P2002' }))
-    vi.mocked(prisma.exerciseLog.findUnique).mockResolvedValueOnce({ score: 0, isCorrect: false } as never)
-    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await expect(logAnswer('s1', 'e1', 'A')).resolves.toEqual({ score: 0, isCorrect: false })
-    expect(err).not.toHaveBeenCalled()
-    err.mockRestore()
+  it('the small session actions authenticate and report the service result', async () => {
+    vi.mocked(saveDraftFor).mockResolvedValueOnce({ ok: false, reason: 'deadline_passed' })
+    expect(await saveDraft('s1', 'e1', 'A', 3)).toEqual({ ok: false, reason: 'deadline_passed' })
+    expect(saveDraftFor).toHaveBeenCalledWith('s1', 'e1', 'A', 3)
+    expect(await setFlagged('s1', 'e1', true)).toEqual({ ok: true })
+    expect(await setCurrentPosition('s1', 2)).toEqual({ ok: true })
+    expect(setCurrentPositionFor).toHaveBeenCalledWith('s1', 2)
   })
 
-  it('still reports other errors (logged, not thrown)', async () => {
-    vi.mocked(prisma.exercise.findUnique).mockResolvedValueOnce(exercise as never)
-    vi.mocked(prisma.exerciseLog.create).mockRejectedValueOnce(Object.assign(new Error('FK failed'), { code: 'P2003' }))
-    const err = vi.spyOn(console, 'error').mockImplementation(() => {})
-    await expect(logAnswer('s1', 'e1', 'A')).resolves.toBeNull()
-    expect(err).toHaveBeenCalled()
-    err.mockRestore()
-  })
-})
-
-describe('cancelStudySession', () => {
-  it('marks the session cancelled with an end time and writes no logs', async () => {
-    vi.clearAllMocks()
-    vi.mocked(prisma.studySession.update).mockResolvedValueOnce({ id: 's1', status: 'cancelled' } as never)
-    await cancelStudySession('s1')
-    const arg = vi.mocked(prisma.studySession.update).mock.calls[0][0] as { where: unknown; data: Record<string, unknown> }
-    expect(arg.where).toEqual({ id: 's1' })
-    expect(arg.data.status).toBe('cancelled')
-    expect(arg.data.endTime).toBeInstanceOf(Date)
-    expect(prisma.exerciseLog.create).not.toHaveBeenCalled()
+  it('getActiveSession and getSessionState apply the course scope the same way as the other reads', async () => {
+    await getActiveSession('cA')
+    expect(getActiveSessionFor).toHaveBeenLastCalledWith('cA')
+    await getActiveSession('')
+    expect(getActiveSessionFor).toHaveBeenLastCalledWith(undefined)
+    await getSessionState('s1', 'cA')
+    expect(getSessionStateFor).toHaveBeenLastCalledWith('s1', 'cA')
+    await getSessionState('s1')
+    expect(getSessionStateFor).toHaveBeenLastCalledWith('s1', undefined)
   })
 })
 
@@ -710,63 +786,64 @@ describe('course scope (T16)', () => {
     vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
     vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
     vi.mocked(prisma.studySession.findMany).mockResolvedValue([] as never)
-    vi.mocked(prisma.studySession.create).mockResolvedValue({ id: 's1' } as never)
     vi.mocked(prisma.course.findUnique).mockResolvedValue({ id: 'cA', code: 'A', title: 'A', profile: null } as never)
   })
 
-  describe('createStudySession', () => {
+  describe('startSession', () => {
     it('stores the course the session was started in and draws only that course when no topic is selected', async () => {
       vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([{ id: 'e1', topicId: 't1', topic: { id: 't1', courseId: 'cA' } }] as never).mockResolvedValue([] as never)
-      await createStudySession([], 5, 'study', null, 0, 60, 20, 20, 'cA')
+      await startSession(si({ count: 5, courseId: 'cA' }))
 
       expect(callArg(prisma.exercise.findMany).where).toEqual({ topic: { courseId: 'cA' }, isGraded: true, status: 'active' })
       expect(callArg(prisma.exerciseLog.findMany).where).toEqual({ exercise: { topic: { courseId: 'cA' } } })
-      expect(callArg(prisma.studySession.create).data.courseId).toBe('cA')
+      expect(vi.mocked(createSessionWithItems).mock.calls[0][0].courseId).toBe('cA')
     })
 
     it('rejects topics of another course before reading candidates or writing anything', async () => {
       vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cB']) as never)
 
-      await expect(createStudySession(['t1', 't2'], 5, 'study', null, 0, 60, 20, 20, 'cA')).rejects.toThrow(/do not belong/)
+      await expect(startSession(si({ topicIds: ['t1', 't2'], count: 5, courseId: 'cA' }))).rejects.toThrow(/do not belong/)
 
       expect(prisma.exercise.findMany).not.toHaveBeenCalled()
-      expect(prisma.studySession.create).not.toHaveBeenCalled()
+      expect(createSessionWithItems).not.toHaveBeenCalled()
+      expect(endPreviousActiveSessions).not.toHaveBeenCalled() // a rejected start must not end the running session
     })
 
     it('rejects an unknown studyspace', async () => {
       vi.mocked(prisma.course.findUnique).mockResolvedValue(null as never)
-      await expect(createStudySession([], 5, 'study', null, 0, 60, 20, 20, 'nope')).rejects.toThrow(/not found/)
-      expect(prisma.studySession.create).not.toHaveBeenCalled()
+      await expect(startSession(si({ count: 5, courseId: 'nope' }))).rejects.toThrow(/not found/)
+      expect(createSessionWithItems).not.toHaveBeenCalled()
+      expect(endPreviousActiveSessions).not.toHaveBeenCalled()
     })
 
     it('treats an empty courseId as no scope', async () => {
-      await createStudySession([], 5, 'study', null, 0, 60, 20, 20, '')
+      await startSession(si({ count: 5, courseId: '' }))
       expect(callArg(prisma.exercise.findMany).where).toEqual({ isGraded: true, status: 'active' })
       expect(prisma.course.findUnique).not.toHaveBeenCalled()
     })
 
     it('derives the course from the selected topics when unscoped: the course with most topics, a tie goes to the first topic', async () => {
       vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cB'], ['t3', 'cB']) as never)
-      await createStudySession(['t1', 't2', 't3'], 5, 'study', null, 0)
-      expect(callArg(prisma.studySession.create).data.courseId).toBe('cB')
+      await startSession(si({ topicIds: ['t1', 't2', 't3'], count: 5 }))
+      expect(vi.mocked(createSessionWithItems).mock.calls[0][0].courseId).toBe('cB')
 
-      vi.mocked(prisma.studySession.create).mockClear()
+      vi.mocked(createSessionWithItems).mockClear()
       vi.mocked(prisma.topic.findMany).mockResolvedValue(rows(['t1', 'cA'], ['t2', 'cB']) as never)
-      await createStudySession(['t2', 't1'], 5, 'study', null, 0)
-      expect(callArg(prisma.studySession.create).data.courseId).toBe('cB')
+      await startSession(si({ topicIds: ['t2', 't1'], count: 5 }))
+      expect(vi.mocked(createSessionWithItems).mock.calls[0][0].courseId).toBe('cB')
     })
 
     it('derives the course from the drawn questions when unscoped and no topic is selected', async () => {
       vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([
         { id: 'e1', topicId: 't1', topic: { id: 't1', courseId: 'cA' } },
       ] as never).mockResolvedValue([] as never)
-      await createStudySession([], 1, 'study', null, 0, 0, 100, 0)
-      expect(callArg(prisma.studySession.create).data.courseId).toBe('cA')
+      await startSession(si({ weakPct: 0, unstudiedPct: 100, expertPct: 0 }))
+      expect(vi.mocked(createSessionWithItems).mock.calls[0][0].courseId).toBe('cA')
     })
 
     it('stores null only when nothing at all identifies a course', async () => {
-      await createStudySession([], 1, 'study', null, 0)
-      expect(callArg(prisma.studySession.create).data.courseId).toBeNull()
+      await startSession(si())
+      expect(vi.mocked(createSessionWithItems).mock.calls[0][0].courseId).toBeNull()
     })
   })
 
@@ -836,8 +913,8 @@ describe('course scope (T16)', () => {
 
   describe('generateNextExercise', () => {
     it('treats a session of another course as stopped, without any model call', async () => {
-      vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 's1', status: 'active', courseId: 'cB', startTime: new Date() } as never)
-      expect(await generateNextExercise('s1', ['t1'], [], 1, 'cA')).toEqual({ stopped: true })
+      vi.mocked(prisma.studySession.findUnique).mockResolvedValue({ id: 's1', status: 'active', courseId: 'cB', startTime: new Date(), topicIds: '["t1"]' } as never)
+      expect(await generateNextExercise('s1', 'cA')).toEqual({ stopped: true })
       expect(generateObject).not.toHaveBeenCalled()
     })
   })

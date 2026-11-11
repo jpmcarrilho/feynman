@@ -9,6 +9,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Search, X } from 'lucide-react'
 import { FeynmanLogo } from './FeynmanLogo'
+import { resolveTopicScope } from '@/lib/topicScope'
 
 const formatDisplayName = (name: string | null | undefined): string => {
   if (!name) return '';
@@ -25,7 +26,7 @@ interface ConfigureSessionDialogProps {
   setSessionDuration: (duration: number) => void;
   questionCount: number;
   setQuestionCount: (count: number) => void;
-  onStartSession: (mode: 'study' | 'exam', timeLimit: number | null, sourcingMix: number, weakPct: number, unstudiedPct: number, expertPct: number) => void;
+  onStartSession: (mode: 'study' | 'exam', timeLimit: number | null, sourcingMix: number, weakPct: number, unstudiedPct: number, expertPct: number, topicIds: string[]) => void;
   isLoading: boolean;
 }
 
@@ -122,6 +123,21 @@ export function ConfigureSessionDialog({
       (t.course?.code && t.course.code.toLowerCase().includes(searchLower))
     );
   }, [filteredTopics, topicSearchText])
+
+  // What the session will draw from, decided once: ticked topics, else the topics the filters match, else everything shown
+  const filterLabels = [
+    ...selectedCourses,
+    ...selectedWeeks.map(formatDisplayName),
+    ...selectedClasses.map(formatDisplayName),
+    ...selectedUnits.map(formatDisplayName),
+    ...(topicSearchText.trim() ? [`"${topicSearchText.trim()}"`] : []),
+  ]
+  const scope = resolveTopicScope({
+    selectedIds: selectedTopics,
+    matchedIds: searchedTopics.map((t: any) => t.id),
+    filterLabels,
+    shownCourseCodes: courses as string[],
+  })
 
   return (
     <DialogContent className="sm:max-w-5xl md:max-w-6xl w-[90vw] max-h-[90vh] overflow-y-auto bg-background border-2 border-charcoal-graphite/20 shadow-2xl rounded-xl p-4 sm:p-6 font-sans">
@@ -589,20 +605,21 @@ export function ConfigureSessionDialog({
         )}
 
         <div className="pt-4 border-t space-y-3">
+          <p data-testid="topic-scope-summary" className={`text-sm ${scope.canStart ? 'text-charcoal-graphite/80' : 'text-lecture-red'}`}>{scope.summary}</p>
           <Button 
             onClick={() => {
               const limit = sessionMode === 'exam' 
                 ? (examDuration === 0 ? null : examDuration * 60)
                 : sessionDuration; // Let study mode use standard practice duration
-              onStartSession(sessionMode, limit, sourcingMix, weakPct, unstudiedPct, expertPct);
+              onStartSession(sessionMode, limit, sourcingMix, weakPct, unstudiedPct, expertPct, scope.topicIds);
             }} 
-            disabled={isLoading} 
+            disabled={isLoading || !scope.canStart} 
             className="w-full text-lg h-12 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold animate-sketch-draw"
           >
             {isLoading ? (
               <><FeynmanLogo variant="thinking" size={20} className="mr-2" /> Generating Exercises...</>
             ) : (
-              sessionMode === 'exam' ? '📋 Start Timed Exam' : (selectedTopics.length === 0 ? 'Start Random Session' : 'Start Focused Session')
+              sessionMode === 'exam' ? '📋 Start Timed Exam' : (scope.kind === 'all' ? 'Start Random Session' : 'Start Focused Session')
             )}
           </Button>
           {isLoading && (

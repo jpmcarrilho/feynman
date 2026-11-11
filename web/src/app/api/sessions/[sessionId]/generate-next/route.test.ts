@@ -22,39 +22,37 @@ beforeEach(() => {
 describe('POST /api/sessions/[sessionId]/generate-next', () => {
   it('returns 401 before reading the body or generating when unauthenticated', async () => {
     auth.ok = false
-    expect((await call({ topicIds: ['t'], existingExerciseIds: [] })).status).toBe(401)
+    expect((await call({})).status).toBe(401)
     expect(generateNextForSession).not.toHaveBeenCalled()
   })
 
-  it('returns 400 for a malformed body, wrong types or a bad session id', async () => {
+  it('returns 400 for a malformed body, a malformed courseId or a bad session id', async () => {
     expect((await call(null, 'session-1', 'not json')).status).toBe(400)
-    expect((await call({ topicIds: 'x', existingExerciseIds: [] })).status).toBe(400)
-    expect((await call({ topicIds: ['t'], existingExerciseIds: [1] })).status).toBe(400)
-    expect((await call({ topicIds: ['t'] })).status).toBe(400)
-    expect((await call({ topicIds: ['t'], existingExerciseIds: [] }, '..')).status).toBe(400)
+    expect((await call({ courseId: 5 })).status).toBe(400)
+    expect((await call({ courseId: '../x' })).status).toBe(400)
+    expect((await call({}, '..')).status).toBe(400)
     expect(generateNextForSession).not.toHaveBeenCalled()
   })
 
-  it('passes the session id (a Promise in params) and the ids to the shared function and returns its result as JSON', async () => {
+  it('takes only the session id (a Promise in params) from the request: the topics and questions are read on the server', async () => {
     vi.mocked(generateNextForSession).mockResolvedValue({ exercise: { id: 'e9' } } as never)
+    // ids a client might still send are ignored, never passed on
     const res = await call({ topicIds: ['t1', 't2'], existingExerciseIds: ['e1'] })
     expect(res.status).toBe(200)
     expect(await res.json()).toEqual({ exercise: { id: 'e9' } })
-    expect(generateNextForSession).toHaveBeenCalledWith('session-1', ['t1', 't2'], ['e1'])
+    expect(generateNextForSession).toHaveBeenCalledWith('session-1')
   })
 
-  it('passes an optional courseId on and rejects a malformed one', async () => {
+  it('accepts an empty body and passes an optional courseId on', async () => {
     vi.mocked(generateNextForSession).mockResolvedValue({ stopped: true } as never)
-    await call({ topicIds: ['t1'], existingExerciseIds: [], courseId: 'course-1' })
-    expect(generateNextForSession).toHaveBeenCalledWith('session-1', ['t1'], [], 'course-1')
-    vi.mocked(generateNextForSession).mockClear()
-    expect((await call({ topicIds: ['t1'], existingExerciseIds: [], courseId: '../x' })).status).toBe(400)
-    expect((await call({ topicIds: ['t1'], existingExerciseIds: [], courseId: 5 })).status).toBe(400)
-    expect(generateNextForSession).not.toHaveBeenCalled()
+    expect((await call(null, 'session-1', '')).status).toBe(200)
+    expect(generateNextForSession).toHaveBeenLastCalledWith('session-1')
+    await call({ courseId: 'course-1' })
+    expect(generateNextForSession).toHaveBeenLastCalledWith('session-1', 'course-1')
   })
 
   it.each([[{ error: 'plain sentence' }], [{ stopped: true }]])('returns %j unchanged', async (result) => {
     vi.mocked(generateNextForSession).mockResolvedValue(result as never)
-    expect(await (await call({ topicIds: ['t1'], existingExerciseIds: [] })).json()).toEqual(result)
+    expect(await (await call({})).json()).toEqual(result)
   })
 })

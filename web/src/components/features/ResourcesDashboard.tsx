@@ -30,9 +30,11 @@ const formatDisplayName = (name: string | null | undefined): string => {
 interface ResourcesDashboardProps {
   onViewFile: (href: string, title?: string) => void;
   onStartWeekSession: (topicIds: string[], weekName: string) => void;
+  /** True while a session is being created: the practice buttons are disabled so a second click cannot start another. */
+  startingSession?: boolean;
 }
 
-export function ResourcesDashboard({ onViewFile, onStartWeekSession }: ResourcesDashboardProps) {
+export function ResourcesDashboard({ onViewFile, onStartWeekSession, startingSession = false }: ResourcesDashboardProps) {
   const [courses, setCourses] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [activeCourseCode, setActiveCourseCode] = useState<string>('')
@@ -204,6 +206,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                   {week.exercisesCount > 0 && (
                     <Button
                       onClick={() => onStartWeekSession(week.topicIds, week.weekName)}
+                      disabled={startingSession}
                       size="sm"
                       className="bg-lecture-red hover:bg-lecture-red/90 text-white font-semibold text-xs rounded-lg shrink-0 flex items-center gap-1.5 shadow-sm animate-sketch-draw h-9"
                     >

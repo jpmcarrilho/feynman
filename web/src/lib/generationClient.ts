@@ -2,12 +2,12 @@ import type { GenerationOutcome } from '@/lib/generationRetry'
 
 /**
  * Asks the server for the next question of a session through the route handler (not a server action, which would queue
- * behind or in front of the student's other actions). Resolves to the route's `{ exercise } | { error } | { stopped }`.
+ * behind or in front of the student's other actions). The server reads the session's topics and questions itself. Resolves to the route's `{ exercise } | { error } | { stopped }`.
  * Rejects with an AbortError when `signal` is aborted.
  */
 export async function requestNextExercise<T>(
   sessionId: string,
-  body: { topicIds: string[]; existingExerciseIds: string[] },
+  body: { courseId?: string },
   signal: AbortSignal,
   fetchImpl: typeof fetch = fetch,
 ): Promise<GenerationOutcome<T>> {

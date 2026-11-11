@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { gradeAnswer, resolveExerciseType, logScore, sessionScore, formatScore, type GradableExercise } from './grading'
+import { gradeAnswer, resolveExerciseType, logScore, sessionScore, sessionHeadline, formatScore, type GradableExercise } from './grading'
 
 const arr = (...xs: string[]) => JSON.stringify(xs)
 
@@ -182,5 +182,23 @@ describe('session totals', () => {
     expect(formatScore(3)).toBe('3')
     expect(formatScore(1 / 3)).toBe('0.33')
     expect(formatScore(2.5)).toBe('2.5')
+  })
+})
+
+describe('sessionHeadline (shared by the history list and the results dialog)', () => {
+  const log = (score: number, userAnswer: string | null = 'A') => ({ score, isCorrect: score === 1, userAnswer })
+
+  it('study session: the denominator is the answered questions; an unanswered one is only a note', () => {
+    const h = sessionHeadline({ mode: 'study', exerciseCount: 10, logs: [...Array(7).fill(log(1)), log(0), log(0)] })
+    expect(h).toEqual({ scoreSum: 7, correctCount: 7, total: 9, notAnswered: 1 })
+  })
+
+  it('exam: the denominator is all the questions; unanswered ones are logged at 0 and counted in the note', () => {
+    const h = sessionHeadline({ mode: 'exam', exerciseCount: 5, logs: [log(1), log(0.5), log(0, ''), log(0, ''), log(0, '')] })
+    expect(h).toEqual({ scoreSum: 1.5, correctCount: 1, total: 5, notAnswered: 3 })
+  })
+
+  it('without a question count (legacy rows) it falls back to the answered count', () => {
+    expect(sessionHeadline({ mode: 'study', logs: [log(1), log(0)] })).toMatchObject({ total: 2, notAnswered: 0 })
   })
 })

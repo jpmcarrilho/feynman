@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { requestNextExercise } from './generationClient'
 
 const json = (body: unknown, status = 200) => ({ ok: status < 400, status, json: async () => body }) as Response
-const body = { topicIds: ['t1'], existingExerciseIds: ['e1'] }
+const body = { courseId: 'c1' }
 
 describe('requestNextExercise', () => {
   it('POSTs to the session route with the JSON body and the abort signal', async () => {

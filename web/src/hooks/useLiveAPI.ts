@@ -250,6 +250,8 @@ export function useLiveAPI(systemInstructionText: string) {
         }
 
         ws.onmessage = async (event) => {
+          // a connection that was closed (for example because the session changed) adds nothing to the conversation
+          if (wsRef.current !== ws) return
           try {
             let text = event.data
             if (event.data instanceof Blob) {
@@ -299,6 +301,8 @@ export function useLiveAPI(systemInstructionText: string) {
 
         ws.onclose = (event) => {
           console.log("Live API WS Closed:", event.code, event.reason)
+          // the close event of an old connection must not tear down a newer one
+          if (wsRef.current && wsRef.current !== ws) return
           disconnect()
         }
 

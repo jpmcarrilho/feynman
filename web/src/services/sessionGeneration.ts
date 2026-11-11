@@ -10,6 +10,7 @@ import {
   SESSION_REJECTION_LIMIT,
 } from '@/services/exerciseGenerator'
 import { CourseScopeError } from '@/services/courseScope'
+import { parseIdList } from '@/services/sessionService'
 
 /**
  * What one request for "the next question of a session" returns:
@@ -28,35 +29,53 @@ export const MAX_LOGISTICS_SKIPS = 2
 export const GENERATION_FAILED_MESSAGE = 'The question generator is not available right now. Please try again in a moment.'
 
 /**
- * Generates one more question for the session and appends it. With a courseId the session and all topics must belong
- * to that course (a foreign session gives `stopped`, foreign topics give an `error`). Never returns provider errors: the failure is logged here
- * and the student gets a short fixed sentence. The caller authenticates first.
+ * The topics a session may generate from, read from the session itself so the client cannot widen the pool:
+ * the stored selection; an empty selection means every topic of the session's course (every topic when the session
+ * has no course); a session from before topicIds existed uses the topics of its own questions. Never the whole
+ * database unless the session was started unscoped with no selection at all.
+ */
+export async function resolveSessionTopicIds(session: { id: string; courseId: string | null; topicIds: string | null }): Promise<string[]> {
+  if (session.topicIds !== null) {
+    const stored = parseIdList(session.topicIds)
+    if (stored.length > 0) return stored
+    const all = await prisma.topic.findMany({ where: session.courseId ? { courseId: session.courseId } : undefined, select: { id: true } })
+    return all.map((t) => t.id)
+  }
+  const own = await prisma.sessionExercise.findMany({ where: { sessionId: session.id }, select: { exercise: { select: { topicId: true } } } })
+  return [...new Set(own.map((i) => i.exercise.topicId))]
+}
+
+/**
+ * Generates one more question for the session and appends it as the next positional SessionExercise. The topics and
+ * the questions already in the session are read from the server; the caller passes only the session (and the course
+ * the page is scoped to). With a courseId the session must belong to that course (a foreign session gives `stopped`).
+ * Never returns provider errors: the failure is logged here and the student gets a short fixed sentence. The caller
+ * authenticates first.
  *
  * A session that is missing or not `active` gets no model call and nothing appended. The status is read again after the
- * (slow) generation, so a session that ended meanwhile does not receive the question either.
+ * (slow) generation, inside the append transaction, so a session that ended meanwhile does not receive the question
+ * either, and a session that already holds its target number of questions (another tab or device filled it) gets none.
  */
-export async function generateNextForSession(
-  sessionId: string,
-  topicIds: string[],
-  existingExerciseIds: string[],
-  courseId?: string,
-): Promise<NextExerciseResult> {
-  if (topicIds.length === 0) return { error: 'No topics are selected for this session.' }
-
+export async function generateNextForSession(sessionId: string, courseId?: string): Promise<NextExerciseResult> {
   try {
     const session = await prisma.studySession.findUnique({ where: { id: sessionId } })
     if (!session || session.status !== 'active') return { stopped: true }
 
-    // Scoped call: a session stored under another course (or none) is "not found" for it, and topics of another
-    // course are rejected, so nothing from another course is generated from or appended
+    // Scoped call: a session stored under another course (or none) is "not found" for it
+    if (courseId && session.courseId !== courseId) return { stopped: true }
+
+    const topicIds = await resolveSessionTopicIds(session)
+    if (topicIds.length === 0) return { error: 'No topics are selected for this session.' }
+    // Scoped call: every topic of the pool must belong to the course (the pool comes from the session, so this only
+    // fails for a session that was stored with foreign topics)
     if (courseId) {
-      if (session.courseId !== courseId) return { stopped: true }
       const inCourse = new Set<string>()
       for (const chunk of chunkIds([...new Set(topicIds)])) {
         for (const t of await prisma.topic.findMany({ where: { id: { in: chunk }, courseId }, select: { id: true } })) inCourse.add(t.id)
       }
       if (new Set(topicIds).size !== inCourse.size) return { error: new CourseScopeError().message }
     }
+    const existingExerciseIds = (await prisma.sessionExercise.findMany({ where: { sessionId }, select: { exerciseId: true } })).map((i) => i.exerciseId)
 
     // Never target topics without content or with only ungraded material (surveys, participation items)
     const eligibleTopicIds = await filterGeneratableTopicIds(topicIds)
@@ -121,14 +140,9 @@ export async function generateNextForSession(
       }
     }
 
-    // The session may have ended while the question was being generated
-    const current = await prisma.studySession.findUnique({ where: { id: sessionId } })
-    if (!current || current.status !== 'active') return { stopped: true }
-    const currentIds: string[] = current.exerciseIds ? JSON.parse(current.exerciseIds) : []
-    await prisma.studySession.update({
-      where: { id: sessionId },
-      data: { exerciseIds: JSON.stringify([...currentIds, newEx.id]) },
-    })
+    // The session may have ended while the question was being generated; the append re-checks inside its transaction
+    const appended = await appendToSession(sessionId, newEx.id)
+    if (!appended) return { stopped: true }
 
     // The topic's content (up to 830k characters) is not needed by the client
     return { exercise: newEx.topic ? { ...newEx, topic: { ...newEx.topic, content: null } } : newEx }
@@ -136,5 +150,28 @@ export async function generateNextForSession(
     // Full error on the server only; the provider message can contain request details
     console.error('Failed to generate next exercise:', e)
     return { error: e instanceof GenerationError ? e.userMessage : GENERATION_FAILED_MESSAGE }
+  }
+}
+
+/**
+ * Appends an exercise as the next item of an active session that still has room: `position = max + 1` inside a
+ * transaction that re-reads the status and the item count. A unique-constraint conflict on the position (another
+ * request appended first) is retried once. Returns false when the session is no longer active or is already full.
+ */
+export async function appendToSession(sessionId: string, exerciseId: string): Promise<boolean> {
+  const attempt = () =>
+    prisma.$transaction(async (tx) => {
+      const session = await tx.studySession.findUnique({ where: { id: sessionId }, select: { status: true, targetCount: true } })
+      if (!session || session.status !== 'active') return false
+      const agg = await tx.sessionExercise.aggregate({ where: { sessionId }, _max: { position: true }, _count: { _all: true } })
+      if (session.targetCount !== null && agg._count._all >= session.targetCount) return false
+      await tx.sessionExercise.create({ data: { sessionId, exerciseId, position: (agg._max.position ?? -1) + 1 } })
+      return true
+    })
+  try {
+    return await attempt()
+  } catch (e) {
+    if ((e as { code?: string })?.code === 'P2002') return attempt()
+    throw e
   }
 }

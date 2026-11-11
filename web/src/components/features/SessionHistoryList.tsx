@@ -2,7 +2,7 @@
 
 import { Button } from '@/components/ui/button'
 import { History, Trash2 } from 'lucide-react'
-import { sessionScore, formatScore } from '@/lib/grading'
+import { sessionHeadline, formatScore } from '@/lib/grading'
 
 interface SessionHistoryListProps {
   histories: any[];
@@ -20,13 +20,8 @@ export function SessionHistoryList({
   return (
     <div className="space-y-2">
       {histories.map(h => {
-        const logs = h.logs || [];
-        const answeredLogs = logs.filter((l: any) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '');
-        // Same definition as the results dialog, the exam diagnosis and analytics: sum of per-question scores
-        const { scoreSum } = sessionScore(logs);
-        const total = h.mode === 'exam' && h.exerciseCount
-          ? h.exerciseCount
-          : answeredLogs.length;
+        // Same helper as the results dialog: one headline score for the same session
+        const { scoreSum, total } = sessionHeadline({ mode: h.mode, exerciseCount: h.exerciseCount, logs: h.logs || [] });
         const isActiveSession = session?.id === h.id;
         return (
           <div 

@@ -23,11 +23,12 @@ export async function createSessionSummary(sessionId: string, courseId?: string)
     throw new Error('Session not found')
   }
 
-  // 2. Retrieve ALL exercises configured for this entire session (not just the logged/answered ones)
-  if (!session.exerciseIds) {
+  // 2. Retrieve ALL exercises of this entire session (not just the logged/answered ones), from its SessionExercise rows
+  const items = await prisma.sessionExercise.findMany({ where: { sessionId }, select: { exerciseId: true } })
+  if (items.length === 0) {
     throw new Error('No exercises configured for this session')
   }
-  const exerciseIds = JSON.parse(session.exerciseIds) as string[]
+  const exerciseIds = items.map((i) => i.exerciseId)
 
   const exercises = await prisma.exercise.findMany({
     where: courseId

@@ -287,6 +287,26 @@ export function sessionScore(logs: ScoredLog[]): { scoreSum: number; correctCoun
   return { scoreSum, correctCount }
 }
 
+export interface HeadlineSession {
+  mode?: string | null
+  /** Number of questions of the session (all of them, answered or not). */
+  exerciseCount?: number | null
+  logs: (ScoredLog & { userAnswer?: string | null })[]
+}
+
+/**
+ * The one headline score of a session, shared by the history list row and the results dialog so they cannot disagree.
+ * Denominator: for an exam, all its questions (unanswered ones are logged at 0); for a study session, the answered ones.
+ * `notAnswered` is the number of questions without an answer (needs `exerciseCount`); it is shown as a note, never in the score.
+ */
+export function sessionHeadline(session: HeadlineSession): { scoreSum: number; correctCount: number; total: number; notAnswered: number } {
+  const { scoreSum, correctCount } = sessionScore(session.logs)
+  const answered = session.logs.filter((l) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '').length
+  const total = session.mode === 'exam' && session.exerciseCount ? session.exerciseCount : answered
+  const questions = session.exerciseCount ?? total
+  return { scoreSum, correctCount, total, notAnswered: Math.max(0, questions - answered) }
+}
+
 /** 3 -> "3", 0.3333 -> "0.33", 2.5 -> "2.5". */
 export function formatScore(n: number): string {
   return String(Math.round(n * 100) / 100)

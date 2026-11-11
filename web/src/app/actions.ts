@@ -12,7 +12,25 @@ import { getCourseWithProfile, getProfileForTopic, getProfileForCourse, getProfi
 import { cleanCourseId, dominantCourseId, CourseScopeError } from '@/services/courseScope'
 import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
 import { generateNextForSession, type NextExerciseResult } from '@/services/sessionGeneration'
-import { submitExamForSession, type ExamSubmission } from '@/services/sessionService'
+import {
+  submitExamForSession,
+  finalizeOverdueExams,
+  createSessionWithItems,
+  endPreviousActiveSessions,
+  completeSession,
+  cancelSession,
+  getSessionStateFor,
+  getActiveSessionFor,
+  saveDraftFor,
+  setFlaggedFor,
+  setCurrentPositionFor,
+  logAnswerForSession,
+  getSessionResultsFor,
+  type SessionResultItem,
+  type ExamSubmission,
+  type SessionState,
+  type MutationResult,
+} from '@/services/sessionService'
 import { enrichInBackground, isBackgroundEnrichmentEnabled, type EnrichableRow } from '@/services/enrichment'
 import { gradeAnswer, logScore } from '@/lib/grading'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
@@ -37,7 +55,8 @@ async function getScopedProfile(courseId: string) {
 }
 
 // Fields the session list, results dialog and plan view read. No chatLog, diagnosis, draftAnswers or flaggedIds.
-// exerciseIds is selected only so the server can turn it into exerciseCount (see withExerciseCount).
+// The session's SessionExercise rows are selected only so the server can order the logs by question position and turn
+// them into exerciseCount (see withItemInfo); the id list itself never reaches the client.
 const SESSION_LIST_SELECT = {
   id: true,
   title: true,
@@ -49,7 +68,7 @@ const SESSION_LIST_SELECT = {
   sourcingMix: true,
   studyPlanId: true,
   courseId: true,
-  exerciseIds: true,
+  items: { select: { exerciseId: true, position: true } },
   logs: {
     select: {
       id: true,
@@ -65,50 +84,19 @@ const SESSION_LIST_SELECT = {
   },
 } as const
 
-// Every exercise column plus the topic without its (up to 830k chars) content.
-const EXERCISE_CLIENT_SELECT = {
-  id: true,
-  topicId: true,
-  questionText: true,
-  exerciseType: true,
-  choices: true,
-  correctAnswer: true,
-  explanation: true,
-  isGraded: true,
-  origin: true,
-  status: true,
-  promptVersion: true,
-  originalQuestionText: true,
-  enrichedAt: true,
-  reportedReason: true,
-  createdAt: true,
-  topic: {
-    select: {
-      id: true,
-      courseId: true,
-      title: true,
-      week: true,
-      className: true,
-      unit: true,
-      resourceType: true,
-      isQuantitative: true,
-      course: { select: { id: true, code: true, title: true } },
-    },
-  },
-} as const
-
-/** Replaces the legacy exerciseIds JSON string with its length so the client never needs the id list. */
-function withExerciseCount<T extends { exerciseIds?: string | null }>(session: T) {
-  const { exerciseIds, ...rest } = session
-  let exerciseCount: number | null = null
-  if (exerciseIds) {
-    try {
-      exerciseCount = (JSON.parse(exerciseIds) as unknown[]).length
-    } catch {
-      exerciseCount = null
-    }
-  }
-  return { ...rest, exerciseCount }
+/**
+ * Replaces the session's item rows with exerciseCount (its number of questions) and puts each log at the position of
+ * its question: logs are returned in question order and carry `position`. A log without an item (cannot happen for
+ * sessions written by this app) sorts last, in the order it was read.
+ */
+function withItemInfo<T extends { items: { exerciseId: string; position: number }[]; logs: { exerciseId: string }[] }>(session: T) {
+  const { items, logs, ...rest } = session
+  const positionOf = new Map(items.map((i) => [i.exerciseId, i.position]))
+  const ordered = logs
+    .map((log, index) => ({ log, index, position: positionOf.get(log.exerciseId) ?? Number.MAX_SAFE_INTEGER }))
+    .sort((a, b) => a.position - b.position || a.index - b.index)
+    .map(({ log, position }) => ({ ...log, position: position === Number.MAX_SAFE_INTEGER ? null : position }))
+  return { ...rest, logs: ordered, exerciseCount: items.length }
 }
 
 export async function explainMistake({
@@ -193,25 +181,45 @@ export async function getGlobalCourseContextForExercises(courseId: string, exerc
   return getGlobalCourseContext(courseId, combinedText);
 }
 
-export async function createStudySession(
-  topicIds: string[], 
-  count: number, 
-  mode: 'study' | 'exam' = 'study', 
-  timeLimit: number | null = null, 
-  sourcingMix: number = 50,
-  weakPct: number = 60,
-  unstudiedPct: number = 20,
-  expertPct: number = 20,
+export type StartSessionInput = {
   courseId?: string
-) {
+  topicIds: string[]
+  count: number
+  mode: 'study' | 'exam'
+  timeLimit: number | null
+  sourcingMix: number
+  weakPct: number
+  unstudiedPct: number
+  expertPct: number
+}
+
+const clampPct = (n: unknown, fallback: number) => (typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : fallback)
+
+/**
+ * Starts a session: picks the questions (adaptive buckets, unchanged), ends the student's previous active session of
+ * the same scope without destroying answers (a study session is completed, an exam is submitted with its stored
+ * drafts; plan sessions are left alone), and stores the session with its topics, target count, exam deadline and
+ * positional SessionExercise rows. Returns the full SessionState; `missingCount` (targetCount minus the questions
+ * drawn from existing exercises) says how many the client must have generated.
+ * With a courseId the course must exist and every selected topic must belong to it (T16).
+ */
+export async function startSession(input: StartSessionInput): Promise<SessionState> {
   await requireAuth()
-  const scope = cleanCourseId(courseId)
+  const safe = (input ?? {}) as Partial<StartSessionInput>
+  const topicIds = Array.isArray(safe.topicIds) ? [...new Set(safe.topicIds.filter((id): id is string => typeof id === 'string' && id.length > 0))] : []
+  const count = Math.max(1, Math.min(500, Math.floor(Number(safe.count) || 10)))
+  const mode: 'study' | 'exam' = safe.mode === 'exam' ? 'exam' : 'study'
+  const timeLimit = typeof safe.timeLimit === 'number' && safe.timeLimit > 0 ? Math.floor(safe.timeLimit) : null
+  const sourcingMix = clampPct(safe.sourcingMix, 50)
+  const weakPct = clampPct(safe.weakPct, 60)
+  const unstudiedPct = clampPct(safe.unstudiedPct, 20)
+  const expertPct = clampPct(safe.expertPct, 20)
+  const scope = cleanCourseId(safe.courseId)
   if (scope) {
     const exists = await prisma.course.findUnique({ where: { id: scope }, select: { id: true } })
     if (!exists) throw new CourseScopeError('Studyspace not found.')
   }
   let selected: any[] = []
-  let missingCount = 0;
   // Candidates the student has never answered, kept for background enrichment (see below)
   let unstudiedCandidates: EnrichableRow[] = [];
 
@@ -351,10 +359,8 @@ export async function createStudySession(
 
     selected = selectedExercises;
     unstudiedCandidates = unstudiedPool;
-    missingCount = count - selected.length;
   } else {
     selected = [];
-    missingCount = count;
   }
 
   // Determine a descriptive title based on selected courses and weeks
@@ -391,17 +397,17 @@ export async function createStudySession(
   const sessionCourseId = scope
     ?? dominantCourseId(topicIds.length > 0 ? selectedTopicCourseIds : selected.map((e: { topic?: { courseId?: string } | null }) => e.topic?.courseId));
 
-  const session = await prisma.studySession.create({
-    data: {
-      status: 'active',
-      courseId: sessionCourseId,
-      title: sessionTitle,
-      mode,
-      timeLimit,
-      sourcingMix,
-      exerciseIds: JSON.stringify(selected.map((e: any) => e.id))
-    },
-    include: { logs: true }
+  // The previous active session of this scope ends first (answers are kept), then the new one is stored with its items
+  await endPreviousActiveSessions(scope ? { courseId: scope } : {})
+  const session = await createSessionWithItems({
+    courseId: sessionCourseId,
+    title: sessionTitle,
+    mode,
+    timeLimit,
+    sourcingMix,
+    topicIds,
+    targetCount: count,
+    exerciseIds: selected.map((e: any) => e.id as string),
   })
 
   // Optional context enrichment (off unless ENRICH_IN_BACKGROUND=1). It never delays session start and never rewrites a
@@ -413,16 +419,42 @@ export async function createStudySession(
     enrichInBackground(unstudiedCandidates.filter((e) => !selectedIdSet.has(e.id)))
   }
 
-  // Return exercises without topic.content.
-  const selectedIds: string[] = selected.map(e => e.id)
-  const rows = selectedIds.length > 0
-    ? await prisma.exercise.findMany({ where: { id: { in: selectedIds } }, select: EXERCISE_CLIENT_SELECT })
-    : []
-  const clientExercises = selectedIds
-    .map(id => rows.find(r => r.id === id))
-    .filter((r): r is (typeof rows)[number] => !!r)
+  const state = await getSessionStateFor(session.id)
+  if (!state) throw new Error('The session could not be read back after it was created.')
+  return state
+}
 
-  return { session, exercises: clientExercises, missingCount }
+/** The latest active session of the studyspace (all courses when no courseId), or null. See getActiveSessionFor. */
+export async function getActiveSession(courseId?: string): Promise<SessionState | null> {
+  await requireAuth()
+  return getActiveSessionFor(cleanCourseId(courseId))
+}
+
+/**
+ * Full state of one session, read from the server (questions in order, drafts, flags, answers, remaining questions to
+ * generate, deadline and server clock). An exam whose deadline passed more than 30 s ago is finalized with its stored
+ * drafts first. Null when the session does not exist or, with a courseId, belongs to another course.
+ */
+export async function getSessionState(sessionId: string, courseId?: string): Promise<SessionState | null> {
+  await requireAuth()
+  if (typeof sessionId !== 'string' || !sessionId) return null
+  return getSessionStateFor(sessionId, cleanCourseId(courseId))
+}
+
+/** Stores one exam draft (null clears it). Does nothing and reports a reason for a non-item, an inactive session or after the deadline. */
+export async function saveDraft(sessionId: string, exerciseId: string, draftAnswer: string | null, timeSpentDeltaSec: number = 0): Promise<MutationResult> {
+  await requireAuth()
+  return saveDraftFor(sessionId, exerciseId, draftAnswer, timeSpentDeltaSec)
+}
+
+export async function setFlagged(sessionId: string, exerciseId: string, flagged: boolean): Promise<MutationResult> {
+  await requireAuth()
+  return setFlaggedFor(sessionId, exerciseId, flagged)
+}
+
+export async function setCurrentPosition(sessionId: string, position: number): Promise<MutationResult> {
+  await requireAuth()
+  return setCurrentPositionFor(sessionId, position)
 }
 
 /**
@@ -436,47 +468,18 @@ export async function logAnswer(
   opts?: { duration?: number; assisted?: boolean }
 ): Promise<{ score: number; isCorrect: boolean } | null> {
   await requireAuth()
-  // A stale browser tab running the old client would pass a boolean here
-  if (typeof userAnswer !== 'string') return null
-  try {
-    const exercise = await prisma.exercise.findUnique({
-      where: { id: exerciseId },
-      select: { exerciseType: true, choices: true, correctAnswer: true, questionText: true },
-    })
-    if (!exercise) return null
-    const graded = gradeAnswer(exercise, userAnswer)
-    const duration = Math.max(0, Math.min(3600, Math.round(opts?.duration ?? 30)))
-    await prisma.exerciseLog.create({
-      data: {
-        sessionId,
-        exerciseId,
-        isCorrect: graded.isCorrect,
-        score: graded.score,
-        assisted: opts?.assisted ?? false,
-        userAnswer,
-        duration,
-      },
-    })
-    return graded
-  } catch (error: any) {
-    // First attempt wins: a second log for the same (sessionId, exerciseId) violates the unique index
-    if (error?.code === 'P2002') {
-      const existing = await prisma.exerciseLog.findUnique({
-        where: { sessionId_exerciseId: { sessionId, exerciseId } },
-        select: { score: true, isCorrect: true },
-      })
-      return existing ? { score: logScore(existing), isCorrect: existing.isCorrect } : null
-    }
-    console.error("Failed to log answer (likely stale session):", error.message)
-    return null
-  }
+  // A stale browser tab running the old client would pass a boolean here. The service accepts the answer only for an
+  // item of an active study session; anything else returns null and writes nothing.
+  return logAnswerForSession(sessionId, exerciseId, userAnswer, opts)
 }
 
 /**
- * Submits a timed exam: grades every exercise of the session on the server (unanswered ones score 0), creates the
- * logs and completes the session in one transaction. Repeating the call changes nothing and returns the same totals.
+ * Submits a timed exam: grades every question of the session on the server (unanswered ones score 0), creates the
+ * logs and completes the session in one transaction. Answers come from the drafts stored on the server; `answers` is
+ * optional and overrides them per question until the deadline plus 30 s. Repeating the call changes nothing and
+ * returns the same totals.
  */
-export async function submitExam(sessionId: string, answers: Record<string, string>): Promise<ExamSubmission | null> {
+export async function submitExam(sessionId: string, answers?: Record<string, string>): Promise<ExamSubmission | null> {
   await requireAuth()
   try {
     return await submitExamForSession(sessionId, answers)
@@ -505,33 +508,22 @@ export async function saveChatLog(sessionId: string, messages: any[]) {
 export async function finishStudySession(sessionId: string) {
   await requireAuth()
   try {
-    return await prisma.studySession.update({
-      where: { id: sessionId },
-      data: { 
-        status: 'completed',
-        endTime: new Date()
-      }
-    })
+    // Study session: marked completed (only while active). Exam: submitted with its stored drafts.
+    return await completeSession(sessionId)
   } catch (error: any) {
     console.error("Failed to finish study session:", error.message)
-    return null
+    return false
   }
 }
 
 export async function cancelStudySession(sessionId: string) {
   await requireAuth()
   try {
-    // No logs are written: a cancelled exam has no score
-    return await prisma.studySession.update({
-      where: { id: sessionId },
-      data: {
-        status: 'cancelled',
-        endTime: new Date()
-      }
-    })
+    // No logs are written: a cancelled exam has no score. Only an active session can be cancelled.
+    return await cancelSession(sessionId)
   } catch (error) {
     console.error("Failed to cancel study session:", error instanceof Error ? error.message : error)
-    return null
+    return false
   }
 }
 
@@ -542,12 +534,21 @@ export async function cancelStudySession(sessionId: string) {
 export async function getSessionHistory(courseId?: string) {
   await requireAuth()
   const scope = cleanCourseId(courseId)
+  // An exam whose deadline passed is never listed as active: it is finalized with its stored drafts first
+  await finalizeOverdueExams(scope ? { courseId: scope } : {})
   const sessions = await prisma.studySession.findMany({
     where: scope ? { courseId: scope, mode: { not: 'global_diagnosis' } } : undefined,
     orderBy: { startTime: 'desc' },
     select: SESSION_LIST_SELECT
   })
-  return sessions.map(withExerciseCount)
+  return sessions.map(withItemInfo)
+}
+
+/** Every question of a session in order, with its answer or null; what the results dialog lists. */
+export async function getSessionResults(sessionId: string): Promise<SessionResultItem[]> {
+  await requireAuth()
+  if (typeof sessionId !== 'string' || !sessionId) return []
+  return getSessionResultsFor(sessionId)
 }
 
 export async function getSessionDetail(sessionId: string) {
@@ -583,27 +584,6 @@ export async function getVoiceContextForExercise(exerciseId: string, mode: strin
   return buildVoiceContext({ exerciseId, mode })
 }
 
-export async function getSessionWithExercises(sessionId: string) {
-  await requireAuth()
-  const session = await prisma.studySession.findUnique({
-    where: { id: sessionId },
-    select: SESSION_LIST_SELECT
-  })
-  
-  if (!session || !session.exerciseIds) return null
-
-  const ids = JSON.parse(session.exerciseIds) as string[]
-  const exercises = await prisma.exercise.findMany({
-    where: { id: { in: ids } },
-    select: EXERCISE_CLIENT_SELECT
-  })
-
-  // Restore original order
-  const orderedExercises = ids.map(id => exercises.find(e => e.id === id)).filter(Boolean)
-
-  return { session: withExerciseCount(session), exercises: orderedExercises }
-}
-
 /**
  * Dashboard numbers. With a courseId every figure covers only that course: its sessions (not cancelled, not the
  * diagnosis holder), the logs of questions that belong to the course, its topics and its diagnosis. A session started
@@ -613,6 +593,7 @@ export async function getSessionWithExercises(sessionId: string) {
 export async function getAnalyticsData(courseId?: string) {
   await requireAuth()
   const scope = cleanCourseId(courseId)
+  await finalizeOverdueExams(scope ? { courseId: scope } : {})
   const sessions = await prisma.studySession.findMany({
     where: scope
       ? { status: { not: 'cancelled' }, courseId: scope, mode: { not: 'global_diagnosis' } }
@@ -789,20 +770,10 @@ export async function getAnalyticsData(courseId?: string) {
  * `POST /api/sessions/[sessionId]/generate-next` route, which the study interface calls so that a 20-40 second
  * generation does not block the other server actions: Next.js dispatches server actions one at a time per client).
  */
-export async function generateNextExercise(
-  sessionId: string,
-  topicIds: string[],
-  existingExerciseIds: string[],
-  // Kept for callers; the number of questions still missing does not change what one call does
-  missingCount: number = 1,
-  courseId?: string,
-): Promise<NextExerciseResult> {
-  void missingCount
+export async function generateNextExercise(sessionId: string, courseId?: string): Promise<NextExerciseResult> {
   await requireAuth()
   const scope = cleanCourseId(courseId)
-  return scope
-    ? generateNextForSession(sessionId, topicIds, existingExerciseIds, scope)
-    : generateNextForSession(sessionId, topicIds, existingExerciseIds)
+  return scope ? generateNextForSession(sessionId, scope) : generateNextForSession(sessionId)
 }
 
 /** Reasons the student can give when reporting a question. */
@@ -1228,7 +1199,9 @@ export async function saveAndDeployStudyPlan(planData: any, courseId?: string) {
           mode: sessionData.mode,
           timeLimit: sessionData.mode === 'exam' ? sessionData.durationMinutes * 60 : null,
           sourcingMix: sessionData.sourcingMix,
-          exerciseIds: JSON.stringify(exercises.map(e => e.id)),
+          topicIds: JSON.stringify(sessionTopicIds(sessionData)),
+          targetCount: exercises.length,
+          items: { create: exercises.map((e, position) => ({ exerciseId: e.id, position })) },
           studyPlanId: plan.id,
           courseId: scope ?? dominantCourseId(coursesOf(sessionTopicIds(sessionData))) ?? planCourseId
         }
@@ -1246,6 +1219,7 @@ export async function getStudyPlans(courseId?: string) {
   await requireAuth()
   const scope = cleanCourseId(courseId)
   try {
+    await finalizeOverdueExams(scope ? { courseId: scope } : {})
     const plans = await prisma.studyPlan.findMany({
       where: scope ? { courseId: scope } : undefined,
       orderBy: { createdAt: 'desc' },
@@ -1256,7 +1230,7 @@ export async function getStudyPlans(courseId?: string) {
         }
       }
     });
-    return plans.map(plan => ({ ...plan, sessions: plan.sessions.map(withExerciseCount) }));
+    return plans.map(plan => ({ ...plan, sessions: plan.sessions.map(withItemInfo) }));
   } catch (error) {
     console.error("Failed to fetch study plans:", error);
     return [];

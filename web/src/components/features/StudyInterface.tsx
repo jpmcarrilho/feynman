@@ -10,14 +10,18 @@ import { VoiceHub } from './VoiceHub'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import {
-  createStudySession,
+  startSession,
+  getActiveSession,
+  getSessionState,
+  saveDraft,
+  setFlagged,
+  setCurrentPosition,
   getTopicsWithPerformance,
   getSessionHistory,
   logAnswer,
   submitExam,
   saveChatLog,
   finishStudySession,
-  getSessionWithExercises,
   getSessionDetail,
   getVoiceContextForExercise,
   reportExercise,
@@ -59,7 +63,7 @@ import {
   voiceDashboardContextMessage,
 } from '@/lib/prompts'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
-import { formatScore } from '@/lib/grading'
+import { formatScore, sessionScore } from '@/lib/grading'
 import type { TutorChatMode } from '@/lib/studyspace/profile'
 import { getChatMode, setChatMode, subscribeChatMode } from '@/lib/studyspace/chatMode'
 import { AnalyticsDashboard } from './AnalyticsDashboard'
@@ -69,6 +73,17 @@ import { SessionResultsDialog } from './SessionResultsDialog'
 import { SessionHistoryList } from './SessionHistoryList'
 import { SideVisualizer, type ActiveFileKind } from './SideVisualizer'
 import { parseFileLink } from '@/lib/fileLinks'
+import { DebouncedWriter } from '@/lib/debouncedWriter'
+import { ChatBuffer } from '@/lib/chatBuffer'
+import {
+  viewFromState,
+  remainingSeconds,
+  activeSessionHintKey,
+  legacySessionId,
+  stateDiffers,
+  serverOffsetOf,
+} from '@/lib/sessionClient'
+import type { SessionState } from '@/services/sessionService'
 import { StudyPlanDraftWidget } from './StudyPlanDraftWidget'
 import { ResourcesDashboard } from './ResourcesDashboard'
 
@@ -120,12 +135,22 @@ const CHAT_MODE_SCOPE = 'legacy'
 // How long a typed first message waits for the exercise context prefetch before it is sent without it
 const CONTEXT_WAIT_MS = 5000
 
-export function StudyInterface() {
+/** How long typing in a numeric field waits before the draft is sent, and the same for moving between questions. */
+const DRAFT_DEBOUNCE_MS = 500
+/** The tutor conversation is saved to the session this often while it changes. */
+const CHAT_SAVE_INTERVAL_MS = 15_000
+const LEGACY_SESSION_KEY = 'dedp_active_session'
+
+/**
+ * The study screen. The state of the running session (question, drafts, flags, answers, deadline, questions still to
+ * be generated, topics) lives on the server; this component renders what `getSessionState` / `getActiveSession`
+ * return. The only thing the browser keeps is a hint: the id of the session this browser had open
+ * (`feynman_active_session_<courseId|global>`). `courseId` scopes the session actions to one studyspace (T19 passes it).
+ */
+export function StudyInterface({ courseId }: { courseId?: string } = {}) {
   const [topics, setTopics] = useState<any[]>([])
   // The Create Session dialog's selection only
   const [selectedTopics, setSelectedTopics] = useState<string[]>([])
-  // Topics of the running session: used by the background question generator, never by the dialog
-  const [activeSessionTopics, setActiveSessionTopics] = useState<string[]>([])
   const [histories, setHistories] = useState<any[]>([])
   const [isModalOpen, setIsModalOpen] = useState(false)
   const [isLoading, setIsLoading] = useState(false)
@@ -226,6 +251,128 @@ export function StudyInterface() {
   )
   const handleChatModeChange = (mode: TutorChatMode) => setChatMode(CHAT_MODE_SCOPE, mode)
 
+  // ---------------------------------------------------------------------------------------------------------------
+  // Server-owned session state. The screen renders what the server returns; the browser keeps only a hint (session id).
+  // ---------------------------------------------------------------------------------------------------------------
+  // One serial, debounced queue for the small writes (drafts, flags, current question): they reach the server in the
+  // order they were made, each carrying the session it belongs to, and are flushed before submitting or switching.
+  const [writer] = useState(() => new DebouncedWriter())
+  const hintKey = activeSessionHintKey(courseId)
+  // server clock minus client clock (ms), refreshed whenever a state is read
+  const serverOffsetRef = useRef(0)
+  // the same offset as state, for the study timer's render
+  const [clockOffsetMs, setClockOffsetMs] = useState(0)
+  // the session the screen shows, for async callbacks that must not apply to a session that is no longer shown
+  const sessionIdRef = useRef<string | null>(null)
+  // which session the tutor conversation in memory belongs to: it can only be saved to that session (see chatBuffer.ts)
+  const [chat] = useState(() => new ChatBuffer<(typeof liveAPI.messages)[number]>())
+  // a message the student typed while the tutor was disconnected, sent once the connection is up (dropped when the session changes)
+  const pendingMessageRef = useRef<string | null>(null)
+  // true while a start request is in flight: a second click cannot create a second session
+  const startingRef = useRef(false)
+  const autoSubmitRef = useRef<string | null>(null)
+  const finishExamRef = useRef<() => Promise<void>>(async () => {})
+  const latestRef = useRef<{ status: string | undefined; itemCount: number; missingCount: number }>({ status: undefined, itemCount: 0, missingCount: 0 })
+
+  /**
+   * Replaces the conversation on screen with `messages` and makes `owner` the only session it can be saved to.
+   * A live voice/text connection is closed when the session changes: the model keeps the conversation of the old
+   * session on its side and that history cannot be removed from an open connection. Reconnecting starts a new
+   * conversation seeded only with this session's own messages.
+   */
+  const switchChat = (owner: string | null, messages: typeof liveAPI.messages = []) => {
+    liveAPI.setMessages(chat.replace(owner, messages))
+    pendingMessageRef.current = null
+    liveAPI.disconnect()
+  }
+
+  const applyState = (state: SessionState, opts: { keepIndex?: boolean } = {}) => {
+    // A different session than the one on screen (start, load, resume): its chat starts empty and is loaded separately
+    if (sessionIdRef.current !== state.session.id) switchChat(state.session.id)
+    const v = viewFromState(state)
+    serverOffsetRef.current = v.serverOffsetMs
+    setClockOffsetMs(v.serverOffsetMs)
+    sessionIdRef.current = state.session.id
+    setSession(v.session)
+    setExercises(v.exercises)
+    setDraftAnswers(v.draftAnswers)
+    setFlaggedIds(v.flaggedIds)
+    setMissingCount(v.missingCount)
+    setCurrentIndex(opts.keepIndex ? (i) => Math.min(i, Math.max(0, v.exercises.length - 1)) : v.currentIndex)
+  }
+
+  const loadChatLog = async (id: string) => {
+    try {
+      const detail = await getSessionDetail(id)
+      if (!detail?.chatLog || sessionIdRef.current !== id) return
+      const restored = JSON.parse(detail.chatLog)
+      // Only into an empty conversation of this very session: messages that arrived meanwhile are not overwritten
+      if (Array.isArray(restored) && chat.ownerId() === id && chat.snapshot(id) === null) {
+        liveAPI.setMessages(chat.replace(id, restored))
+      }
+    } catch (e) {
+      console.error('Failed to load chat log', e)
+    }
+  }
+
+  /** Re-reads one session and applies it when the screen is out of date (status, number of questions, questions left). */
+  const refreshFromServer = async (id: string, opts: { force?: boolean } = {}): Promise<SessionState | null> => {
+    await writer.flush()
+    const state = await getSessionState(id, courseId)
+    if (!state || sessionIdRef.current !== id) return state
+    serverOffsetRef.current = serverOffsetOf(state)
+    setClockOffsetMs(serverOffsetRef.current)
+    if (opts.force || stateDiffers(latestRef.current, state)) {
+      const statusChanged = latestRef.current.status !== state.session.status
+      applyState(state, { keepIndex: true })
+      // the server ended the session (deadline passed, finished elsewhere): the list shows its new status and score
+      if (statusChanged) getSessionHistory().then(setHistories)
+    }
+    return state
+  }
+
+  const clearSessionView = (opts: { forgetHint?: boolean; keepChat?: boolean } = {}) => {
+    stopGeneration()
+    if (opts.forgetHint !== false) safeRemoveItem(hintKey)
+    sessionIdRef.current = null
+    setSession(null)
+    setExercises([])
+    setCurrentIndex(0)
+    setDraftAnswers({})
+    setFlaggedIds([])
+    setTimeLeft(null)
+    setMissingCount(0)
+    if (!opts.keepChat) switchChat(null)
+  }
+
+  // A rejected small write means the server no longer treats the session as open (ended elsewhere, deadline passed):
+  // show what the server says. Deferred so it never waits on the write queue it is running in.
+  const syncAfterRejection = (sid: string, result: { ok: boolean; reason?: string }) => {
+    if (result.ok || (result.reason !== 'not_active' && result.reason !== 'deadline_passed')) return
+    setTimeout(() => { void refreshFromServer(sid, { force: true }) }, 0)
+  }
+
+  const persistDraft = (sid: string, exerciseId: string, value: string | null, debounce: boolean) => {
+    writer.schedule(`${sid}:draft:${exerciseId}`, async () => syncAfterRejection(sid, await saveDraft(sid, exerciseId, value, 0)), debounce ? DRAFT_DEBOUNCE_MS : 0)
+  }
+
+  const toggleFlag = (exerciseId: string) => {
+    if (!session) return
+    const next = !flaggedIds.includes(exerciseId)
+    setFlaggedIds(next ? [...flaggedIds, exerciseId] : flaggedIds.filter((id) => id !== exerciseId))
+    const sid = session.id
+    writer.schedule(`${sid}:flag:${exerciseId}`, async () => syncAfterRejection(sid, await setFlagged(sid, exerciseId, next)), 0)
+  }
+
+  /** Moves to another question and remembers it on the server (debounced). */
+  const goToIndex = (index: number) => {
+    setCurrentIndex(index)
+    if (session?.status === 'active') {
+      const sid = session.id
+      writer.schedule(`${sid}:pos`, async () => syncAfterRejection(sid, await setCurrentPosition(sid, index)), DRAFT_DEBOUNCE_MS)
+    }
+  }
+
   const loadActivePlan = async () => {
     try {
       const plans = await getStudyPlans();
@@ -249,11 +396,10 @@ export function StudyInterface() {
   const handleGeneratePlan = async () => {
     setIsGeneratingPlan(true)
     try {
-      // Clear any active session states first to let the draft planner render without state collisions
-      setSession(null)
-      setExercises([])
-      setCurrentIndex(0)
-      safeRemoveItem('dedp_active_session')
+      // Hide the running session first to let the draft planner render without state collisions. It stays active on the
+      // server (and is resumed on the next load); only its screen is cleared.
+      await writer.flush()
+      clearSessionView({ forgetHint: false, keepChat: true })
 
       // Fetch actual, current data analytics metrics to feed into Gemini advisor
       const analytics = await getAnalyticsData()
@@ -329,185 +475,118 @@ export function StudyInterface() {
     getSessionHistory().then(setHistories)
     loadActivePlan()
 
-    // Load active session from local storage
-    const savedSession = safeGetItem('dedp_active_session')
-    if (savedSession) {
-      try {
-        const parsed = JSON.parse(savedSession)
-        
-        // Sync with the database to ensure we don't lose any questions generated on the server during refresh
-        if (parsed.session?.id) {
-          getSessionWithExercises(parsed.session.id).then(dbData => {
-            if (dbData) {
-              setSession(dbData.session)
-              setExercises(dbData.exercises)
-              
-              // Correctly compute missingCount from target total count
-              const targetCount = (parsed.exercises?.length || 0) + (parsed.missingCount || 0)
-              const actualMissing = Math.max(0, targetCount - dbData.exercises.length)
-              setMissingCount(actualMissing)
-              
-              setCurrentIndex(parsed.currentIndex || 0)
-              if (parsed.sessionDuration !== undefined) {
-                setSessionDuration(parsed.sessionDuration)
-              }
-              if (parsed.draftAnswers !== undefined) {
-                setDraftAnswers(parsed.draftAnswers)
-              }
-              if (parsed.flaggedIds !== undefined) {
-                setFlaggedIds(parsed.flaggedIds)
-              }
-              if (parsed.timeLeft !== undefined) {
-                setTimeLeft(parsed.timeLeft)
-              }
-              if (parsed.chatLog && Array.isArray(parsed.chatLog)) {
-                liveAPI.setMessages(parsed.chatLog)
-              }
-            } else {
-              // Fallback to local storage state if not found in DB
-              setSession(parsed.session)
-              setExercises(parsed.exercises)
-              setCurrentIndex(parsed.currentIndex || 0)
-              if (parsed.missingCount !== undefined) {
-                setMissingCount(parsed.missingCount)
-              }
-              if (parsed.sessionDuration !== undefined) {
-                setSessionDuration(parsed.sessionDuration)
-              }
-              if (parsed.draftAnswers !== undefined) {
-                setDraftAnswers(parsed.draftAnswers)
-              }
-              if (parsed.flaggedIds !== undefined) {
-                setFlaggedIds(parsed.flaggedIds)
-              }
-              if (parsed.timeLeft !== undefined) {
-                setTimeLeft(parsed.timeLeft)
-              }
-              if (parsed.chatLog && Array.isArray(parsed.chatLog)) {
-                liveAPI.setMessages(parsed.chatLog)
-              }
-            }
-          }).catch(err => {
-            console.error("Error syncing active session with database:", err)
-            // Fallback to local storage state on error
-            setSession(parsed.session)
-            setExercises(parsed.exercises)
-            setCurrentIndex(parsed.currentIndex || 0)
-            if (parsed.missingCount !== undefined) {
-              setMissingCount(parsed.missingCount)
-            }
-            if (parsed.sessionDuration !== undefined) {
-              setSessionDuration(parsed.sessionDuration)
-            }
-            if (parsed.draftAnswers !== undefined) {
-              setDraftAnswers(parsed.draftAnswers)
-            }
-            if (parsed.flaggedIds !== undefined) {
-              setFlaggedIds(parsed.flaggedIds)
-            }
-            if (parsed.timeLeft !== undefined) {
-              setTimeLeft(parsed.timeLeft)
-            }
-            if (parsed.chatLog && Array.isArray(parsed.chatLog)) {
-              liveAPI.setMessages(parsed.chatLog)
-            }
-          })
-        } else {
-          setSession(parsed.session)
-          setExercises(parsed.exercises)
-          setCurrentIndex(parsed.currentIndex || 0)
-          if (parsed.missingCount !== undefined) {
-            setMissingCount(parsed.missingCount)
-          }
-          if (parsed.sessionDuration !== undefined) {
-            setSessionDuration(parsed.sessionDuration)
-          }
-          if (parsed.draftAnswers !== undefined) {
-            setDraftAnswers(parsed.draftAnswers)
-          }
-          if (parsed.flaggedIds !== undefined) {
-            setFlaggedIds(parsed.flaggedIds)
-          }
-          if (parsed.timeLeft !== undefined) {
-            setTimeLeft(parsed.timeLeft)
-          }
-          if (parsed.chatLog && Array.isArray(parsed.chatLog)) {
-            liveAPI.setMessages(parsed.chatLog)
-          }
-        }
-      } catch (e) {
-        console.error("Failed to parse saved session", e)
+    // Resume the running session from the server. The hint (session id this browser had open) is preferred while that
+    // session is still active; otherwise the latest active session of the scope. An empty localStorage works too.
+    // Before T17 the browser kept a whole snapshot under `dedp_active_session`; only its session id is used, once, as the
+    // hint (written at once, so a second run of this effect in development finds it)
+    let hint = safeGetItem(hintKey)
+    const legacy = safeGetItem(LEGACY_SESSION_KEY)
+    if (legacy !== null) {
+      const legacyId = legacySessionId(legacy)
+      safeRemoveItem(LEGACY_SESSION_KEY)
+      if (legacyId && !hint) {
+        hint = legacyId
+        safeSetItem(hintKey, legacyId)
       }
     }
+    let cancelled = false
+    ;(async () => {
+      try {
+        let state: SessionState | null = null
+        if (hint) {
+          state = await getSessionState(hint, courseId).catch(() => null)
+          if (state && state.session.status !== 'active') state = null
+        }
+        if (!state) state = await getActiveSession(courseId)
+        // A session started while this request was in flight wins
+        if (cancelled || sessionIdRef.current) return
+        if (!state) {
+          if (hint) safeRemoveItem(hintKey)
+          return
+        }
+        applyState(state)
+        await loadChatLog(state.session.id)
+      } catch (e) {
+        console.error('Failed to resume the active session', e)
+      }
+    })()
+    return () => { cancelled = true }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  // Save session state to local storage when it changes
+  // The hint follows the session on screen: set while it is active, dropped when the server says it is over
   useEffect(() => {
-    if (session) {
-      try {
-        // Strip out heavy fields like topic.content to avoid QuotaExceededError in localStorage
-        const cleanExercises = exercises.map((ex: any) => {
-          if (!ex) return ex;
-          const { topic, ...rest } = ex;
-          if (!topic) return ex;
-          const { content, ...topicRest } = topic;
-          return {
-            ...rest,
-            topic: topicRest
-          };
-        });
+    if (!session) return
+    if (session.status === 'active') safeSetItem(hintKey, session.id)
+    else if (safeGetItem(hintKey) === session.id) safeRemoveItem(hintKey)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, session?.status])
 
-        const dataStr = JSON.stringify({
-          session,
-          exercises: cleanExercises,
-          currentIndex,
-          missingCount,
-          chatLog: liveAPI.messages,
-          sessionDuration,
-          draftAnswers,
-          flaggedIds,
-          timeLeft
-        });
+  // What the generation loop and the visibility handler compare the server's state against
+  useEffect(() => {
+    latestRef.current = { status: session?.status, itemCount: exercises.length, missingCount }
+    chat.observe(liveAPI.messages)
+  })
 
-        const success = safeSetItem('dedp_active_session', dataStr);
-        if (!success) {
-          throw new Error("QuotaExceededError");
+  // Pending drafts are sent when the page is hidden or closed; coming back re-reads the session (clock, status)
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') {
+        void writer.flush()
+        const sid = sessionIdRef.current
+        const messages = sid && latestRef.current.status === 'active' ? chat.changedSnapshot(sid) : null
+        if (sid && messages) {
+          chat.markSaved(sid, messages)
+          void saveChatLog(sid, messages).catch(() => {})
         }
-      } catch (error: any) {
-        // Handle localStorage/sessionStorage quota limits gracefully without crashing the app
-        console.warn("Browser storage limit reached. Conserving space by stripping the chat log from saved session state.")
-        try {
-          // Strip out heavy fields like topic.content to avoid QuotaExceededError in localStorage
-          const cleanExercises = exercises.map((ex: any) => {
-            if (!ex) return ex;
-            const { topic, ...rest } = ex;
-            if (!topic) return ex;
-            const { content, ...topicRest } = topic;
-            return {
-              ...rest,
-              topic: topicRest
-            };
-          });
-
-          const fallbackStr = JSON.stringify({
-            session,
-            exercises: cleanExercises,
-            currentIndex,
-            missingCount,
-            chatLog: [], // Strip the heavy chat log to save space
-            sessionDuration,
-            draftAnswers,
-            flaggedIds,
-            timeLeft
-          });
-
-          safeSetItem('dedp_active_session', fallbackStr);
-        } catch (fallbackError) {
-          console.warn("Failed to write even basic session info to browser storage:", fallbackError)
-        }
+      } else if (sessionIdRef.current && latestRef.current.status === 'active') {
+        void refreshFromServer(sessionIdRef.current).catch((e) => console.error('Failed to refresh the session', e))
       }
     }
-  }, [session, exercises, currentIndex, missingCount, liveAPI.messages, sessionDuration, draftAnswers, flaggedIds, timeLeft])
+    const onPageHide = () => { void writer.flush() }
+    document.addEventListener('visibilitychange', onVisibility)
+    window.addEventListener('pagehide', onPageHide)
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility)
+      window.removeEventListener('pagehide', onPageHide)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
+  // Exam clock: remaining time comes from the server deadline and the server clock offset, so a wrong client clock does
+  // not matter. At zero the exam is submitted with the drafts stored on the server.
+  useEffect(() => {
+    // (The clock is shown only for an active exam; nothing to reset otherwise)
+    if (!session || session.mode !== 'exam' || session.status !== 'active' || !session.deadline) return
+    const sid: string = session.id
+    const deadlineMs = Date.parse(session.deadline)
+    const tick = () => {
+      const left = remainingSeconds(deadlineMs, Date.now(), serverOffsetRef.current)
+      setTimeLeft(left)
+      if (left <= 0 && autoSubmitRef.current !== sid) {
+        autoSubmitRef.current = sid
+        void finishExamRef.current()
+      }
+    }
+    tick()
+    const interval = setInterval(tick, 1000)
+    return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, session?.mode, session?.status, session?.deadline])
+
+  // The tutor conversation is saved to the running session while it changes, so another device can read it
+  useEffect(() => {
+    if (!session?.id || session.status !== 'active') return
+    const sid: string = session.id
+    const interval = setInterval(() => {
+      // sid is the session this timer was started for; the buffer only hands out messages that belong to it
+      const messages = chat.changedSnapshot(sid)
+      if (!messages) return
+      chat.markSaved(sid, messages)
+      void saveChatLog(sid, messages).catch((e) => console.error('Failed to save the chat log', e))
+    }, CHAT_SAVE_INTERVAL_MS)
+    return () => clearInterval(interval)
+  }, [session?.id, session?.status])
 
   const handleDeleteSession = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation()
@@ -517,12 +596,8 @@ export function StudyInterface() {
         const success = await deleteStudySession(id);
         if (success) {
           setHistories(prev => prev.filter(h => h.id !== id))
-          if (session?.id === id) {
-            setSession(null)
-            setExercises([])
-            setCurrentIndex(0)
-            safeRemoveItem('dedp_active_session')
-          }
+          writer.discard(`${id}:`)
+          if (session?.id === id) clearSessionView()
         }
       }
     }
@@ -656,54 +731,51 @@ export function StudyInterface() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, [activeFileKind, liveAPI]);
 
+  /**
+   * Starts a session on the server and shows it. Buttons are disabled while this runs and a second call is ignored, so a
+   * double click cannot create two sessions. Starting ends the previous active session of the scope without losing its
+   * answers (a study session is completed, an exam is submitted with its saved drafts), so an exam asks first.
+   */
+  const beginSession = async (input: Parameters<typeof startSession>[0]) => {
+    if (startingRef.current) return
+    if (session?.status === 'active' && session.mode === 'exam') {
+      const ok = window.confirm('Starting a new session will submit your current exam with the answers saved so far. Continue?')
+      if (!ok) return
+    }
+    startingRef.current = true
+    setIsLoading(true)
+    try {
+      // Drafts and flags still queued belong to the session that is about to end: send them first
+      await writer.flush()
+      const state = await startSession({ ...input, courseId })
+      applyState(state)
+      setIsModalOpen(false)
+      setActiveTab('study') // Ensure active tab shifts to 'study' immediately to reveal the active cards!
+      getSessionHistory().then(setHistories)
+    } catch (e) {
+      console.error('Failed to start the session', e)
+      // The previous session may or may not have been ended: show what the server has
+      if (sessionIdRef.current) void refreshFromServer(sessionIdRef.current, { force: true }).catch(() => {})
+    } finally {
+      startingRef.current = false
+      setIsLoading(false)
+    }
+  }
+
   const handleStartSession = async (
-    mode: 'study' | 'exam' = 'study', 
-    timeLimit: number | null = null, 
+    mode: 'study' | 'exam' = 'study',
+    timeLimit: number | null = null,
     sourcingMix: number = 50,
     weakPct: number = 60,
     unstudiedPct: number = 20,
-    expertPct: number = 20
-  ) => {
-    setIsLoading(true)
-    try {
-      setActiveSessionTopics(selectedTopics)
-      const res = await createStudySession(selectedTopics, questionCount, mode, timeLimit, sourcingMix, weakPct, unstudiedPct, expertPct)
-      setSession(res.session)
-      setExercises(res.exercises)
-      setMissingCount(res.missingCount || 0)
-      setCurrentIndex(0)
-      setDraftAnswers({})
-      setFlaggedIds([])
-      setTimeLeft(timeLimit)
-      setIsModalOpen(false)
-      setActiveTab('study') // Ensure active tab shifts to 'study' immediately to reveal the active cards!
-      // refresh histories
-      getSessionHistory().then(setHistories)
-    } catch (e) {
-      console.error(e)
-    }
-    setIsLoading(false)
-  }
+    expertPct: number = 20,
+    // The dialog decides the pool (ticked topics, else the topics its filters match, else [] = everything shown)
+    topicIds: string[] = selectedTopics
+  ) => beginSession({ topicIds, count: questionCount, mode, timeLimit, sourcingMix, weakPct, unstudiedPct, expertPct })
 
   const handleStartWeekSession = async (topicIds: string[], weekName: string) => {
-    setIsLoading(true)
-    try {
-      setActiveSessionTopics(topicIds)
-      const res = await createStudySession(topicIds, questionCount, 'study', null, 50, 60, 20, 20)
-      setSession(res.session)
-      setExercises(res.exercises)
-      setMissingCount(res.missingCount || 0)
-      setCurrentIndex(0)
-      setDraftAnswers({})
-      setFlaggedIds([])
-      setTimeLeft(null)
-      setIsModalOpen(false)
-      setActiveTab('study')
-      getSessionHistory().then(setHistories)
-    } catch (e) {
-      console.error("Failed to start weekly session:", e)
-    }
-    setIsLoading(false)
+    void weekName
+    await beginSession({ topicIds, count: questionCount, mode: 'study', timeLimit: null, sourcingMix: 50, weakPct: 60, unstudiedPct: 20, expertPct: 20 })
   }
 
   const handleFinishExam = async () => {
@@ -711,9 +783,12 @@ export function StudyInterface() {
     if (!session || isDiagnosisLoading) return;
     setIsDiagnosisLoading(true);
     try {
-      // The server grades every exercise (unanswered ones score 0), writes the logs and completes the session in one
-      // transaction. Submitting twice is harmless.
-      const submission = await submitExam(session.id, draftAnswers);
+      // Drafts still queued are sent first; the server then grades every question from the drafts it stores (unanswered
+      // ones score 0), writes the logs and completes the session in one transaction. Submitting twice is harmless.
+      await writer.flush();
+      const examMessages = chat.snapshot(session.id);
+      if (examMessages) void saveChatLog(session.id, examMessages).catch(() => {});
+      const submission = await submitExam(session.id);
       if (!submission) {
         console.error("Exam could not be submitted (unknown, cancelled or non-exam session)");
         return;
@@ -721,12 +796,11 @@ export function StudyInterface() {
       const examScoreSum = submission.scoreSum;
       const totalCount = submission.total;
 
-      // Update local session state
-      const finalSession = await getSessionWithExercises(session.id);
-      if (finalSession) {
-        setSession(finalSession.session);
-        setExercises(finalSession.exercises);
-      }
+      // The screen shows what the server now says: a completed exam, not an active one
+      const finalState = await getSessionState(session.id, courseId);
+      if (finalState) applyState(finalState, { keepIndex: true });
+      // The exam is in History as soon as it is graded, not only after the diagnosis has been written
+      getSessionHistory().then(setHistories);
 
       // Trigger generateExamDiagnosis action
       const reportMarkdown = await generateExamDiagnosis(session.id);
@@ -749,9 +823,6 @@ export function StudyInterface() {
         }
       }
 
-      // Clear active local storage
-      safeRemoveItem('dedp_active_session');
-      
       // Refresh histories
       getSessionHistory().then(setHistories);
     } catch (e) {
@@ -781,53 +852,40 @@ export function StudyInterface() {
     const controller = new AbortController()
     generationAbortRef.current = controller
     const cancelled = () => generationRunRef.current !== runId
-    const topicIds = activeSessionTopics.length > 0 ? activeSessionTopics : topics.map(t => t.id)
-    const knownIds = exercises.map((e: any) => e.id)
     generationLoopActiveRef.current = true
     ;(async () => {
       try {
         let remaining = missingCount
         while (remaining > 0 && !cancelled()) {
           const outcome = await generateWithRetry(
-            () => requestNextExercise<Record<string, unknown> & { id: string }>(sessionId, { topicIds, existingExerciseIds: knownIds }, controller.signal),
+            () => requestNextExercise<Record<string, unknown> & { id: string }>(sessionId, courseId ? { courseId } : {}, controller.signal),
             cancelled,
           )
           // A result that arrives after the session ended or changed is discarded, never appended
           if (outcome === 'cancelled' || cancelled()) return
-          // The server says the session is over: stop quietly, no failure banner
-          if ('stopped' in outcome) return
+          // The server says the session is over or already full (another tab or device filled it): no failure banner.
+          // Show what the server has; if that changes nothing, do not ask again for this session.
+          if ('stopped' in outcome) {
+            const state = await refreshFromServer(sessionId).catch(() => null)
+            if (!state || !stateDiffers(latestRef.current, state)) generationStoppedRef.current = true
+            return
+          }
           if ('error' in outcome) {
             // Stop here; the banner offers Retry. No timer restarts the loop.
             setGenerationError(outcome.error)
             return
           }
-          knownIds.push(outcome.exercise.id)
           remaining -= 1
-          setExercises(prev => [...prev, outcome.exercise])
+          setExercises(prev => (prev.some((e: any) => e.id === outcome.exercise.id) ? prev : [...prev, outcome.exercise]))
           setMissingCount(prev => Math.max(0, prev - 1))
         }
       } finally {
         if (!cancelled()) generationLoopActiveRef.current = false
       }
     })()
-  }, [sessionId, sessionEnded, missingCount, generationError, exercises, activeSessionTopics, topics]);
+  }, [sessionId, sessionEnded, missingCount, generationError, exercises]);
 
-  // Exam Countdown Timer tick useEffect
-  useEffect(() => {
-    if (session?.mode === 'exam' && timeLeft !== null && timeLeft > 0 && session.status === 'active') {
-      const interval = setInterval(() => {
-        setTimeLeft(prev => {
-          if (prev !== null && prev <= 1) {
-            clearInterval(interval);
-            handleFinishExam();
-            return 0;
-          }
-          return prev !== null ? prev - 1 : null;
-        });
-      }, 1000);
-      return () => clearInterval(interval);
-    }
-  }, [session, timeLeft]);
+  useEffect(() => { finishExamRef.current = handleFinishExam })
 
   const handleCancelExam = async () => {
     if (!session) return
@@ -836,6 +894,8 @@ export function StudyInterface() {
     stopGeneration()
     setIsLoading(true)
     try {
+      // Queued drafts of the exam are dropped: a cancelled exam has no answers and no score
+      writer.discard(`${session.id}:`)
       await cancelStudySession(session.id)
       setHistories(await getSessionHistory())
     } catch (e) {
@@ -843,14 +903,12 @@ export function StudyInterface() {
     } finally {
       setIsLoading(false)
     }
-    setSession(null)
-    setExercises([])
-    setCurrentIndex(0)
-    liveAPI.setMessages([])
-    setDraftAnswers({})
-    setFlaggedIds([])
-    setTimeLeft(null)
-    safeRemoveItem('dedp_active_session')
+    clearSessionView()
+  }
+
+  /** Leaves the screen of a session that is already over (a submitted exam, a session reopened from History). */
+  const handleCloseReview = () => {
+    clearSessionView()
   }
 
   const handleFinishSession = async () => {
@@ -859,8 +917,10 @@ export function StudyInterface() {
       setIsLoading(true)
       try {
         // Save final chat log and mark session as completed in DB
+        await writer.flush()
+        const messages = chat.snapshot(session.id)
         await Promise.all([
-          saveChatLog(session.id, liveAPI.messages),
+          messages ? saveChatLog(session.id, messages) : Promise.resolve(),
           finishStudySession(session.id)
         ])
 
@@ -879,14 +939,7 @@ export function StudyInterface() {
       }
     }
 
-    setSession(null)
-    setExercises([])
-    setCurrentIndex(0)
-    liveAPI.setMessages([])
-    setDraftAnswers({})
-    setFlaggedIds([])
-    setTimeLeft(null)
-    safeRemoveItem('dedp_active_session')
+    clearSessionView()
 
     if (!session) {
       getSessionHistory().then(setHistories)
@@ -898,23 +951,29 @@ export function StudyInterface() {
   const handleAnswer = async (isCorrect: boolean, userAnswer: string) => {
     if (session && currentExercise) {
       if (session.mode === 'exam') {
+        // A draft, not a commit: kept on screen and on the server (typing in a numeric field is sent after a pause)
         setDraftAnswers(prev => ({
           ...prev,
           [currentExercise.id]: userAnswer
         }));
+        persistDraft(session.id, currentExercise.id, userAnswer === '' ? null : userAnswer, currentExercise.exerciseType === 'numeric')
       } else {
         // The server grades with the same gradeAnswer the flashcard just used; its result is what is stored
-        const graded = await logAnswer(session.id, currentExercise.id, userAnswer, { duration: 30 }) // dummy duration until T18
+        const sid: string = session.id
+        const exerciseId: string = currentExercise.id
+        const graded = await logAnswer(sid, exerciseId, userAnswer, { duration: 30 }) // dummy duration until T18
+        // null: the server did not record it (the session ended elsewhere or the question is not part of it)
+        if (!graded) void refreshFromServer(sid, { force: true }).catch(() => {})
 
-        setSession((prev: any) => ({
+        setSession((prev: any) => (prev && prev.id === sid ? {
           ...prev,
           logs: [...(prev.logs || []), {
-            exerciseId: currentExercise.id,
+            exerciseId,
             isCorrect: graded ? graded.isCorrect : isCorrect,
             score: graded ? graded.score : (isCorrect ? 1 : 0),
             userAnswer
           }]
-        }))
+        } : prev))
       }
     }
   }
@@ -942,7 +1001,6 @@ export function StudyInterface() {
 
   // A message the student typed while the tutor was disconnected (VoiceHub's text box, "explain why I am wrong").
   // The context effect below sends it right after the context, which goes out without asking for a response.
-  const pendingMessageRef = useRef<string | null>(null)
   const flushPendingMessage = () => {
     const text = pendingMessageRef.current
     if (text === null) return
@@ -1021,25 +1079,12 @@ export function StudyInterface() {
   const handleLoadSession = async (id: string) => {
     setIsLoading(true)
     try {
-      const data = await getSessionWithExercises(id)
-      if (data) {
-        setSession(data.session)
-        setExercises(data.exercises)
-        setCurrentIndex(0)
-        setDraftAnswers({})
-        setFlaggedIds([])
-        setTimeLeft(data.session.timeLimit)
-        // The chat log is not part of the session payload; load it on demand
-        liveAPI.setMessages([])
-        try {
-          const detail = await getSessionDetail(id)
-          if (detail?.chatLog) {
-            const restored = JSON.parse(detail.chatLog)
-            if (Array.isArray(restored)) liveAPI.setMessages(restored)
-          }
-        } catch (e) {
-          console.error('Failed to load chat log', e)
-        }
+      await writer.flush()
+      const state = await getSessionState(id, courseId)
+      if (state) {
+        // applyState swaps the tutor conversation when the session changes; this session's own is loaded below
+        applyState(state)
+        await loadChatLog(id)
         setSelectedHistory(null)
         setActiveTab('study') // Force-switch to the Study tab so the session starts immediately!
       }
@@ -1245,14 +1290,25 @@ export function StudyInterface() {
                 <Button
                   variant="ghost"
                   className="text-lecture-red hover:text-lecture-red hover:bg-lecture-red/10 border border-transparent hover:border-lecture-red/20 font-medium h-9 px-3 text-xs rounded-lg"
-                  onClick={session.mode === 'exam' ? handleCancelExam : handleFinishSession}
+                  onClick={session.mode === 'exam' ? (session.status === 'active' ? handleCancelExam : handleCloseReview) : handleFinishSession}
                 >
-                  {session.mode === 'exam' ? 'Cancel Exam' : 'End Session'}
+                  {session.mode === 'exam' ? (session.status === 'active' ? 'Cancel Exam' : 'Close') : 'End Session'}
                 </Button>
               </div>
 
               {/* TIMERS: Timed Exam Countdown Timer vs Standard Study Session Timer */}
-              {session.mode === 'exam' ? (
+              {session.mode === 'exam' && session.status !== 'active' ? (
+                /* The server says this exam is over: no clock, no Submit button */
+                <div className="p-4 rounded-xl border shadow-md flex flex-wrap justify-between items-center gap-2 bg-card border-charcoal-graphite/10 text-charcoal-graphite font-sans">
+                  <span className="text-sm font-bold">
+                    {session.status === 'cancelled' ? 'Exam cancelled' : (() => {
+                      const { scoreSum } = sessionScore(session.logs || [])
+                      return `Exam submitted - score ${formatScore(scoreSum)}/${exercises.length}`
+                    })()}
+                  </span>
+                  <span className="text-xs text-charcoal-graphite/60">Reviewing your answers</span>
+                </div>
+              ) : session.mode === 'exam' ? (
                 <div className={`p-4 rounded-xl border shadow-md flex justify-between items-center transition-all duration-300 font-sans ${
                   timeLeft !== null && timeLeft < 300 
                     ? 'bg-lecture-red/10 border-lecture-red text-lecture-red animate-pulse'
@@ -1289,11 +1345,11 @@ export function StudyInterface() {
                   </Button>
                 </div>
               ) : (
-                <SessionTimer durationSeconds={sessionDuration} startTime={session.startTime} />
+                <SessionTimer durationSeconds={session.timeLimit ?? sessionDuration} startTime={session.startTime} endTime={session.endTime} active={session.status === 'active'} serverOffsetMs={clockOffsetMs} />
               )}
 
               {/* EXAM HUD: Complete Navigation Map Grid */}
-              {session.mode === 'exam' && exercises.length > 0 && (
+              {session.mode === 'exam' && session.status === 'active' && exercises.length > 0 && (
                 <div className="bg-card p-4 sm:p-5 rounded-xl border border-charcoal-graphite/10 shadow-sm space-y-4 font-sans">
                   <div className="flex justify-between items-center text-xs font-semibold text-charcoal-graphite/60 uppercase tracking-wider pb-2 border-b border-charcoal-graphite/10">
                     <span>Exam Navigation Map</span>
@@ -1319,7 +1375,7 @@ export function StudyInterface() {
                           key={ex.id}
                           type="button"
                           variant="outline"
-                          onClick={() => setCurrentIndex(idx)}
+                          onClick={() => goToIndex(idx)}
                           className={`w-10 h-10 p-0 text-sm font-medium rounded-md transition-all duration-200 relative ${btnClass}`}
                         >
                           {idx + 1}
@@ -1381,7 +1437,7 @@ export function StudyInterface() {
                       type="button"
                       variant="outline"
                       size="sm"
-                      onClick={() => setCurrentIndex(Math.max(0, currentIndex - 1))}
+                      onClick={() => goToIndex(Math.max(0, currentIndex - 1))}
                       disabled={currentIndex === 0}
                       className="flex-1 max-w-[120px] h-9 gap-1 font-semibold text-xs border border-charcoal-graphite/10 hover:bg-muted rounded-lg shrink-0"
                     >
@@ -1390,19 +1446,12 @@ export function StudyInterface() {
                     </Button>
 
                     {/* Socratic Sibling Toggle: Flag for Review Toggle (Exam Mode only) */}
-                    {session.mode === 'exam' ? (
+                    {session.mode === 'exam' && session.status === 'active' ? (
                       <Button
                         type="button"
                         variant="outline"
                         size="sm"
-                        onClick={() => {
-                          const isFlagged = flaggedIds.includes(currentExercise.id);
-                          if (isFlagged) {
-                            setFlaggedIds(flaggedIds.filter(id => id !== currentExercise.id));
-                          } else {
-                            setFlaggedIds([...flaggedIds, currentExercise.id]);
-                          }
-                        }}
+                        onClick={() => toggleFlag(currentExercise.id)}
                         className={`h-9 px-4 gap-1.5 font-semibold text-xs border rounded-lg shrink-0 transition-all duration-200 ${
                           flaggedIds.includes(currentExercise.id)
                             ? 'bg-amber-100 text-amber-800 border-amber-400 font-bold hover:bg-amber-150'
@@ -1422,7 +1471,9 @@ export function StudyInterface() {
                       size="sm"
                       onClick={() => {
                         if (currentIndex === exercises.length - 1 && !stillGenerating) {
-                          if (session.mode === 'exam') {
+                          if (session.mode === 'exam' && session.status !== 'active') {
+                            handleCloseReview()
+                          } else if (session.mode === 'exam') {
                             const totalQs = exercises.length;
                             const answeredQs = Object.keys(draftAnswers).length;
                             const ok = window.confirm(`You have reached the end of the exam.\n\nProgress: ${answeredQs} of ${totalQs} questions answered. Submit now?`);
@@ -1431,7 +1482,7 @@ export function StudyInterface() {
                             handleFinishSession()
                           }
                         } else {
-                          setCurrentIndex(Math.min(exercises.length - 1, currentIndex + 1))
+                          goToIndex(Math.min(exercises.length - 1, currentIndex + 1))
                         }
                       }}
                       disabled={currentIndex === exercises.length - 1 && stillGenerating}
@@ -1449,9 +1500,9 @@ export function StudyInterface() {
                     choices={parsedChoices}
                     correctAnswer={currentExercise.correctAnswer}
                     explanation={currentExercise.explanation}
-                    initialSelectedChoice={session.mode === 'exam' && session.status !== 'completed' ? draftAnswers[currentExercise.id] : currentLog?.userAnswer}
-                    hasBeenAnswered={session.status === 'completed' ? true : (session.mode === 'exam' ? false : !!currentLog)}
-                    isExamMode={session.mode === 'exam' && session.status !== 'completed'}
+                    initialSelectedChoice={session.mode === 'exam' && session.status === 'active' ? draftAnswers[currentExercise.id] : currentLog?.userAnswer}
+                    hasBeenAnswered={session.status !== 'active' ? true : (session.mode === 'exam' ? false : !!currentLog)}
+                    isExamMode={session.mode === 'exam' && session.status === 'active'}
                     onAnswer={handleAnswer}
                     onRequestExplanation={handleRequestExplanation}
                     reported={currentExercise.status === 'reported'}
@@ -1466,7 +1517,7 @@ export function StudyInterface() {
                   <div className="flex justify-between pt-6">
                     <Button
                       variant="outline"
-                      onClick={() => setCurrentIndex(Math.max(0, currentIndex - 1))}
+                      onClick={() => goToIndex(Math.max(0, currentIndex - 1))}
                       disabled={currentIndex === 0}
                     >
                       <ChevronLeft className="w-4 h-4 mr-2" />
@@ -1477,7 +1528,9 @@ export function StudyInterface() {
                       disabled={currentIndex === exercises.length - 1 && stillGenerating}
                       onClick={() => {
                         if (currentIndex === exercises.length - 1 && !stillGenerating) {
-                          if (session.mode === 'exam') {
+                          if (session.mode === 'exam' && session.status !== 'active') {
+                            handleCloseReview()
+                          } else if (session.mode === 'exam') {
                             const totalQs = exercises.length;
                             const answeredQs = Object.keys(draftAnswers).length;
                             const ok = window.confirm(`Ready to submit exam?\n\nProgress: ${answeredQs} of ${totalQs} questions answered.`);
@@ -1486,21 +1539,21 @@ export function StudyInterface() {
                             handleFinishSession()
                           }
                         } else {
-                          setCurrentIndex(Math.min(exercises.length - 1, currentIndex + 1))
+                          goToIndex(Math.min(exercises.length - 1, currentIndex + 1))
                         }
                       }}
                     >
                       {currentIndex === exercises.length - 1 && stillGenerating ? (
                         <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Generating...</>
                       ) : currentIndex === exercises.length - 1 && !stillGenerating ? (
-                        session.mode === 'exam' ? 'Submit Exam' : 'Finish Session'
+                        session.mode === 'exam' ? (session.status === 'active' ? 'Submit Exam' : 'Close') : 'Finish Session'
                       ) : (
                         <>Next <ChevronRight className="w-4 h-4 ml-2" /></>
                       )}
                     </Button>
                   </div>
                 </div>
-              ) : (
+              ) : isDiagnosisLoading ? null /* the grading panel above is the state while the exam is graded */ : (
                 stillGenerating ? (
                   <div className="flex flex-col items-center gap-3 text-center text-muted-foreground py-12">
                     <Loader2 className="w-8 h-8 animate-spin text-lecture-red" />
@@ -1814,7 +1867,7 @@ export function StudyInterface() {
         </TabsContent>
 
         <TabsContent value="resources" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">
-          <ResourcesDashboard onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} />
+          <ResourcesDashboard onViewFile={handleViewFile} onStartWeekSession={handleStartWeekSession} startingSession={isLoading} />
         </TabsContent>
 
         <TabsContent value="analytics" className="flex-1 overflow-y-auto m-0 p-4 sm:p-8 min-w-0">
