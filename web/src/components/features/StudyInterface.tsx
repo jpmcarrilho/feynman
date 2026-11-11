@@ -6,6 +6,8 @@ import { Flashcard } from './Flashcard'
 import { SessionTimer } from './SessionTimer'
 import { generateWithRetry } from '@/lib/generationRetry'
 import { requestNextExercise } from '@/lib/generationClient'
+import { checkOpenAnswer, checkPendingOpenAnswers, examDiagnosisDue, type OpenCheckOutcome } from '@/lib/openAnswerClient'
+import { countPendingOpen, parseKeyPoints, parseOpenFeedback, type SelfScore } from '@/lib/openAnswer'
 import { VoiceHub } from './VoiceHub'
 import { TutorSheet } from './TutorSheet'
 import Link from 'next/link'
@@ -66,6 +68,7 @@ import {
   voiceSystemInstruction,
   voiceExerciseContextMessage,
   voiceAnswerCheckedMessage,
+  openCheckedAnswer,
   chatModeSwitchMessages,
   voicePlannerContextMessage,
   voiceDashboardContextMessage,
@@ -236,6 +239,11 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
   const [flaggedIds, setFlaggedIds] = useState<string[]>([])
   const [timeLeft, setTimeLeft] = useState<number | null>(null)
   const [isDiagnosisLoading, setIsDiagnosisLoading] = useState(false)
+  // Written exam answers being checked right now (how many), or null
+  const [openChecking, setOpenChecking] = useState<number | null>(null)
+  // Sessions whose pending written answers were already sent to the grader since this page opened (once each, in the background)
+  const openGradeStartedRef = useRef(new Set<string>())
+  const examFlowRef = useRef(false)
 
   // --- NEW STRUCTURED STUDY PLAN STATES ---
   const [activePlan, setActivePlan] = useState<any>(null)
@@ -302,17 +310,31 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
   type AnswerExercise = { exerciseType?: string | null; questionText: string; correctAnswer: string; explanation?: string | null }
   /** The stored key as a person reads it (answers of the current exercise: its choices are parsedChoices). */
   function answerKeyOf(ex: AnswerExercise) {
+    if (ex.exerciseType === 'open') return { correctAnswer: ex.correctAnswer, explanation: ex.explanation, keyPoints: parseKeyPoints((ex as { keyPoints?: unknown }).keyPoints) }
     const shape = { exerciseType: ex.exerciseType || 'single_choice', choices: parsedChoices, questionText: ex.questionText }
     return { correctAnswer: answerDisplayLines(shape, ex.correctAnswer).join('; ') || ex.correctAnswer, explanation: ex.explanation }
   }
   /** What the tutor is told about an answer of the current exercise once it is checked: the answer as a person reads it, the score, the key and the explanation. */
-  function checkedAnswerState(ex: AnswerExercise, userAnswer: string, score: number): CheckedAnswer {
+  function checkedAnswerState(ex: AnswerExercise, userAnswer: string, score: number, open?: { gradedBy?: string | null; feedback?: unknown }): CheckedAnswer {
+    if (ex.exerciseType === 'open') {
+      return openCheckedAnswer({
+        userAnswer,
+        score,
+        modelAnswer: ex.correctAnswer,
+        keyPoints: (ex as { keyPoints?: unknown }).keyPoints,
+        explanation: ex.explanation,
+        feedback: parseOpenFeedback(open?.feedback),
+        selfAssessed: open?.gradedBy === 'self',
+      })
+    }
     const shape = { exerciseType: ex.exerciseType || 'single_choice', choices: parsedChoices, questionText: ex.questionText }
     return { checked: true, chosen: answerDisplayLines(shape, userAnswer).join('; ') || userAnswer, score, ...answerKeyOf(ex) }
   }
   /** Checked (with the result) when the session has a log for the exercise, otherwise unchecked with the private key (the prompt uses it in Explain mode only). */
-  function answerStateOf(ex: AnswerExercise, log: { userAnswer: string } & Parameters<typeof logScore>[0] | undefined): ExerciseAnswerState {
-    return log ? checkedAnswerState(ex, log.userAnswer, logScore(log)) : { checked: false, key: answerKeyOf(ex) }
+  function answerStateOf(ex: AnswerExercise, log: { userAnswer: string; gradedBy?: string | null; feedback?: unknown } & Parameters<typeof logScore>[0] | undefined): ExerciseAnswerState {
+    // A written exam answer still waiting for its check has no result to tell the tutor
+    if (log && log.gradedBy === 'pending') return { checked: false }
+    return log ? checkedAnswerState(ex, log.userAnswer, logScore(log), log) : { checked: false, key: answerKeyOf(ex) }
   }
 
   // The tutor is the studyspace's persona. Speech heard from the student is forwarded to markAssisted (a ref, because that function is defined further down)
@@ -364,6 +386,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
   // the card the tutor's help would count for right now (null: nothing to record), kept current by an effect
   const helpTargetRef = useRef<{ sid: string; exerciseId: string } | null>(null)
   const sessionModeRef = useRef<string | null>(null)
+  const currentExerciseIdRef = useRef<string | null>(null)
   // when the question that tutor help would count for became current (for the speech settling window)
   const targetSinceRef = useRef(0)
   const targetKeyRef = useRef<string | null>(null)
@@ -431,7 +454,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
 
   /** Re-reads one session and applies it when the screen is out of date (status, number of questions, questions left). */
   const refreshFromServer = async (id: string, opts: { force?: boolean } = {}): Promise<SessionState | null> => {
-    await writer.flush()
+    await flushWrites()
     const state = await getSessionState(id, courseId)
     if (!state || sessionIdRef.current !== id) return state
     serverOffsetRef.current = serverOffsetOf(state)
@@ -469,17 +492,32 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
   // An exam draft carries the visible seconds not yet saved. They are taken when the write RUNS, not when it is queued:
   // the writer keeps only the newest write per key, so seconds captured in a replaced closure would be lost. A write that
   // throws gives its seconds back; one the server rejects (session over) needs none.
+  // Drafts the screen holds that the server has not confirmed yet (typed inside the debounce window, or a write that failed).
+  // Every flush hands them to the writer again, so submitting, leaving a question or hiding the page cannot lose the latest text.
+  const unsavedDraftsRef = useRef(new Map<string, { sid: string; exerciseId: string; value: string | null }>())
   const persistDraft = (sid: string, exerciseId: string, value: string | null, debounce: boolean) => {
+    const unsavedKey = `${sid}:${exerciseId}`
+    const entry = { sid, exerciseId, value }
+    unsavedDraftsRef.current.set(unsavedKey, entry)
     writer.schedule(`${sid}:draft:${exerciseId}`, async () => {
       const key = cardKey(sid, exerciseId)
       const seconds = cardTimer.take(key)
       try {
-        syncAfterRejection(sid, await saveDraft(sid, exerciseId, value, seconds))
+        const result = await saveDraft(sid, exerciseId, value, seconds)
+        // Confirmed (or refused for good: the session is over): only forget it if no newer text was typed meanwhile
+        if (unsavedDraftsRef.current.get(unsavedKey) === entry) unsavedDraftsRef.current.delete(unsavedKey)
+        syncAfterRejection(sid, result)
       } catch (e) {
         cardTimer.restore(key, seconds)
         throw e
       }
     }, debounce ? DRAFT_DEBOUNCE_MS : 0)
+  }
+
+  /** Sends every unconfirmed draft now and waits until the write queue is empty. Use instead of writer.flush() wherever pending state must reach the server. */
+  const flushWrites = async () => {
+    for (const d of [...unsavedDraftsRef.current.values()]) persistDraft(d.sid, d.exerciseId, d.value, false)
+    await writer.flush()
   }
 
   /** Saves the visible seconds of one question on their own (exam: a draft write with no draft; study: recordCardTime). Own writer key, so it never replaces a pending draft. */
@@ -537,7 +575,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
       cardTimer.run(null)
       persistTime(session.id, currentExercise.id, session.mode)
       // A draft still waiting out its debounce (a number being typed) is sent now, before the position write
-      void writer.flush()
+      void flushWrites()
     }
     setCurrentIndex(index)
     if (session?.status === 'active') {
@@ -571,7 +609,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
     try {
       // Hide the running session first to let the draft planner render without state collisions. It stays active on the
       // server (and is resumed on the next load); only its screen is cleared.
-      await writer.flush()
+      await flushWrites()
       clearSessionView({ forgetHint: false, keepChat: true })
 
       // Fetch actual, current data analytics metrics to feed into Gemini advisor
@@ -738,7 +776,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         saveAllCardTimes()
       }
       if (document.visibilityState === 'hidden') {
-        void writer.flush()
+        void flushWrites()
         const sid = sessionIdRef.current
         const messages = sid && latestRef.current.status === 'active' ? chat.changedSnapshot(sid) : null
         if (sid && messages) {
@@ -749,7 +787,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         void refreshFromServer(sessionIdRef.current).catch((e) => console.error('Failed to refresh the session', e))
       }
     }
-    const onPageHide = () => { cardTimer.run(null); saveAllCardTimes(); void writer.flush() }
+    const onPageHide = () => { cardTimer.run(null); saveAllCardTimes(); void flushWrites() }
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('pagehide', onPageHide)
     return () => {
@@ -813,6 +851,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         if (success) {
           setHistories(prev => prev.filter(h => h.id !== id))
           writer.discard(`${id}:`)
+          for (const k of [...unsavedDraftsRef.current.keys()]) if (k.startsWith(`${id}:`)) unsavedDraftsRef.current.delete(k)
           if (session?.id === id) clearSessionView()
         }
       }
@@ -970,7 +1009,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         return
       }
       // Drafts and flags still queued belong to the session that is about to end: send them first
-      await writer.flush()
+      await flushWrites()
       const state = await startSession({ ...input, courseId })
       applyState(state)
       setNotice(null)
@@ -1010,25 +1049,115 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
     await beginSession({ topicIds, count: questionCount, mode: 'study', timeLimit: null, sourcingMix: 50, weakPct: 60, unstudiedPct: 20, expertPct: 20 })
   }
 
+  /** Re-reads the session for the open-answer check; applies it to the screen when it is still the one shown. */
+  const refreshAfterOpenCheck = (sid: string) => async () => {
+    const state = await getSessionState(sid, courseId)
+    if (state && sessionIdRef.current === sid) applyState(state, { keepIndex: true })
+    return state
+  }
+
+  /**
+   * Checks the pending written answers of a submitted exam (grade route, then a fresh read of the session).
+   * Resolves to how many are still pending (null: unknown, treated as pending by the caller).
+   */
+  const runOpenCheck = async (sid: string, count: number): Promise<number | null> => {
+    setOpenChecking(count)
+    try {
+      const { pending } = await checkPendingOpenAnswers(sid, { refresh: refreshAfterOpenCheck(sid) })
+      return pending
+    } finally {
+      setOpenChecking(null)
+      void refreshHistories()
+    }
+  }
+
+  /** Shows an exam diagnosis text in the side viewer. The ".md" suffix makes the visualizer render it as markdown; "inline:" keeps the fetch effect away. */
+  const openDiagnosisViewer = (markdown: string) => {
+    setActiveFile(EXAM_DIAGNOSIS_FILE);
+    setActiveFileKind('markdown');
+    setFileLoading(false);
+    setFileContent(markdown);
+    setActiveFileHighlight(null);
+    setActiveFilePage(null);
+    setActiveFileTitle("Timed Exam Diagnostic Report");
+  }
+
+  // The stored diagnosis of the completed exam on screen (read once per session id; shown only on request, never generated here)
+  const [storedDiagnosis, setStoredDiagnosis] = useState<{ id: string; text: string } | null>(null)
+  const diagnosisSessionId = session?.mode === 'exam' && session?.status === 'completed' ? (session.id as string) : null
+  useEffect(() => {
+    if (!diagnosisSessionId) return
+    let cancelled = false
+    getSessionDetail(diagnosisSessionId)
+      .then((detail) => { if (!cancelled && detail?.diagnosis) setStoredDiagnosis({ id: diagnosisSessionId, text: detail.diagnosis }) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [diagnosisSessionId])
+
+  /** Writes the diagnosis of a submitted exam whose written answers are all checked, and shows it. */
+  const showExamDiagnosis = async (sid: string, examScoreSum: number, totalCount: number) => {
+    setIsDiagnosisLoading(true)
+    let reportMarkdown: string | null = null
+    try {
+      reportMarkdown = await generateExamDiagnosis(sid);
+    } finally {
+      setIsDiagnosisLoading(false)
+    }
+    if (reportMarkdown) {
+      // Automatically open inside Visualizer
+      openDiagnosisViewer(reportMarkdown)
+      setStoredDiagnosis({ id: sid, text: reportMarkdown })
+
+      // Trigger voice tutor summary if connected
+      if (liveAPI.isConnected) {
+        const scoreDisplay = `${formatScore(examScoreSum)}/${totalCount}`;
+        const speechMsg = `[SYSTEM MESSAGE: The student has submitted their timed exam. They scored ${scoreDisplay} (${totalCount > 0 ? Math.round((examScoreSum/totalCount)*100) : 0}%). Speak a supportive, Socratic, brief 2-3 sentence overview of their diagnostic results. Keep it warm, and mention you've pushed their full studies guide directly to their Side Visualizer.]`;
+        liveAPI.sendContext(speechMsg, { interrupt: true });
+      }
+    }
+    refreshHistories();
+  }
+
+  /** From a submitted exam's state on: check pending written answers, then (when none is left) write the diagnosis. */
+  const finishSubmittedExam = async (sid: string, state: SessionState | null, submission: { scoreSum: number; total: number }) => {
+    let scoreSum = submission.scoreSum
+    let total = submission.total
+    const pendingNow = state ? countPendingOpen(state.items.flatMap((i) => (i.log ? [i.log] : []))) : 0
+    if (pendingNow > 0) {
+      openGradeStartedRef.current.add(sid)
+      const left = await runOpenCheck(sid, pendingNow)
+      // Pending answers stay pending: the banner (derived from the stored state) offers Check again; no diagnosis yet
+      if (left !== 0) return
+      const fresh = await getSessionState(sid, courseId)
+      if (fresh) {
+        scoreSum = fresh.items.reduce((sum, i) => sum + (i.log ? logScore(i.log) : 0), 0)
+        total = fresh.items.length
+      }
+    }
+    await showExamDiagnosis(sid, scoreSum, total)
+  }
+
   const handleFinishExam = async () => {
     stopGeneration()
-    if (!session || isDiagnosisLoading) return;
+    if (!session || isDiagnosisLoading || examFlowRef.current) return;
+    examFlowRef.current = true
     setIsDiagnosisLoading(true);
     try {
       // Drafts still queued are sent first; the server then grades every question from the drafts it stores (unanswered
       // ones score 0), writes the logs and completes the session in one transaction. Submitting twice is harmless.
       cardTimer.run(null);
       saveAllCardTimes();
-      await writer.flush();
+      await flushWrites();
       const examMessages = chat.snapshot(session.id);
       if (examMessages) void saveChatLog(session.id, examMessages).catch(() => {});
-      const submission = await submitExam(session.id);
+      // Anything the server still has not confirmed after the flush (a failed write) travels with the submission, which accepts it until the deadline
+      const leftover: Record<string, string> = {}
+      for (const d of unsavedDraftsRef.current.values()) if (d.sid === session.id) leftover[d.exerciseId] = d.value ?? ''
+      const submission = await submitExam(session.id, Object.keys(leftover).length > 0 ? leftover : undefined);
       if (!submission) {
         console.error("Exam could not be submitted (unknown, cancelled or non-exam session)");
         return;
       }
-      const examScoreSum = submission.scoreSum;
-      const totalCount = submission.total;
 
       // The screen shows what the server now says: a completed exam, not an active one
       const finalState = await getSessionState(session.id, courseId);
@@ -1036,35 +1165,54 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
       // The exam is in History as soon as it is graded, not only after the diagnosis has been written
       refreshHistories();
 
-      // Trigger generateExamDiagnosis action
-      const reportMarkdown = await generateExamDiagnosis(session.id);
-      if (reportMarkdown) {
-        // Automatically open inside Visualizer
-        // The ".md" suffix makes the visualizer render it as markdown; "inline:" keeps the fetch effect away
-        setActiveFile(EXAM_DIAGNOSIS_FILE);
-        setActiveFileKind('markdown');
-        setFileLoading(false);
-        setFileContent(reportMarkdown);
-        setActiveFileHighlight(null);
-        setActiveFilePage(null);
-        setActiveFileTitle("Timed Exam Diagnostic Report");
-        
-        // Trigger voice tutor summary if connected
-        if (liveAPI.isConnected) {
-          const scoreDisplay = `${formatScore(examScoreSum)}/${totalCount}`;
-          const speechMsg = `[SYSTEM MESSAGE: The student has submitted their timed exam. They scored ${scoreDisplay} (${totalCount > 0 ? Math.round((examScoreSum/totalCount)*100) : 0}%). Speak a supportive, Socratic, brief 2-3 sentence overview of their diagnostic results. Keep it warm, and mention you've pushed their full studies guide directly to their Side Visualizer.]`;
-          liveAPI.sendContext(speechMsg, { interrupt: true });
-        }
-      }
-
-      // Refresh histories
-      refreshHistories();
+      await finishSubmittedExam(session.id, finalState, submission);
     } catch (e) {
       console.error("Failed to finish timed exam:", e);
     } finally {
+      examFlowRef.current = false
       setIsDiagnosisLoading(false);
     }
   }
+
+  /** "Check again" on the banner: another round for the pending written answers, then the diagnosis when none is left. */
+  const handleCheckAgain = async () => {
+    if (!session || session.status !== 'completed' || examFlowRef.current) return
+    examFlowRef.current = true
+    // The banner shows the progress ("Checking N written answers…", button disabled) until the round ends
+    setOpenChecking(Math.max(1, countPendingOpen(session.logs ?? [])))
+    try {
+      const sid: string = session.id
+      const state = await getSessionState(sid, courseId)
+      if (state && sessionIdRef.current === sid) applyState(state, { keepIndex: true })
+      const total = state?.items.length ?? 0
+      const scoreSum = state ? state.items.reduce((sum, i) => sum + (i.log ? logScore(i.log) : 0), 0) : 0
+      await finishSubmittedExam(sid, state, { scoreSum, total })
+    } catch (e) {
+      console.error('Failed to check the written answers:', e)
+    } finally {
+      examFlowRef.current = false
+      setOpenChecking(null)
+    }
+  }
+
+  // Opening a finished exam that still has written answers waiting for their check sends them to the grader, once per session id
+  const pendingOpenCount = session?.status === 'completed' ? countPendingOpen(session.logs ?? []) : 0
+  useEffect(() => {
+    if (!session?.id || pendingOpenCount === 0 || examFlowRef.current || openGradeStartedRef.current.has(session.id)) return
+    openGradeStartedRef.current.add(session.id)
+    const sid: string = session.id
+    const mode: string = session.mode
+    void (async () => {
+      const left = await runOpenCheck(sid, pendingOpenCount)
+      // Same ending as Check again: when nothing is left pending and the exam has no diagnosis yet, write it
+      const detail = left === 0 ? await getSessionDetail(sid) : null
+      if (!examDiagnosisDue({ mode, status: 'completed', pending: left, hasDiagnosis: !!detail?.diagnosis }) || sessionIdRef.current !== sid || examFlowRef.current) return
+      const fresh = await getSessionState(sid, courseId)
+      if (!fresh) return
+      await showExamDiagnosis(sid, fresh.items.reduce((sum, i) => sum + (i.log ? logScore(i.log) : 0), 0), fresh.items.length)
+    })().catch(() => {})
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [session?.id, pendingOpenCount])
 
   // Invalidates a running generation loop when the session changes or ends, and clears a failure of the old session
   const sessionId = session?.id
@@ -1140,7 +1288,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
   const endEmptySession = async (sid: string, message: string) => {
     let ended = false
     try {
-      await writer.flush()
+      await flushWrites()
       ended = sessionModeRef.current === 'exam' ? await cancelStudySession(sid) : await finishStudySession(sid)
     } catch (e) {
       console.error('Failed to end the empty session:', e)
@@ -1166,6 +1314,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
     try {
       // Queued drafts of the exam are dropped: a cancelled exam has no answers and no score
       writer.discard(`${session.id}:`)
+      for (const k of [...unsavedDraftsRef.current.keys()]) if (k.startsWith(`${session.id}:`)) unsavedDraftsRef.current.delete(k)
       await cancelStudySession(session.id)
       setHistories(await getSessionHistory(courseId))
     } catch (e) {
@@ -1189,7 +1338,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         // Save final chat log and mark session as completed in DB
         cardTimer.run(null)
         saveAllCardTimes()
-        await writer.flush()
+        await flushWrites()
         const messages = chat.snapshot(session.id)
         await Promise.all([
           messages ? saveChatLog(session.id, messages) : Promise.resolve(),
@@ -1269,6 +1418,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
       targetSinceRef.current = Date.now()
     }
     speechHeardRef.current = markAssisted
+    currentExerciseIdRef.current = currentExercise?.id ?? null
   })
 
   const handleAnswer = async (isCorrect: boolean, userAnswer: string) => {
@@ -1281,7 +1431,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
           if (userAnswer === '') return Object.fromEntries(Object.entries(prev).filter(([id]) => id !== draftExerciseId))
           return { ...prev, [draftExerciseId]: userAnswer }
         });
-        persistDraft(session.id, currentExercise.id, userAnswer === '' ? null : userAnswer, currentExercise.exerciseType === 'numeric')
+        persistDraft(session.id, currentExercise.id, userAnswer === '' ? null : userAnswer, currentExercise.exerciseType === 'numeric' || currentExercise.exerciseType === 'open')
       } else {
         // The server grades with the same gradeAnswer the flashcard just used; its result is what is stored
         const sid: string = session.id
@@ -1292,7 +1442,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         closedCardsRef.current.add(key)
         cardTimer.run(null)
         const assisted = readAssisted(sid).includes(exerciseId)
-        await writer.flush()
+        await flushWrites()
         const seconds = cardTimer.take(key)
         let graded: Awaited<ReturnType<typeof logAnswer>>
         try {
@@ -1319,6 +1469,52 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
           }]
         } : prev))
       }
+    }
+  }
+
+  // Cards whose written answer is being sent right now: a double click or a retry cannot start a second request
+  const openInFlightRef = useRef(new Set<string>())
+
+  /**
+   * A written answer of a study session. Same bookkeeping as handleAnswer (flush, card clock, closedCardsRef, assisted),
+   * then one request to the route. `unchecked` keeps the clock stopped and the seconds held for the self-assessment request.
+   */
+  const handleOpenCheck = async (answer: string, selfScore?: SelfScore): Promise<OpenCheckOutcome> => {
+    if (!session || !currentExercise || session.mode === 'exam') return { status: 'rejected' }
+    const sid: string = session.id
+    const exercise = currentExercise
+    const exerciseId: string = exercise.id
+    const key = cardKey(sid, exerciseId)
+    if (openInFlightRef.current.has(key)) return { status: 'rejected' }
+    openInFlightRef.current.add(key)
+    closedCardsRef.current.add(key)
+    cardTimer.run(null)
+    const assisted = readAssisted(sid).includes(exerciseId)
+    let seconds = 0
+    try {
+      await flushWrites()
+      seconds = cardTimer.take(key)
+      const outcome = await checkOpenAnswer(sid, { exerciseId, answer, durationSec: seconds, assisted, selfScore })
+      if (outcome.status !== 'stored') {
+        cardTimer.restore(key, seconds)
+        if (outcome.status === 'rejected') {
+          closedCardsRef.current.delete(key)
+          void refreshFromServer(sid, { force: true }).catch(() => {})
+        }
+        return outcome
+      }
+      const stored = { exerciseId, isCorrect: outcome.isCorrect, score: outcome.score, userAnswer: answer, gradedBy: outcome.gradedBy, feedback: outcome.feedback }
+      if (liveAPI.isConnected && currentExerciseIdRef.current === exerciseId) {
+        liveAPI.sendContext(voiceAnswerCheckedMessage(checkedAnswerState(exercise, answer, outcome.score, stored)), { interrupt: false, respond: false })
+      }
+      setSession((prev: { id: string; logs?: { exerciseId: string }[] } | null) => (prev && prev.id === sid ? { ...prev, logs: [...(prev.logs || []).filter((l) => l.exerciseId !== exerciseId), stored] } : prev))
+      return outcome
+    } catch (e) {
+      cardTimer.restore(key, seconds)
+      closedCardsRef.current.delete(key)
+      throw e
+    } finally {
+      openInFlightRef.current.delete(key)
     }
   }
 
@@ -1382,6 +1578,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
         voiceExerciseContextMessage(profile, {
           topicTitle: currentExercise.topic?.title,
           questionText: currentExercise.questionText,
+          exerciseType: currentExercise.exerciseType,
           choices: parsedChoices,
           sessionMode: session.mode,
           unitsText: cachedContext.unitsText,
@@ -1426,7 +1623,10 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
     const shape = { exerciseType: currentExercise.exerciseType || 'single_choice', choices: parsedChoices, questionText: currentExercise.questionText }
     const chosen = answerDisplayLines(shape, userAnswer).join('; ') || userAnswer
     const key = answerDisplayLines(shape, currentExercise.correctAnswer).join('; ') || currentExercise.correctAnswer
-    const msg = `I selected "${chosen}", but the correct answer is "${key}". Can you explain why I am wrong?`
+    // A written answer is already in the tutor's context with its feedback: the request is a normal typed message
+    const msg = currentExercise.exerciseType === 'open'
+      ? 'Can you go through my answer with me and tell me what I am missing?'
+      : `I selected "${chosen}", but the correct answer is "${key}". Can you explain why I am wrong?`
 
     if (!liveAPI.isConnected) {
       // Connect first (text-only); the context effect sends the message right after the context
@@ -1440,7 +1640,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
   const handleLoadSession = async (id: string) => {
     setIsLoading(true)
     try {
-      await writer.flush()
+      await flushWrites()
       const state = await getSessionState(id, courseId)
       if (state) {
         // applyState swaps the tutor conversation when the session changes; this session's own is loaded below
@@ -1800,10 +2000,39 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
                   <Loader2 className="w-12 h-12 text-lecture-red animate-spin" />
                   <div className="space-y-2 max-w-sm">
                     <h3 className="text-lg font-bold text-charcoal-graphite italic font-display">Professor Grading In Progress</h3>
-                    <p className="text-sm text-charcoal-graphite/70">
-                      The professor is evaluating your exam answers and generating your customized study diagnostic plan. This usually takes 5-15 seconds.
+                    <p className="text-sm text-charcoal-graphite/70" role="status">
+                      {openChecking
+                        ? `Checking ${openChecking} written ${openChecking === 1 ? 'answer' : 'answers'}…`
+                        : 'The professor is evaluating your exam answers and generating your customized study diagnostic plan. This usually takes 5-15 seconds.'}
                     </p>
                   </div>
+                </div>
+              )}
+
+              {!isDiagnosisLoading && storedDiagnosis && storedDiagnosis.id === session.id && session.mode === 'exam' && session.status === 'completed' && (
+                <div className="flex items-center justify-between gap-3 bg-card border border-charcoal-graphite/10 p-3 rounded-lg text-sm font-sans">
+                  <span className="font-medium text-charcoal-graphite">Diagnostic report</span>
+                  <Button type="button" size="sm" variant="outline" className="max-xl:h-11" onClick={() => openDiagnosisViewer(storedDiagnosis.text)}>
+                    Show report
+                  </Button>
+                </div>
+              )}
+
+              {pendingOpenCount > 0 && !isDiagnosisLoading && (
+                <div role="alert" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded-lg text-sm font-sans">
+                  <div>
+                    {openChecking ? (
+                      <p className="font-semibold">Checking {openChecking} written {openChecking === 1 ? 'answer' : 'answers'}…</p>
+                    ) : (
+                      <>
+                        <p className="font-semibold">{pendingOpenCount} written {pendingOpenCount === 1 ? 'answer' : 'answers'} could not be checked yet; {pendingOpenCount === 1 ? 'it counts' : 'they count'} 0 until checked.</p>
+                        <p className="text-xs">The diagnosis is written once every written answer is checked.</p>
+                      </>
+                    )}
+                  </div>
+                  <Button type="button" size="sm" variant="outline" onClick={handleCheckAgain} disabled={!!openChecking} className="shrink-0 border-amber-400 bg-white max-xl:h-11">
+                    {openChecking ? <><Loader2 className="mr-2 h-4 w-4 animate-spin" /> Checking…</> : 'Check again'}
+                  </Button>
                 </div>
               )}
 
@@ -1913,6 +2142,13 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
                     onAnswer={handleAnswer}
                     result={currentLog ? { score: logScore(currentLog), isCorrect: !!currentLog.isCorrect } : null}
                     onRequestExplanation={handleRequestExplanation}
+                    openProps={currentExercise.exerciseType === 'open' ? {
+                      sessionId: session.id,
+                      exerciseId: currentExercise.id,
+                      keyPoints: parseKeyPoints(currentExercise.keyPoints),
+                      log: currentLog ?? null,
+                      onCheck: handleOpenCheck,
+                    } : undefined}
                     reported={currentExercise.status === 'reported'}
                     onReport={async (reason) => {
                       const ok = await reportExercise(currentExercise.id, reason)

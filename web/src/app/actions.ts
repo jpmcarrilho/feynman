@@ -42,6 +42,7 @@ import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import {
   explainMistakePrompt,
   examDiagnosisPrompt,
+  examWrongAnswerBlock,
   globalDiagnosisPrompt,
   plannerChatPrompt,
   studyPlanPrompt,
@@ -81,6 +82,7 @@ const SESSION_LIST_SELECT = {
       isCorrect: true,
       score: true,
       userAnswer: true,
+      gradedBy: true,
       timestamp: true,
       exercise: {
         select: { id: true, questionText: true, correctAnswer: true, exerciseType: true },
@@ -885,7 +887,11 @@ export async function generateExamDiagnosis(sessionId: string) {
           topicTitle: tTitle,
           topicId,
           week,
-          partialScore
+          partialScore,
+          exerciseType: ex.exerciseType,
+          gradedBy: log.gradedBy,
+          feedback: log.feedback,
+          keyPoints: ex.keyPoints,
         });
       }
     }
@@ -898,16 +904,7 @@ export async function generateExamDiagnosis(sessionId: string) {
       return `- **${title}** (${stats.week}): ${stats.correct.toFixed(2)}/${stats.total} Correct (${accuracy}%). Topic ID: ${stats.topicId || 'none'}`;
     }).join('\n');
 
-    const wrongAnswersString = wrongAnswers.map((w, idx) => {
-      return `### Question Review ${idx + 1}:
-Topic: ${w.topicTitle}
-Question: ${w.question}
-User Answer: "${w.userAnswer || 'Unanswered'}"
-Correct Answer: "${w.correctAnswer}"
-Your Partial Score: ${w.partialScore.toFixed(2)}/1.00
-Official Explanation: ${w.explanation || "No explanation available."}
-Topic ID: ${w.topicId || 'none'}`;
-    }).join('\n\n');
+    const wrongAnswersString = wrongAnswers.map((w, idx) => examWrongAnswerBlock(idx + 1, w)).join('\n\n');
 
     const examCourse = await getCourseWithProfile(
       session.courseId ?? session.logs.find((l) => l.exercise?.topic?.courseId)?.exercise.topic?.courseId ?? ''

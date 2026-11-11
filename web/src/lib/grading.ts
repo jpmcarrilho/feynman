@@ -345,20 +345,22 @@ export interface HeadlineSession {
   mode?: string | null
   /** Number of questions of the session (all of them, answered or not). */
   exerciseCount?: number | null
-  logs: (ScoredLog & { userAnswer?: string | null })[]
+  logs: (ScoredLog & { userAnswer?: string | null; gradedBy?: string | null })[]
 }
 
 /**
  * The one headline score of a session, shared by the history list row and the results dialog so they cannot disagree.
  * Denominator: for an exam, all its questions (unanswered ones are logged at 0); for a study session, the answered ones.
  * `notAnswered` is the number of questions without an answer (needs `exerciseCount`); it is shown as a note, never in the score.
+ * `unchecked` (present only when above 0) is the number of written exam answers the model has not checked yet; they count 0.
  */
-export function sessionHeadline(session: HeadlineSession): { scoreSum: number; correctCount: number; total: number; notAnswered: number } {
+export function sessionHeadline(session: HeadlineSession): { scoreSum: number; correctCount: number; total: number; notAnswered: number; unchecked?: number } {
   const { scoreSum, correctCount } = sessionScore(session.logs)
   const answered = session.logs.filter((l) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '').length
   const total = session.mode === 'exam' && session.exerciseCount ? session.exerciseCount : answered
   const questions = session.exerciseCount ?? total
-  return { scoreSum, correctCount, total, notAnswered: Math.max(0, questions - answered) }
+  const unchecked = session.logs.filter((l) => l.gradedBy === 'pending').length
+  return { scoreSum, correctCount, total, notAnswered: Math.max(0, questions - answered), ...(unchecked > 0 ? { unchecked } : {}) }
 }
 
 /** 3 -> "3", 0.3333 -> "0.33", 2.5 -> "2.5". */

@@ -131,3 +131,16 @@ export function escapeStudentAnswer(text: string): string {
 export function isOpenAnswerLongEnough(text: string): boolean {
   return typeof text === 'string' && text.replace(/\s/g, '').length >= OPEN_ANSWER_MIN_CHARS
 }
+
+/** Written exam answers that are still waiting for the model (their score counts 0 until they are checked). */
+export function countPendingOpen(logs: readonly { gradedBy?: string | null }[]): number {
+  return logs.filter((l) => l.gradedBy === 'pending').length
+}
+
+/** The result line of a written answer, in the words the other question types use; "Not checked yet" while it is pending. */
+export function openResultLabel(result: { score: number; gradedBy?: string | null }): string {
+  if (result.gradedBy === 'pending') return 'Not checked yet'
+  if (result.score >= 1) return 'Correct'
+  if (result.score > 0) return `Partially correct: ${Math.round(result.score * 100) / 100} of 1`
+  return 'Incorrect'
+}

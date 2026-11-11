@@ -1,9 +1,9 @@
-import type { SessionState } from '@/services/sessionService'
+import type { SessionState, OpenLogExtras } from '@/services/sessionService'
 
 /** What the study screen needs from a SessionState, in the shapes its components already use. */
 export interface SessionView {
   /** The session row plus `logs` (answered questions) in the shape the screen reads. */
-  session: SessionState['session'] & { logs: { exerciseId: string; isCorrect: boolean; score: number; userAnswer: string | null }[] }
+  session: SessionState['session'] & { logs: ({ exerciseId: string; isCorrect: boolean; score: number; userAnswer: string | null } & OpenLogExtras)[] }
   exercises: SessionState['items'][number]['exercise'][]
   draftAnswers: Record<string, string>
   flaggedIds: string[]

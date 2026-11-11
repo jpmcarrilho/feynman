@@ -1,19 +1,17 @@
 'use client'
 
-import { useState, type ReactNode } from 'react'
+import { useState } from 'react'
 import { Card, CardContent, CardFooter, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Loader2 } from 'lucide-react'
-import ReactMarkdown from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import remarkMath from 'remark-math'
-import rehypeKatex from 'rehype-katex'
 import { gradeAnswer, resolveExerciseType, formatScore, isPlaceholderChoice } from '@/lib/grading'
-import { scrollableTableComponents } from './markdownComponents'
 import { AnswerText } from './AnswerText'
-import { preprocessLaTeX } from './DiagnosisMarkdown'
+import { Md, ConfirmBar, CONFIRM_BUTTON } from './cardParts'
+import { OpenAnswer, type OpenLog } from './OpenAnswer'
+import type { SelfScore } from '@/lib/openAnswer'
+import type { OpenCheckOutcome } from '@/lib/openAnswerClient'
 
 interface FlashcardProps {
   questionText: string
@@ -36,6 +34,14 @@ interface FlashcardProps {
   onReport?: (reason: ReportReason) => Promise<boolean>
   /** True when the question was already reported (shows the notice instead of the control). */
   reported?: boolean
+  /** Written ("open") questions only: the session and question ids (the unsent draft is kept per question), the key points, the stored log, and the check. */
+  openProps?: {
+    sessionId: string
+    exerciseId: string
+    keyPoints: string[]
+    log?: OpenLog | null
+    onCheck?: (answer: string, selfScore?: SelfScore) => Promise<OpenCheckOutcome>
+  }
 }
 
 export type ReportReason = 'wrong_answer' | 'unclear' | 'off_topic' | 'other'
@@ -47,29 +53,11 @@ const REPORT_OPTIONS: { value: ReportReason; label: string }[] = [
   { value: 'other', label: 'Something else' },
 ]
 
-function Md({ text, className, as: Tag = 'div' }: { text: string; className: string; as?: 'div' | 'span' }) {
-  return (
-    <Tag className={className}>
-      <ReactMarkdown remarkPlugins={[remarkGfm, remarkMath]} rehypePlugins={[rehypeKatex]} components={scrollableTableComponents}>{preprocessLaTeX(text)}</ReactMarkdown>
-    </Tag>
-  )
-}
-
 // Phone (below sm): a comfortable reading size (17 px) with headings inside the question scaled to match; sm and up unchanged (text-xl)
 const QUESTION_PROSE = 'prose dark:prose-invert max-w-none min-w-0 break-words text-xl leading-relaxed max-sm:text-[1.0625rem]! max-sm:leading-normal max-sm:[&_h1]:text-xl max-sm:[&_h2]:text-lg max-sm:[&_h3]:text-base max-sm:[&_h4]:text-base max-sm:[&_p]:my-2'
 const CHOICE_PROSE = 'prose dark:prose-invert max-w-none min-w-0 text-sm break-words'
-const CONFIRM_BUTTON = 'w-full max-xl:h-11 bg-fountain-ink hover:bg-fountain-ink/90 text-white border-0 shadow-sm font-medium'
 
-/** On phones the confirm button stays at the bottom of the panel while a long list of options scrolls (the panel ends above the band reserved for the floating Tutor button). */
-function ConfirmBar({ children }: { children: ReactNode }) {
-  return (
-    <div className="mt-4 max-xl:sticky max-xl:bottom-0 max-xl:z-10 max-xl:-mx-4 max-xl:border-t max-xl:border-charcoal-graphite/10 max-xl:bg-card/95 max-xl:px-4 max-xl:py-3 max-xl:backdrop-blur-sm">
-      {children}
-    </div>
-  )
-}
-
-export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, result, onRequestExplanation, onReport, reported = false }: FlashcardProps) {
+export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, result, onRequestExplanation, onReport, reported = false, openProps }: FlashcardProps) {
   // The same type resolution and grading the server uses (src/lib/grading.ts)
   const effectiveExerciseType = resolveExerciseType({ exerciseType, choices, questionText })
   const grade = (userAnswer: string) =>
@@ -409,14 +397,34 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           </div>
         )}
 
+        {effectiveExerciseType === 'open' && openProps && (
+          <OpenAnswer
+            sessionId={openProps.sessionId}
+            exerciseId={openProps.exerciseId}
+            mode={isExamMode ? 'exam' : 'study'}
+            modelAnswer={correctAnswer}
+            keyPoints={openProps.keyPoints}
+            explanation={explanation}
+            initialAnswer={initialSelectedChoice ?? ''}
+            log={openProps.log}
+            reviewing={!isExamMode && !!hasBeenAnswered}
+            onCheck={openProps.onCheck}
+            onDraft={(a) => onAnswer(false, a)}
+            onDiscuss={onRequestExplanation ? () => { setHasRequestedHelp(true); onRequestExplanation(openProps.log?.userAnswer ?? '') } : undefined}
+            discussRequested={hasRequestedHelp}
+          />
+        )}
+
         {/* Announced to screen readers when it fills in; always mounted so the announcement is made */}
+        {effectiveExerciseType !== 'open' && (
         <div role="status" aria-live="polite" data-testid="answer-result" style={shownResult ? undefined : { margin: 0 }}>
           {shownResult && (
             <div className={`rounded-md border px-3 py-2 text-sm font-semibold ${resultColor}`}>{resultText}</div>
           )}
         </div>
+        )}
 
-        {isExamMode && (selected || multiSelected.length > 0 || numericValue || Object.values(dropdownValues).filter(Boolean).length > 0) && (
+        {isExamMode && effectiveExerciseType !== 'open' && (selected || multiSelected.length > 0 || numericValue || Object.values(dropdownValues).filter(Boolean).length > 0) && (
           <div role="status" aria-live="polite" className="text-xs text-fountain-ink bg-fountain-ink/10 px-3 py-1.5 rounded-md border border-fountain-ink/20 font-medium flex items-center gap-1.5 w-fit max-w-full">
             <span>✓ Answer saved as draft. You can change this anytime before submitting.</span>
           </div>
@@ -434,7 +442,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           ) : (
             <div className="flex flex-col gap-2 rounded-md border border-charcoal-graphite/15 p-3" role="group" aria-label="Report this question">
               <span className="font-medium text-charcoal-graphite/70">What is wrong with this question?</span>
-              {REPORT_OPTIONS.map((o) => (
+              {REPORT_OPTIONS.map((o) => ({ ...o, label: o.value === 'wrong_answer' && effectiveExerciseType === 'open' ? 'The model answer or the check is wrong' : o.label })).map((o) => (
                 <label key={o.value} className="flex items-center gap-2 cursor-pointer">
                   <input type="radio" name="report-reason" value={o.value} checked={reportReason === o.value} onChange={() => setReportReason(o.value)} />
                   {o.label}
@@ -453,7 +461,7 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
           )}
         </div>
       )}
-      {showResult && (
+      {showResult && effectiveExerciseType !== 'open' && (
         <CardFooter className="bg-muted p-6 rounded-b-xl border-t border-charcoal-graphite/10 flex flex-col items-start gap-4 shadow-sm">
           {explanation && (
             <div className="text-sm w-full">

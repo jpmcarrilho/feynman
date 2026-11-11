@@ -11,6 +11,7 @@ import type { SessionResultItem } from '@/services/sessionService'
 import { LocalDate } from './LocalDate'
 import { sessionHeadline, formatScore } from '@/lib/grading'
 import { AnswerText } from './AnswerText'
+import { Md } from './cardParts'
 
 interface ChatMessage {
   role: string;
@@ -77,7 +78,7 @@ export function SessionResultsDialog({
   const visibleMessages = (chatLog || []).filter(m => !String(m.text ?? '').startsWith('[SYSTEM'));
 
   // The headline is the history list's own value (shared helper); the listed questions only add a note
-  const { scoreSum, correctCount, total: totalCount, notAnswered } = sessionHeadline({
+  const { scoreSum, correctCount, total: totalCount, notAnswered, unchecked } = sessionHeadline({
     mode: selectedHistory.mode,
     exerciseCount: selectedHistory.exerciseCount,
     logs: selectedHistory.logs,
@@ -91,7 +92,7 @@ export function SessionResultsDialog({
       <div className="py-4 space-y-6">
         <div className="space-y-2 border-b pb-4">
           <p className="text-sm"><strong>Date:</strong> <LocalDate value={selectedHistory.startTime} kind="datetime" /></p>
-          <p className="text-sm"><strong>Score:</strong> {formatScore(scoreSum)} / {totalCount} ({correctCount} fully correct{notAnswered > 0 ? `, ${notAnswered} not answered` : ''})</p>
+          <p className="text-sm"><strong>Score:</strong> {formatScore(scoreSum)} / {totalCount} ({correctCount} fully correct{notAnswered > 0 ? `, ${notAnswered} not answered` : ''}{unchecked ? `, ${unchecked} not checked yet` : ''})</p>
           {resultItems === null && selectedHistory.logs.length > 0 && (
             <div className="flex items-center gap-2 text-sm text-muted-foreground py-2"><Loader2 className="w-4 h-4 animate-spin" /> Loading questions...</div>
           )}
@@ -100,18 +101,29 @@ export function SessionResultsDialog({
               {resultItems.map(item => (
                 <div key={item.exerciseId} className="text-sm py-3 border-b last:border-0 flex flex-col gap-1">
                   <div className="flex items-start gap-2 font-medium">
-                    <span className="mt-0.5">{item.log ? (item.log.isCorrect ? '✅' : '❌') : '➖'}</span>
+                    <span className="mt-0.5">{item.log ? (item.log.gradedBy === 'pending' ? '⏳' : item.log.isCorrect ? '✅' : '❌') : '➖'}</span>
                     <span className="line-clamp-2">Q{item.position + 1}: {item.questionText}</span>
-                    {item.log && item.log.score > 0 && item.log.score < 1 && (
+                    {item.log && item.log.gradedBy === 'pending' && (
+                      <span className="ml-auto shrink-0 text-xs text-muted-foreground">Not checked yet</span>
+                    )}
+                    {item.log && item.log.gradedBy !== 'pending' && (item.exerciseType === 'open' ? true : item.log.score > 0 && item.log.score < 1) && (
                       <span className="ml-auto shrink-0 text-xs text-muted-foreground">{formatScore(item.log.score)} pt</span>
                     )}
                   </div>
                   <div className="pl-6 space-y-0.5 text-xs">
                     {item.log ? (
                       <>
-                        <div className="text-muted-foreground"><span className="font-semibold text-foreground/70">Your Answer:</span> <AnswerText exercise={item} answer={item.log.userAnswer} empty="Skipped" /></div>
+                        <div className="text-muted-foreground"><span className="font-semibold text-foreground/70">Your Answer:</span>{' '}
+                          {item.exerciseType === 'open'
+                            ? <span className="whitespace-pre-wrap break-words">{item.log.userAnswer || 'Skipped'}</span>
+                            : <AnswerText exercise={item} answer={item.log.userAnswer} empty="Skipped" />}
+                          {item.log.gradedBy === 'self' && ' (self-assessed)'}
+                        </div>
+                        {item.exerciseType === 'open' && item.log.feedback?.text && (
+                          <Md text={item.log.feedback.text} className="prose dark:prose-invert max-w-none min-w-0 text-xs break-words text-foreground/80 prose-p:my-1" />
+                        )}
                         {!item.log.isCorrect && (
-                          <div className="text-green-600 dark:text-green-500"><span className="font-semibold">Correct Answer:</span> <AnswerText exercise={item} answer={item.correctAnswer} /></div>
+                          <div className="text-green-600 dark:text-green-500"><span className="font-semibold">{item.exerciseType === 'open' ? 'Model answer:' : 'Correct Answer:'}</span> <AnswerText exercise={item} answer={item.correctAnswer} /></div>
                         )}
                       </>
                     ) : (
@@ -139,7 +151,7 @@ export function SessionResultsDialog({
                       ? 'bg-fountain-ink/15 border-fountain-ink/25 text-charcoal-graphite' 
                       : 'bg-background border-charcoal-graphite/10 text-charcoal-graphite/90'
                   }`}>
-                    {msg.text}
+                    {msg.role === 'user' ? msg.text : <Md text={String(msg.text ?? '')} className="prose dark:prose-invert max-w-none min-w-0 text-sm break-words prose-p:my-1" />}
                   </div>
                 </div>
               ))}

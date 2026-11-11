@@ -22,7 +22,7 @@ export function SessionHistoryList({
     <div className="space-y-2">
       {histories.map(h => {
         // Same helper as the results dialog: one headline score for the same session
-        const { scoreSum, total } = sessionHeadline({ mode: h.mode, exerciseCount: h.exerciseCount, logs: h.logs || [] });
+        const { scoreSum, total, unchecked } = sessionHeadline({ mode: h.mode, exerciseCount: h.exerciseCount, logs: h.logs || [] });
         const isActiveSession = session?.id === h.id;
         return (
           <div 
@@ -44,6 +44,7 @@ export function SessionHistoryList({
             )}
             <div className="mt-1 flex justify-between text-charcoal-graphite/60">
               <span>{h.status === 'cancelled' ? 'No score' : `Score: ${formatScore(scoreSum)}/${total}`}</span>
+              {unchecked ? <span>{unchecked} not checked yet</span> : null}
               <span className={h.status === 'active' ? 'text-lecture-red font-semibold' : h.status === 'cancelled' ? 'text-charcoal-graphite/50' : isActiveSession ? 'text-fountain-ink' : 'text-fountain-ink/80'}>
                 {h.status === 'cancelled' ? 'Cancelled' : h.status}
               </span>

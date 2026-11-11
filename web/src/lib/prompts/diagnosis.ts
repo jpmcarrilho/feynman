@@ -2,6 +2,62 @@ import type { TutorProfile } from '@/lib/studyspace/profile'
 import { persona } from './persona'
 import { subjectGuidance } from './legacySubjectGuidance'
 import { fileLinkInstructions } from './linkInstructions'
+import { parseOpenFeedback, parseKeyPoints, type KeyPointStatus } from '@/lib/openAnswer'
+
+export type WrongAnswerEntry = {
+  topicTitle: string
+  question: string
+  userAnswer: string | null
+  correctAnswer: string
+  partialScore: number
+  explanation?: string | null
+  topicId: string
+  exerciseType?: string | null
+  gradedBy?: string | null
+  /** Stored ExerciseLog.feedback (JSON string) of a written answer. */
+  feedback?: string | null
+  /** Stored Exercise.keyPoints (JSON string) of a written question. */
+  keyPoints?: string | null
+}
+
+const STATUS_WORD: Record<KeyPointStatus, string> = { covered: 'covered', partly: 'partly covered', missing: 'missing' }
+
+/** One reviewed answer of the exam diagnosis prompt. A written answer carries its type, the model answer and the grader's feedback; a pending one is described as not yet checked. */
+export function examWrongAnswerBlock(index: number, w: WrongAnswerEntry): string {
+  if (w.exerciseType !== 'open') {
+    return `### Question Review ${index}:
+Topic: ${w.topicTitle}
+Question: ${w.question}
+User Answer: "${w.userAnswer || 'Unanswered'}"
+Correct Answer: "${w.correctAnswer}"
+Your Partial Score: ${w.partialScore.toFixed(2)}/1.00
+Official Explanation: ${w.explanation || "No explanation available."}
+Topic ID: ${w.topicId || 'none'}`
+  }
+  const pending = w.gradedBy === 'pending'
+  const feedback = parseOpenFeedback(w.feedback)
+  const stored = parseKeyPoints(w.keyPoints)
+  const lines = [
+    `### Question Review ${index}:`,
+    `Topic: ${w.topicTitle}`,
+    `Question (written answer): ${w.question}`,
+    `User Answer (written): "${w.userAnswer || 'Unanswered'}"`,
+    `Model Answer: "${w.correctAnswer}"`,
+  ]
+  if (pending) {
+    lines.push('Check: this written answer has not been checked yet; it counts 0 for now. Do not judge it.')
+  } else {
+    lines.push(`Your Partial Score: ${w.partialScore.toFixed(2)}/1.00${w.gradedBy === 'self' ? ' (the student scored it themselves)' : ''}`)
+    if (feedback && feedback.keyPoints.length > 0) {
+      lines.push('Key points: ' + feedback.keyPoints.map((k) => `${k.point} [${STATUS_WORD[k.status]}]`).join('; '))
+    } else if (stored.length > 0) {
+      lines.push('Key points: ' + stored.join('; '))
+    }
+    if (feedback?.text) lines.push(`Grader feedback: ${feedback.text}`)
+  }
+  lines.push(`Official Explanation: ${w.explanation || 'No explanation available.'}`, `Topic ID: ${w.topicId || 'none'}`)
+  return lines.join('\n')
+}
 
 export function examDiagnosisPrompt(
   profile: TutorProfile,

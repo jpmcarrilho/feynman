@@ -117,3 +117,14 @@ describe('isOpenAnswerLongEnough and the constants', () => {
     expect([...SELF_SCORES]).toEqual([1, 0.5, 0])
   })
 })
+
+describe('openResultLabel and countPendingOpen', () => {
+  it('words the result like the other types and flags a pending one', async () => {
+    const { openResultLabel, countPendingOpen } = await import('./openAnswer')
+    expect(openResultLabel({ score: 1 })).toBe('Correct')
+    expect(openResultLabel({ score: 0.5 })).toBe('Partially correct: 0.5 of 1')
+    expect(openResultLabel({ score: 0 })).toBe('Incorrect')
+    expect(openResultLabel({ score: 0, gradedBy: 'pending' })).toBe('Not checked yet')
+    expect(countPendingOpen([{ gradedBy: 'pending' }, { gradedBy: 'model' }, {}, { gradedBy: 'pending' }])).toBe(2)
+  })
+})

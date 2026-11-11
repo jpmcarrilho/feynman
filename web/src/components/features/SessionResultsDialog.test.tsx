@@ -84,3 +84,50 @@ describe('SessionResultsDialog', () => {
     expect(body).toContain('Blank 2: cold')
   })
 })
+
+describe('SessionResultsDialog: written answers not checked yet', () => {
+  it('a pending written answer reads "Not checked yet", counts 0 and is named in the headline', async () => {
+    const pendingItem = { position: 1, exerciseId: 'e1', questionText: 'Explain it', exerciseType: 'open', choices: '[]', correctAnswer: 'Model', log: { isCorrect: false, score: 0, userAnswer: 'my **words**', gradedBy: 'pending' } }
+    const hist = {
+      id: 'x2', mode: 'exam', status: 'completed', startTime: '2026-11-11T10:00:00.000Z', exerciseCount: 2,
+      logs: [
+        { id: 'a', exerciseId: 'e0', isCorrect: true, score: 1, userAnswer: 'A', position: 0 },
+        { id: 'b', exerciseId: 'e1', isCorrect: false, score: 0, userAnswer: 'my **words**', gradedBy: 'pending', position: 1 },
+      ],
+    }
+    actions.getSessionResults.mockResolvedValue([item(0, true), pendingItem])
+    render(<Dialog open><SessionResultsDialog selectedHistory={hist} onLoadSession={() => {}} isLoading={false} /></Dialog>)
+    await waitFor(() => expect(screen.getByText(/Score:/).parentElement).toHaveTextContent('1 / 2 (1 fully correct, 1 not checked yet)'))
+    await waitFor(() => expect(screen.getAllByText('Not checked yet').length).toBeGreaterThan(0))
+    expect(screen.getByText('my **words**')).toBeInTheDocument() // plain text
+  })
+  it('written answers: feedback under the answer, "Model answer:" label, points always, pending once', async () => {
+    const open = (position: number, log: object | null) => ({ position, exerciseId: `o${position}`, questionText: `Open ${position}`, exerciseType: 'open', choices: '[]', correctAnswer: 'MODELTEXT', log })
+    const hist = { id: 'x3', mode: 'exam', status: 'completed', startTime: '2026-11-11T10:00:00.000Z', exerciseCount: 3, logs: [] }
+    const fb = (text: string) => ({ v: 1, keyPoints: [], misconceptions: [], text })
+    actions.getSessionResults.mockResolvedValue([
+      open(0, { isCorrect: false, score: 0, userAnswer: 'a', gradedBy: 'model', feedback: fb('FEEDBACK ZERO') }),
+      open(1, { isCorrect: true, score: 1, userAnswer: 'b', gradedBy: 'model', feedback: fb('FEEDBACK FULL') }),
+      open(2, { isCorrect: false, score: 0, userAnswer: 'c', gradedBy: 'pending', feedback: null }),
+    ])
+    render(<Dialog open><SessionResultsDialog selectedHistory={hist} onLoadSession={() => {}} isLoading={false} /></Dialog>)
+    await waitFor(() => expect(screen.getByText('FEEDBACK ZERO')).toBeInTheDocument())
+    expect(screen.getByText('0 pt')).toBeInTheDocument()
+    expect(screen.getByText('1 pt')).toBeInTheDocument()
+    expect(screen.getByText('FEEDBACK FULL')).toBeInTheDocument()
+    expect(screen.getAllByText('Model answer:')).toHaveLength(2) // zero-score and pending; not the fully correct one
+    expect(screen.queryByText('Correct Answer:')).not.toBeInTheDocument()
+    expect(screen.getAllByText('Not checked yet')).toHaveLength(1)
+  })
+  it('tutor turns are rendered as Markdown, student turns stay plain', async () => {
+    actions.getSessionDetail.mockResolvedValue({ chatLog: JSON.stringify([{ role: 'model', text: 'You should *do* it' }, { role: 'user', text: 'I will *not*' }]) })
+    render(<Dialog open><SessionResultsDialog selectedHistory={history} onLoadSession={() => {}} isLoading={false} /></Dialog>)
+    await waitFor(() => expect(screen.getByText('do').tagName).toBe('EM'))
+    expect(screen.getByText('I will *not*')).toBeInTheDocument()
+  })
+  it('the history row names the unchecked answers', () => {
+    render(<SessionHistoryList histories={[{ id: 'h', mode: 'exam', status: 'completed', startTime: '2026-11-11T10:00:00.000Z', exerciseCount: 2, logs: [{ isCorrect: true, score: 1, userAnswer: 'A' }, { isCorrect: false, score: 0, userAnswer: 'x', gradedBy: 'pending' }] }]} session={null} setSelectedHistory={() => {}} onDeleteSession={() => {}} />)
+    expect(screen.getByText('1 not checked yet')).toBeInTheDocument()
+    expect(screen.getByText('Score: 1/2')).toBeInTheDocument()
+  })
+})

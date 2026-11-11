@@ -198,6 +198,11 @@ describe('sessionHeadline (shared by the history list and the results dialog)', 
     expect(h).toEqual({ scoreSum: 1.5, correctCount: 1, total: 5, notAnswered: 3 })
   })
 
+  it('reports written exam answers that are not checked yet, and counts them 0', () => {
+    const h = sessionHeadline({ mode: 'exam', exerciseCount: 3, logs: [log(1), { score: 0, isCorrect: false, userAnswer: 'text', gradedBy: 'pending' }, { score: 0, isCorrect: false, userAnswer: 'more', gradedBy: 'pending' }] })
+    expect(h).toEqual({ scoreSum: 1, correctCount: 1, total: 3, notAnswered: 0, unchecked: 2 })
+  })
+
   it('without a question count (legacy rows) it falls back to the answered count', () => {
     expect(sessionHeadline({ mode: 'study', logs: [log(1), log(0)] })).toMatchObject({ total: 2, notAnswered: 0 })
   })

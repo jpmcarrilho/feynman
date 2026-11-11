@@ -2,6 +2,7 @@ import type { TutorChatMode, TutorProfile } from '@/lib/studyspace/profile'
 import { persona, joinOr } from './persona'
 import { chatModeDirective, chatModeSwitchMessage, effectiveChatMode, CHAT_MODE_RULES } from './chatMode'
 import { voiceFileLinkInstructions } from './linkInstructions'
+import { OPEN_ANSWER_MAX_CHARS, parseKeyPoints, type KeyPointStatus, type OpenFeedback } from '@/lib/openAnswer'
 
 /**
  * System instruction of the live voice tutor, in one fixed order: role and scope, what the context contains, mode
@@ -23,7 +24,7 @@ ${CHAT_MODE_RULES}
 
 ANSWER RULES
 - Before the answer is checked (the exercise message says "not checked yet"): Probe never states the correct answer or says which choice is right. Guide gives hints and intermediate steps but never the final answer. Explain may state the answer when the student asks for it directly. If the student shares reasoning in chat, respond to the reasoning, but in Probe do not rule on their final choice.
-- Before the check, Probe and Guide never state the fact, finding, value or definition that by itself decides the question; on a question that tests one fact, stating it IS the answer. A hint points at how to reason (what kind of evidence would decide it, what to compare, which part of the question to re-read, a related idea from the material) and stops one step short. If the student is stuck on a pure recall question that reasoning cannot settle, say that this one comes down to recalling a specific result, point to where it sits in the material if the context gives a source, and tell them they can check their answer or switch to Explain for the direct answer.
+- Before the check, Probe and Guide never state the fact, finding, value or definition that by itself decides the question; on a question that tests one fact, stating it IS the answer. A hint points at how to reason (what kind of evidence would decide it, what to compare, which part of the question to re-read, a related idea from the material) and stops one step short. On a written-answer question, Probe and Guide never recite the model answer or key points before the check. If the student is stuck on a pure recall question that reasoning cannot settle, say that this one comes down to recalling a specific result, point to where it sits in the material if the context gives a source, and tell them they can check their answer or switch to Explain for the direct answer.
 - After the answer is checked (a message gives their answer, the result and the correct answer): your first reply to the student's next question, whatever it is (even just "Why?"), starts with one plain sentence saying whether their answer was right and what the correct answer is. Then Probe and Guide help them see why it is right and why their choice was or was not (questions and steps are fine now), and Explain explains directly. Every mode may discuss the correct answer openly.
 - The key is for accuracy, used only when the student asks; an unprompted turn never contains the answer, a hint or any part of the key.
 - Whenever you state or explain the answer, agree with the stored key in the context. If you believe the key is wrong, say so plainly instead of silently teaching something else.
@@ -48,15 +49,59 @@ export type CheckedAnswer = {
   score: number
   correctAnswer: string
   explanation?: string | null
+  /** Written ("open") questions: how the answer was checked and what the check said. */
+  open?: OpenCheckedDetails
 }
-/** The stored key of an exercise, as a person reads it. */
-export type AnswerKey = { correctAnswer: string; explanation?: string | null }
+/** The stored key of an exercise, as a person reads it. For a written question `correctAnswer` is the model answer and `keyPoints` lists what it must cover. */
+export type AnswerKey = { correctAnswer: string; explanation?: string | null; keyPoints?: string[] }
+
+export type OpenCheckedDetails = {
+  keyPoints: string[]
+  /** The grader's feedback to the student (empty for a self-assessed answer). */
+  feedback?: string
+  /** Key point statuses from the model's check. */
+  checkedPoints?: { point: string; status: KeyPointStatus }[]
+  selfAssessed?: boolean
+}
+
+/** Keeps a written answer from closing or imitating the hidden block it is quoted in, and caps its length. */
+function quoteStudentText(text: string): string {
+  return text.slice(0, OPEN_ANSWER_MAX_CHARS).replace(/\[SYSTEM MESSAGE/gi, '(system message').trim()
+}
+
+/** The answer state of a written question once it is checked: the student's text, the score, the model answer, the key points and the grader's feedback. */
+export function openCheckedAnswer(input: {
+  userAnswer: string
+  score: number
+  modelAnswer: string
+  keyPoints: unknown
+  explanation?: string | null
+  feedback?: OpenFeedback | null
+  selfAssessed?: boolean
+}): CheckedAnswer {
+  const keyPoints = parseKeyPoints(input.keyPoints)
+  return {
+    checked: true,
+    chosen: quoteStudentText(input.userAnswer),
+    score: input.score,
+    correctAnswer: input.modelAnswer,
+    explanation: input.explanation,
+    open: {
+      keyPoints,
+      feedback: input.feedback?.text ?? '',
+      checkedPoints: input.feedback && input.feedback.keyPoints.length > 0 ? input.feedback.keyPoints : undefined,
+      selfAssessed: input.selfAssessed === true,
+    },
+  }
+}
 /** Not checked yet; `key` is the private key, used only in Explain mode (never in Probe, Guide or exams). */
 export type ExerciseAnswerState = { checked: false; key?: AnswerKey } | CheckedAnswer
 
 export type ExerciseContextInput = {
   topicTitle?: string | null
   questionText: string
+  /** 'open' replaces the choices line with the answer format. */
+  exerciseType?: string | null
   choices: string[]
   sessionMode: string | null | undefined
   /** Unit blocks from getVoiceContextForExercise, already capped. */
@@ -77,14 +122,22 @@ function clip(text: string | null | undefined): string {
 
 function keyLines(k: AnswerKey): string {
   const explanation = clip(k.explanation)
-  return `Correct answer: ${k.correctAnswer}${explanation ? `\nExplanation: ${explanation}` : ''}`
+  const points = !!k.keyPoints && k.keyPoints.length > 0
+  return `${k.keyPoints ? 'Model answer' : 'Correct answer'}: ${k.correctAnswer}${points ? `\nKey points a complete answer covers:\n${k.keyPoints!.map((p) => `- ${p}`).join('\n')}` : ''}${explanation ? `\nExplanation: ${explanation}` : ''}`
 }
 
 function answerLines(a: CheckedAnswer): string {
   const result = a.score >= 1 ? 'correct' : a.score > 0 ? `partly correct (score ${Math.round(a.score * 100)}%)` : 'incorrect'
-  return `Student's answer: ${a.chosen}
+  if (!a.open) {
+    return `Student's answer: ${a.chosen}
 Result: ${result}
 ${keyLines(a)}`
+  }
+  const o = a.open
+  const statuses = o.checkedPoints?.map((k) => `- [${k.status}] ${k.point}`).join('\n')
+  return `Student's written answer: ${a.chosen}
+Result: ${result}${o.selfAssessed ? ' (the student scored it themselves against the model answer)' : ''}
+${o.feedback ? `Feedback given to the student: ${clip(o.feedback)}\n` : ''}${statuses ? `Key points as checked:\n${statuses}\n` : ''}${keyLines({ correctAnswer: a.correctAnswer, explanation: a.explanation, keyPoints: statuses ? [] : o.keyPoints })}`
 }
 
 const KEY_NOTE = 'Private reference, for accuracy only; state it only as the Explain rules allow, and the student has not seen it:'
@@ -139,7 +192,7 @@ ${voiceFileLinkInstructions()}
   return `[SYSTEM MESSAGE: The student has navigated to a new exercise. The previous exercise is finished; do not continue it.
 Topic: ${input.topicTitle || 'Unknown'}
 Question: ${input.questionText}
-Choices: ${input.choices.join(', ')}
+${input.exerciseType === 'open' ? 'Answer format: a written answer in the student\'s own words (there are no choices).' : `Choices: ${input.choices.join(', ')}`}
 ${status}Active Mode: ${effective === 'exam' ? 'Timed Exam' : 'Interactive Practice'}
 
 <private_knowledge>
