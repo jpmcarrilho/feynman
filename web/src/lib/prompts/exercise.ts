@@ -29,6 +29,14 @@ Official Explanation: ${input.explanation || 'None provided.'}
 Your task: Gently explain to the student why their answer is incorrect and why the correct answer is right. Use the official explanation if available, but break it down so it's easy to understand. Be encouraging.`
 }
 
+/** The lecture context of the enrichment prompt is cut to this many characters (the head is kept). */
+export const ENRICH_CONTEXT_MAX_CHARS = 30_000
+
+/** `text` cut to `max` characters with a visible marker, unchanged when it already fits. */
+export function capEnrichmentContext(text: string, max: number = ENRICH_CONTEXT_MAX_CHARS): string {
+  return text.length > max ? `${text.slice(0, max)}\n... [TRUNCATED]` : text
+}
+
 export function enrichExercisePrompt(
   profile: TutorProfile,
   input: {
@@ -46,7 +54,7 @@ Because it is played standalone in a flashcard interface, some questions might l
 Your task is to review the question and decide if it actually needs context, and then re-generate it accordingly.
 
 Lecture Transcripts / Lesson Context:
-${input.contextText}
+${capEnrichmentContext(input.contextText)}
 
 Original Question Text:
 ${input.exercise.questionText}
@@ -77,6 +85,13 @@ Instructions & Constraints:
    - Keep the underlying logic, question, options/choices, and correct answer exactly the same.
    - Remove relative references like "above", "in the video", "in the lecture" and replace them with the concrete name of the program, policy, or dataset being discussed.
    - Ensure the resulting question text is clear, professional, and directly answerable.
+
+5. NO ANSWER CHOICES, NO SOLUTIONS, NO INVENTION:
+   - Do NOT repeat or list the answer choices in the question text, and do NOT include worked solutions or explanations taken from the context.
+   - Never invent values, tables or facts that are not in the provided context. If the context does not contain what is missing, return the original question text unchanged.
+
+6. HEADER NOISE:
+   - Only when you rewrite the question for another reason, also remove platform header noise such as "Question 3.2", "1.0/1.0 point (graded)" or "0 points possible (ungraded)". Never rewrite only to remove it.
 
 Respond with a JSON object that contains the re-generated question text.
 

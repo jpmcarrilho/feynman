@@ -268,3 +268,12 @@ describe('defaultChatMode on profiles', () => {
     expect(parseProfile(JSON.stringify({ ...legacy, defaultChatMode: 'bogus' }))).toBeNull()
   })
 })
+
+describe('enrichExercisePrompt rules', () => {
+  it('forbids copying choices or solutions and inventing facts, and limits header removal', () => {
+    const out = enrichExercisePrompt(space, { contextText: 'c', exercise: { questionText: 'q', exerciseType: 'single_choice', correctAnswer: 'a' }, choices: ['a'] })
+    expect(out).toContain('Do NOT repeat or list the answer choices')
+    expect(out).toContain('Never invent values, tables or facts')
+    expect(out).toContain('Never rewrite only to remove it')
+  })
+})

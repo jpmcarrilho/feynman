@@ -12,11 +12,11 @@ import { getCourseWithProfile, getProfileForTopic, getProfileForCourses } from '
 import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
 import { generateNextForSession, type NextExerciseResult } from '@/services/sessionGeneration'
 import { submitExamForSession, type ExamSubmission } from '@/services/sessionService'
+import { enrichInBackground, isBackgroundEnrichmentEnabled, type EnrichableRow } from '@/services/enrichment'
 import { gradeAnswer, logScore } from '@/lib/grading'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
 import {
   explainMistakePrompt,
-  enrichExercisePrompt,
   examDiagnosisPrompt,
   globalDiagnosisPrompt,
   plannerChatPrompt,
@@ -171,99 +171,6 @@ export async function getGlobalCourseContextForExercises(courseId: string, exerc
   return getGlobalCourseContext(courseId, combinedText);
 }
 
-export async function needsContextEnrichment(text: string): Promise<boolean> {
-  await requireAuth()
-  const lowercase = text.toLowerCase();
-  if (text.includes('<!-- enriched -->')) {
-    // If previous enrichment failed to provide table details (no markdown table | present)
-    if (lowercase.includes('table') && !text.includes('|')) {
-      return true;
-    }
-    return false;
-  }
-  return true;
-}
-
-export async function enrichExerciseWithContext(exercise: any) {
-  await requireAuth()
-  try {
-    const topicData = exercise.topic;
-    if (!topicData) return exercise;
-
-    // 1. Fetch preceding lecture transcript context if it exists (highest local fidelity)
-    let contextText = await getPrecedingTopicsContext(topicData);
-
-    // 2. If no preceding lecture transcript is found, fall back to a course-wide search over topic content
-    if (!contextText) {
-      contextText = await getGlobalContext(topicData.courseId, exercise.questionText);
-    }
-
-    // 3. Fallback to surrounding week topics
-    if (!contextText) {
-      const contextTopics = await prisma.topic.findMany({
-        where: {
-          courseId: topicData.courseId,
-          week: topicData.week
-        }
-      });
-      contextText = contextTopics.map(t => {
-        let text = t.content || '';
-        if (text.length > 100000) {
-          text = text.slice(0, 100000) + '... [TRUNCATED]';
-        }
-        return `Topic: ${t.title}\nContent:\n${text}`;
-      }).join('\n\n');
-    }
-
-    let parsedChoices: string[] = [];
-    try {
-      if (exercise.choices) {
-        parsedChoices = typeof exercise.choices === 'string' ? JSON.parse(exercise.choices) : exercise.choices;
-      }
-    } catch (e) {}
-
-    const course = await getCourseWithProfile(topicData.courseId);
-    const prompt = enrichExercisePrompt(course?.profile ?? LEGACY_VOICE_PROFILE, {
-      contextText: contextText ?? '',
-      exercise,
-      choices: parsedChoices,
-      courseCode: course?.code,
-    });
-
-    const { object } = await generateObject({
-      model: textModel(),
-      schema: z.object({
-        enrichedQuestionText: z.string()
-      }),
-      prompt
-    });
-
-    if (object?.enrichedQuestionText) {
-      const enrichedText = object.enrichedQuestionText;
-      const enrichedAt = new Date();
-      // Keep the pre-enrichment wording the first time an exercise is enriched
-      const originalQuestionText = exercise.originalQuestionText ?? exercise.questionText;
-
-      // Persist in DB so we never have to do this again for this exercise.
-      // enrichedAt marks it as done; no in-band marker is written into the text.
-      await prisma.exercise.update({
-        where: { id: exercise.id },
-        data: { questionText: enrichedText, enrichedAt, originalQuestionText }
-      });
-
-      return {
-        ...exercise,
-        questionText: enrichedText,
-        enrichedAt,
-        originalQuestionText
-      };
-    }
-  } catch (error) {
-    console.error(`Failed to enrich exercise ${exercise.id} with context:`, error);
-  }
-  return exercise;
-}
-
 export async function createStudySession(
   topicIds: string[], 
   count: number, 
@@ -277,6 +184,8 @@ export async function createStudySession(
   await requireAuth()
   let selected: any[] = []
   let missingCount = 0;
+  // Candidates the student has never answered, kept for background enrichment (see below)
+  let unstudiedCandidates: EnrichableRow[] = [];
 
   // Check if we are selecting from a calibration module (the profile's calibrationModule, e.g. a comprehensive review)
   let isComprehensiveReview = false;
@@ -404,20 +313,12 @@ export async function createStudySession(
     }
 
     selected = selectedExercises;
+    unstudiedCandidates = unstudiedPool;
     missingCount = count - selected.length;
   } else {
     selected = [];
     missingCount = count;
   }
-
-  // Enrich selected exercises that need context
-  selected = await Promise.all(selected.map(async (ex) => {
-    // enrichedAt replaces the in-band marker (stripped by the studyspaces backfill)
-    if (!ex.enrichedAt && await needsContextEnrichment(ex.questionText)) {
-      return enrichExerciseWithContext(ex);
-    }
-    return ex;
-  }));
 
   // Determine a descriptive title based on selected courses and weeks
   let sessionTitle = mode === 'exam' ? "Timed Exam Session" : "Random Study Session";
@@ -460,7 +361,16 @@ export async function createStudySession(
     include: { logs: true }
   })
 
-  // Return exercises without topic.content; enrichment above already read what it needed server-side.
+  // Optional context enrichment (off unless ENRICH_IN_BACKGROUND=1). It never delays session start and never rewrites a
+  // question the student is about to see: it runs after the response, on never-answered questions that are not in this
+  // session (their improved text is used by later sessions). At most ENRICH_MAX_PER_SESSION_START questions and
+  // ENRICH_MAX_CALLS_PER_BATCH model calls.
+  if (isBackgroundEnrichmentEnabled()) {
+    const selectedIdSet = new Set(selected.map((e) => e.id as string))
+    enrichInBackground(unstudiedCandidates.filter((e) => !selectedIdSet.has(e.id)))
+  }
+
+  // Return exercises without topic.content.
   const selectedIds: string[] = selected.map(e => e.id)
   const rows = selectedIds.length > 0
     ? await prisma.exercise.findMany({ where: { id: { in: selectedIds } }, select: EXERCISE_CLIENT_SELECT })

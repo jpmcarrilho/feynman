@@ -1,13 +1,20 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, reportExercise } from './actions'
+import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, getPreviousLectureTranscripts, deleteStudySession, saveChatLog, deleteStudyPlan, logAnswer, cancelStudySession, reportExercise } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 import { defaultProfile } from '@/lib/studyspace/profile'
 import { GENERATE_EXERCISE_PROMPT_VERSION } from '@/lib/prompts'
+import { enrichInBackground } from '@/services/enrichment'
 
 // Auth: requireAuth always resolves in these tests
 vi.mock('@/server/auth', () => ({
   requireAuth: vi.fn(async () => {}),
+}))
+
+// Enrichment runs in the background after session start; its own tests are in services/enrichment.test.ts
+vi.mock('@/services/enrichment', () => ({
+  enrichInBackground: vi.fn(),
+  isBackgroundEnrichmentEnabled: vi.fn(() => process.env.ENRICH_IN_BACKGROUND === '1'),
 }))
 
 // Mock the AI SDK
@@ -325,16 +332,6 @@ describe('generateNextExercise action', () => {
   })
 })
 
-describe('needsContextEnrichment helper', () => {
-  it('returns true for any non-enriched text', async () => {
-    expect(await needsContextEnrichment('What is the difference between NPV and IRR?')).toBe(true)
-  })
-
-  it('returns false if already enriched', async () => {
-    expect(await needsContextEnrichment('<!-- enriched -->\nWhat is described in the video above?')).toBe(false)
-  })
-})
-
 describe('getPreviousLectureTranscripts action', () => {
   it('walks back from the first topic of the class (by order) and returns the preceding transcript text', async () => {
     vi.mocked(prisma.topic.findFirst).mockResolvedValueOnce({ id: 't-cur', courseId: 'course-1', week: 'W1', order: 50, className: 'Current Exercise Topic' } as any)
@@ -354,59 +351,6 @@ describe('getPreviousLectureTranscripts action', () => {
   it('returns null when the class is unknown', async () => {
     vi.mocked(prisma.topic.findFirst).mockResolvedValueOnce(null)
     expect(await getPreviousLectureTranscripts('course-1', 'Nope')).toBeNull()
-  })
-})
-
-describe('enrichExerciseWithContext action', () => {
-  it('calls generateObject and updates exercise with enriched marker', async () => {
-    const mockTopic = { id: 'topic-1', title: 'Current Topic', courseId: 'course-1', week: 'week-1', className: 'Current Exercise Topic', order: 5 }
-    const mockExercise = {
-      id: 'ex-1',
-      topicId: 'topic-1',
-      questionText: 'Which step is missing in the process described in the above figure?',
-      topic: mockTopic
-    }
-
-    vi.mocked(prisma.topic.findMany).mockResolvedValueOnce([
-      { id: 't-prev', title: 'Prev Video Title', content: 'Here is the transcript for context.', week: 'week-1', className: 'Previous Lecture Topic', order: 1 }
-    ] as any)
-    vi.mocked(prisma.course.findUnique).mockResolvedValueOnce({ id: 'course-1', code: 'JPAL102x', title: 'JPAL', profile: null } as any)
-
-    const mockEnrichedText = 'Which step is missing in the data entry double entry verification process?'
-    vi.mocked(generateObject).mockResolvedValueOnce({
-      object: { enrichedQuestionText: mockEnrichedText }
-    } as any)
-
-    const result = await enrichExerciseWithContext(mockExercise)
-
-    expect(generateObject).toHaveBeenCalledTimes(1)
-    expect(vi.mocked(generateObject).mock.calls[0][0].prompt).toContain('Here is the transcript for context.')
-    expect(prisma.exercise.update).toHaveBeenCalledWith({
-      where: { id: 'ex-1' },
-      data: {
-        questionText: mockEnrichedText,
-        enrichedAt: expect.any(Date),
-        originalQuestionText: mockExercise.questionText
-      }
-    })
-
-    // No in-band marker: enrichment is tracked by the enrichedAt column
-    expect(result.questionText).toBe(mockEnrichedText)
-    expect(result.originalQuestionText).toBe(mockExercise.questionText)
-  })
-
-  it('gracefully falls back on errors', async () => {
-    const mockExercise = {
-      id: 'ex-1',
-      topicId: 'topic-1',
-      questionText: 'What is above?',
-      topic: { id: 'topic-1', courseId: 'course-1', className: 'Current Exercise Topic' }
-    }
-
-    vi.mocked(prisma.topic.findMany).mockRejectedValueOnce(new Error('DB Error'))
-
-    const result = await enrichExerciseWithContext(mockExercise)
-    expect(result).toEqual(mockExercise)
   })
 })
 
@@ -531,6 +475,45 @@ describe('payload trimming', () => {
     expect(clientArgs).not.toHaveProperty('select.topic.select.content')
     expect(clientArgs).toHaveProperty('select.questionText', true)
     expect(res.exercises).toEqual([{ id: 'e1', topic: { id: 't1' } }])
+  })
+})
+
+describe('createStudySession background enrichment', () => {
+  const row = (id: string, extra: Record<string, unknown> = {}) => ({ id, topicId: 't1', questionText: 'Q', enrichedAt: null, topic: { id: 't1', courseId: 'c1' }, ...extra })
+
+  afterEach(() => {
+    delete process.env.ENRICH_IN_BACKGROUND
+  })
+
+  it('schedules nothing by default (flag off)', async () => {
+    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([row('a'), row('b')] as never).mockResolvedValueOnce([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
+
+    await createStudySession([], 1, 'study', null, 0, 0, 100, 0)
+
+    expect(enrichInBackground).not.toHaveBeenCalled()
+    // only the candidate pool and the client re-read: no enrichment candidate query
+    expect(prisma.exercise.findMany).toHaveBeenCalledTimes(2)
+  })
+
+  it('enriches only never-answered questions that are not in the new session, without waiting for the model (ENRICH_IN_BACKGROUND=1)', async () => {
+    process.env.ENRICH_IN_BACKGROUND = '1'
+    const pool = [row('a'), row('b'), row('c'), row('answered')]
+    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce(pool as never).mockResolvedValueOnce([] as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([{ exerciseId: 'answered', isCorrect: false }] as never)
+    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
+
+    await createStudySession([], 1, 'study', null, 0, 0, 100, 0)
+
+    expect(generateObject).not.toHaveBeenCalled()
+    const created = JSON.parse((vi.mocked(prisma.studySession.create).mock.calls[0][0] as any).data.exerciseIds) as string[]
+    expect(created).toHaveLength(1)
+    const queued = (vi.mocked(enrichInBackground).mock.calls[0][0] as { id: string }[]).map((e) => e.id).sort()
+    expect(queued).toEqual(['a', 'b', 'c'].filter((id) => id !== created[0]))
+    expect(queued).not.toContain('answered')
   })
 })
 
