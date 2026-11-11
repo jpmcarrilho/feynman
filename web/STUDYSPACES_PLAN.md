@@ -771,6 +771,7 @@ Verify: lint/typecheck/vitest/`npm run build`; the scratchpad report shows diffe
 Commit: `fix(grading): single gradeAnswer used by flashcards, logs and transactional exam submission`
 
 #### T13 — Smaller generation context and visible shortfall (sonnet)
+Added 2026-11-11 (from T11 testing): (1) `searchTopics`/`getGlobalContext` now returns about 230k characters per call on average (10 topics x up to 50k) and is used as extra grounding for calibration-module generation; this task's caps must bring that down as specified. (2) Generation must not target topics that only hold ungraded material: a Week 13 session produced a generated question about the "required course participation survey". Exclude from the generation pool any topic whose exercises are all `isGraded = false` (and for uploaded content, topics flagged as front matter).
 Depends: T12. Files: `src/services/exerciseGenerator.ts`, `src/app/actions.ts` (`generateNextExercise` return type), `src/components/features/StudyInterface.tsx` (~795–822), tests.
 Steps:
 1. Grounding per 5.4 "Smaller grounding".
