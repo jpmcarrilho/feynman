@@ -1,6 +1,8 @@
 // Server-side file access rules. Nothing a client sends may reach the filesystem except through these helpers.
 import fs from 'fs'
 import path from 'path'
+import { Readable } from 'stream'
+import { pipeline } from 'stream/promises'
 import { isValidSummaryKey, isValidFileId } from '@/lib/fileLinks'
 import { PagesFileSchema, type PagesFile } from '@/server/ingest/schemas'
 
@@ -95,6 +97,58 @@ export async function atomicWriteStorageFile(key: string, data: string | Uint8Ar
     if (handle) await handle.close().catch(() => {})
     await fs.promises.rm(/* turbopackIgnore: true */ tmp, { force: true }).catch(() => {})
     throw error
+  }
+}
+
+/**
+ * Same as atomicWriteStorageFile, but the bytes come from a stream (a File from `request.formData()`), so the content is
+ * not copied into a second in-memory buffer on its way to disk.
+ */
+export async function atomicWriteStorageStream(key: string, source: Readable | ReadableStream<Uint8Array>): Promise<void> {
+  const target = await preparePath(key)
+  const tmp = `${target}.${process.pid}.${crypto.randomUUID().slice(0, 8)}.tmp`
+  try {
+    const input = source instanceof Readable ? source : Readable.fromWeb(source as import('stream/web').ReadableStream<Uint8Array>)
+    await pipeline(input, fs.createWriteStream(/* turbopackIgnore: true */ tmp, { flags: 'wx' }))
+    const handle = await fs.promises.open(/* turbopackIgnore: true */ tmp, 'r+')
+    try {
+      await handle.sync()
+    } finally {
+      await handle.close()
+    }
+    await fs.promises.rename(/* turbopackIgnore: true */ tmp, target)
+  } catch (error) {
+    await fs.promises.rm(/* turbopackIgnore: true */ tmp, { force: true }).catch(() => {})
+    throw error
+  }
+}
+
+/** Saves an uploaded Blob/File as the original of a source without buffering it a second time; returns the storage key. */
+export async function writeSourceBlob(courseId: string, sourceId: string, ext: string, blob: Blob): Promise<string> {
+  const key = sourceStorageKey(courseId, sourceId, ext)
+  await atomicWriteStorageStream(key, blob.stream() as ReadableStream<Uint8Array>)
+  return key
+}
+
+/** Deletes the folder of one source (original, pages.json). A missing folder is fine. */
+export async function removeSourceFiles(courseId: string, sourceId: string): Promise<void> {
+  await fs.promises.rm(/* turbopackIgnore: true */ sourceDir(courseId, sourceId), { recursive: true, force: true })
+}
+
+/**
+ * Deletes everything a studyspace keeps under STORAGE_DIR: its source files, its summaries and the session index files of
+ * `sessionIds`. The tracked legacy folder `summaries/` of the repository is never touched.
+ */
+export async function removeCourseStorage(courseId: string, sessionIds: string[] = []): Promise<void> {
+  if (!isValidFileId(courseId)) throw new Error('Invalid course id')
+  const root = storageDir()
+  for (const rel of [`sources/${courseId}`, `summaries/${courseId}`]) {
+    const full = resolveInside(root, rel)
+    if (full) await fs.promises.rm(/* turbopackIgnore: true */ full, { recursive: true, force: true })
+  }
+  for (const id of sessionIds) {
+    const file = newSessionIndexPath(id)
+    if (file) await fs.promises.rm(/* turbopackIgnore: true */ file, { force: true })
   }
 }
 

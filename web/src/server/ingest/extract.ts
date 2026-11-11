@@ -340,6 +340,27 @@ export async function ocrFallback(
   }
 }
 
+/** Bytes of a file that `sniffUploadHead` needs (the text sniffing reads the first 8 KB). */
+export const UPLOAD_SNIFF_BYTES = 8192
+
+/**
+ * Upload-time check of the first bytes of a file: the same rules and messages the extractor applies later, so an obviously
+ * wrong file is refused at upload. Returns the message to show, or null when the file looks acceptable.
+ */
+export function sniffUploadHead(ext: string, head: Uint8Array): string | null {
+  if (ext === '.pdf') {
+    if (startsWithPdfHeader(head)) return null
+    return `This file has a .pdf name but is ${describeNonPdf(head)}, not a PDF (it does not start with %PDF-). Open the original document and export it as a PDF again.`
+  }
+  try {
+    decodeTextFile(head)
+    return null
+  } catch (error) {
+    if (error instanceof ExtractionError) return error.message
+    throw error
+  }
+}
+
 export type PdfExtractOptions = { generate?: GenerateObjectFn }
 
 /** pdf-parse text of every page, cleaned and stripped of repeated headers/footers (before the sparse test). */
