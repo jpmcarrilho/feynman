@@ -14,13 +14,7 @@ import rehypeKatex from 'rehype-katex'
 import { parseFileLink } from '@/lib/fileLinks'
 import { linkifyFilePaths } from '@/lib/linkifyFileLinks'
 import { scrollableTableComponents } from './markdownComponents'
-
-const preprocessLaTeX = (text: string | null | undefined) => {
-  if (!text) return '';
-  let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
-  processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
-  return processed;
-}
+import { preprocessLaTeX } from './DiagnosisMarkdown'
 
 interface VoiceHubProps {
   liveAPI: any;

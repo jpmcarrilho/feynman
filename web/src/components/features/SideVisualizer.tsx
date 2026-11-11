@@ -8,6 +8,7 @@ import remarkGfm from 'remark-gfm'
 import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import { parseFileLink } from '@/lib/fileLinks'
+import { preprocessLaTeX } from './DiagnosisMarkdown'
 
 export type ActiveFileKind = 'pdf' | 'markdown' | 'text'
 
@@ -30,12 +31,6 @@ interface SideVisualizerProps {
   onToggleFullWidth?: () => void;
 }
 
-const preprocessLaTeX = (text: string | null | undefined): string => {
-  if (!text) return '';
-  let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
-  processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
-  return processed;
-}
 
 const renderTranscriptWithHighlight = (text: string, highlight: string | null): React.ReactNode => {
   if (!highlight || !text) return text;

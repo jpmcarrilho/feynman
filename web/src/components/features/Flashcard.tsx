@@ -13,13 +13,7 @@ import rehypeKatex from 'rehype-katex'
 import { gradeAnswer, resolveExerciseType, formatScore, isPlaceholderChoice } from '@/lib/grading'
 import { scrollableTableComponents } from './markdownComponents'
 import { AnswerText } from './AnswerText'
-
-const preprocessLaTeX = (text: string | null | undefined) => {
-  if (!text) return '';
-  let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
-  processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
-  return processed;
-}
+import { preprocessLaTeX } from './DiagnosisMarkdown'
 
 interface FlashcardProps {
   questionText: string

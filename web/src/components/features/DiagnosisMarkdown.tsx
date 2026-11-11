@@ -6,6 +6,7 @@ import remarkMath from 'remark-math'
 import rehypeKatex from 'rehype-katex'
 import type { ReactNode } from 'react'
 import { parseFileLink } from '@/lib/fileLinks'
+import { escapeCurrencyDollars } from '@/lib/currencyDollars'
 
 export type ViewFile = (href: string, title?: string) => void
 
@@ -33,7 +34,7 @@ export const preprocessLaTeX = (text: string | null | undefined): string => {
   if (!text) return '';
   let processed = text.replace(/\\\[([\s\S]*?)\\\]/g, '$$$$$1$$$$');
   processed = processed.replace(/\\\(([\s\S]*?)\\\)/g, '$$$1$$');
-  return processed;
+  return escapeCurrencyDollars(processed);
 }
 
 /** A stored diagnosis report: GitHub markdown with math, links to course files open in the viewer (or a new tab without one). */
