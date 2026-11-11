@@ -4,6 +4,11 @@ import { generateText } from 'ai'
 import { prisma } from '@/lib/db'
 import fs from 'fs'
 
+// Auth: requireAuth always resolves in these tests
+vi.mock('@/server/auth', () => ({
+  requireAuth: vi.fn(async () => {}),
+}))
+
 // Mock the AI SDK
 vi.mock('ai', () => ({
   generateText: vi.fn(),

@@ -3,6 +3,11 @@ import { explainMistake, generateNextExercise, needsContextEnrichment, enrichExe
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 
+// Auth: requireAuth always resolves in these tests
+vi.mock('@/server/auth', () => ({
+  requireAuth: vi.fn(async () => {}),
+}))
+
 // Mock the AI SDK
 vi.mock('ai', () => ({
   generateText: vi.fn(),

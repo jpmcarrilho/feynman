@@ -8,6 +8,7 @@ import { getCourseArtifactsService, generateWeekSummaryService } from '@/service
 import { z } from 'zod'
 import fs from 'fs'
 import path from 'path'
+import { requireAuth } from '@/server/auth'
 
 export async function explainMistake({
   questionText,
@@ -24,6 +25,7 @@ export async function explainMistake({
   explanation?: string | null,
   topicTitle?: string
 }) {
+  await requireAuth()
   const prompt = `You are an expert tutor for the MIT DEDP MicroMasters.
 The student answered a multiple choice question incorrectly.
 
@@ -52,6 +54,7 @@ Your task: Gently explain to the student why their answer is incorrect and why t
 }
 
 export async function getTopics() {
+  await requireAuth()
   return prisma.topic.findMany({
     orderBy: { week: 'asc' },
     include: { course: true }
@@ -59,6 +62,7 @@ export async function getTopics() {
 }
 
 export async function getPreviousLectureTranscripts(courseId: string, currentClassName: string): Promise<string | null> {
+  await requireAuth()
   try {
     const course = await prisma.course.findUnique({
       where: { id: courseId }
@@ -117,6 +121,7 @@ export async function getPreviousLectureTranscripts(courseId: string, currentCla
 }
 
 export async function getGlobalCourseContext(courseId: string, text: string): Promise<string> {
+  await requireAuth()
   const academicKeywords = [
     "ferraz", "finan", "olken", "jones", "acemoglu", "robinson", "johnson", "nichter", "larreguy", 
     "hsieh", "chavez", "marshall", "trucco", "nunn", "wantchekon", "fujiwara", "duflo", "banerjee", 
@@ -167,11 +172,13 @@ export async function getGlobalCourseContext(courseId: string, text: string): Pr
 }
 
 export async function getGlobalCourseContextForExercises(courseId: string, exercises: any[]): Promise<string> {
+  await requireAuth()
   const combinedText = exercises.map(ex => ex.questionText).join(' ');
   return getGlobalCourseContext(courseId, combinedText);
 }
 
 export async function needsContextEnrichment(text: string): Promise<boolean> {
+  await requireAuth()
   const lowercase = text.toLowerCase();
   if (text.includes('<!-- enriched -->')) {
     // If previous enrichment failed to provide table details (no markdown table | present)
@@ -184,6 +191,7 @@ export async function needsContextEnrichment(text: string): Promise<boolean> {
 }
 
 export async function enrichExerciseWithContext(exercise: any) {
+  await requireAuth()
   try {
     const topicData = exercise.topic;
     if (!topicData) return exercise;
@@ -305,6 +313,7 @@ export async function createStudySession(
   unstudiedPct: number = 20,
   expertPct: number = 20
 ) {
+  await requireAuth()
   let selected: any[] = []
   let missingCount = 0;
 
@@ -506,6 +515,7 @@ export async function createStudySession(
 }
 
 export async function logAnswer(sessionId: string, exerciseId: string, isCorrect: boolean, duration: number, userAnswer?: string) {
+  await requireAuth()
   try {
     await prisma.exerciseLog.create({
       data: {
@@ -522,6 +532,7 @@ export async function logAnswer(sessionId: string, exerciseId: string, isCorrect
 }
 
 export async function saveChatLog(sessionId: string, messages: any[]) {
+  await requireAuth()
   try {
     await prisma.studySession.update({
       where: { id: sessionId },
@@ -533,6 +544,7 @@ export async function saveChatLog(sessionId: string, messages: any[]) {
 }
 
 export async function finishStudySession(sessionId: string) {
+  await requireAuth()
   try {
     return await prisma.studySession.update({
       where: { id: sessionId },
@@ -548,6 +560,7 @@ export async function finishStudySession(sessionId: string) {
 }
 
 export async function getSessionHistory() {
+  await requireAuth()
   return prisma.studySession.findMany({
     orderBy: { startTime: 'desc' },
     include: { logs: { include: { exercise: true } } }
@@ -555,6 +568,7 @@ export async function getSessionHistory() {
 }
 
 export async function getClassContextForTopic(topicId: string) {
+  await requireAuth()
   const topic = await prisma.topic.findUnique({ where: { id: topicId } })
   if (!topic || !topic.className) return null
   
@@ -574,6 +588,7 @@ export async function getClassContextForTopic(topicId: string) {
 }
 
 export async function getSessionWithExercises(sessionId: string) {
+  await requireAuth()
   const session = await prisma.studySession.findUnique({
     where: { id: sessionId },
     include: { logs: { include: { exercise: true } } }
@@ -594,6 +609,7 @@ export async function getSessionWithExercises(sessionId: string) {
 }
 
 export async function getAnalyticsData() {
+  await requireAuth()
   const sessions = await prisma.studySession.findMany({
     include: { logs: { include: { exercise: { include: { topic: { include: { course: true } } } } } } }
   });
@@ -872,6 +888,7 @@ async function compileGroundingContext(topicData: any, bucketTopics: any[], loca
 }
 
 export async function generateNextExercise(sessionId: string, topicIds: string[], existingExerciseIds: string[], missingCount: number = 1) {
+  await requireAuth()
   if (topicIds.length === 0) return null;
 
   try {
@@ -1059,6 +1076,7 @@ Follow these rules strictly based on the target type:
 }
 
 export async function deleteStudySession(sessionId: string) {
+  await requireAuth()
   try {
     // Delete logs first to avoid foreign key constraint violations
     await prisma.exerciseLog.deleteMany({
@@ -1076,6 +1094,7 @@ export async function deleteStudySession(sessionId: string) {
 }
 
 export async function generateExamDiagnosis(sessionId: string) {
+  await requireAuth()
   try {
     // 1. Fetch StudySession with logs, exercises and topics
     const session = await prisma.studySession.findUnique({
@@ -1290,6 +1309,7 @@ Ensure that ALL file paths used in the links correspond to the actual ones liste
 }
 
 export async function generateGlobalDiagnosis() {
+  await requireAuth()
   try {
     // 1. Fetch all completed logs with exercises and topics
     const logs = await prisma.exerciseLog.findMany({
@@ -1446,6 +1466,7 @@ Ensure that ALL file paths used in the links correspond to the actual ones liste
 }
 
 export async function generateSessionSummary(sessionId: string) {
+  await requireAuth()
   try {
     return await createSessionSummary(sessionId);
   } catch (error) {
@@ -1455,6 +1476,7 @@ export async function generateSessionSummary(sessionId: string) {
 }
 
 export async function generatePlannerResponse(messages: any[], accuracyStats: any) {
+  await requireAuth()
   try {
     const formattedHistory = messages.map(m => {
       return `${m.role === 'user' ? 'Student' : 'Professor (Planner)'}: ${m.content}`;
@@ -1508,6 +1530,7 @@ const StudyPlanSchema = z.object({
 });
 
 export async function generateStructuredStudyPlan(chatMessages: any[], accuracyStats: any) {
+  await requireAuth()
   try {
     // Fetch actual database Topic catalog so Gemini can map correct IDs
     const dbTopics = await prisma.topic.findMany({
@@ -1552,6 +1575,7 @@ CRITICAL PLANNING RULES:
 }
 
 export async function saveAndDeployStudyPlan(planData: any) {
+  await requireAuth()
   try {
     // 1. Create the StudyPlan record
     const plan = await prisma.studyPlan.create({
@@ -1593,6 +1617,7 @@ export async function saveAndDeployStudyPlan(planData: any) {
 }
 
 export async function getStudyPlans() {
+  await requireAuth()
   try {
     return await prisma.studyPlan.findMany({
       orderBy: { createdAt: 'desc' },
@@ -1609,6 +1634,7 @@ export async function getStudyPlans() {
 }
 
 export async function deleteStudyPlan(planId: string) {
+  await requireAuth()
   try {
     // Cascading deletion handles related StudySessions and ExerciseLogs automatically
     await prisma.studyPlan.delete({
@@ -1622,6 +1648,7 @@ export async function deleteStudyPlan(planId: string) {
 }
 
 export async function getTopicsWithPerformance() {
+  await requireAuth()
   try {
     const topics = await prisma.topic.findMany({
       orderBy: { week: 'asc' },
@@ -1676,6 +1703,7 @@ export async function getTopicsWithPerformance() {
 }
 
 export async function getTopicEvolutionData() {
+  await requireAuth()
   try {
     // 1. Fetch all completed ExerciseLogs with timestamps and exercises details
     const logs = await prisma.exerciseLog.findMany({
@@ -1890,6 +1918,7 @@ export async function getTopicEvolutionData() {
 }
 
 export async function getCourseArtifacts() {
+  await requireAuth()
   try {
     return await getCourseArtifactsService();
   } catch (error) {
@@ -1899,6 +1928,7 @@ export async function getCourseArtifacts() {
 }
 
 export async function generateWeekSummaryAction(courseCode: string, weekName: string) {
+  await requireAuth()
   try {
     return await generateWeekSummaryService(courseCode, weekName);
   } catch (error: any) {
