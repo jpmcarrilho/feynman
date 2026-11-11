@@ -1130,6 +1130,12 @@ Assumptions:
 - Voice tutor reconnection (session resumption every ~10 min with ephemeral tokens) and audio fixes.
 - Analytics keyed by topic id instead of topic title / week strings.
 - Plan sessions (`saveAndDeployStudyPlan`) always take the same first N exercises of their topics; use the normal selection instead.
+- Found in browser testing (2026-11-10): `StudyInterface` mounts `ConfigureSessionDialog` in three places that share one `isModalOpen` state, so two dialogs render stacked when it opens (clicks reach the top one). Fix when T19/T20 restructure the study UI.
+- Found in browser testing (2026-11-10): the history list shows an exam as "Score: 0/5" while its diagnosis says "0.33/5 (7%)" (whole-question versus partial-credit scoring). T12 must make both read the same stored `score`.
+- Found in browser testing (2026-11-10): navigating back to an earlier question re-sends that question's full context to the tutor. Acceptable for now; a short "back on question N" notice would be cheaper.
+- Found in browser testing (2026-11-11): after an exam is submitted and its diagnosis closed, the exam view stays on screen with a frozen timer and the Submit button until a reload or New Session. Fix with T17 (server-owned session state).
+- Found in browser testing (2026-11-11): a tutor reply rendered with a stray fragment glued to its start ("How doI cannot confirm…"), likely a partial output transcription from the Live API. Look at it with the voice robustness item above.
+- Found in browser testing (2026-11-11): the tutor mode selector (and the message box) is rendered twice in the DOM (mobile and desktop copies). Remove the duplicate when T20 moves the tutor into a bottom sheet.
 
 ---
 
