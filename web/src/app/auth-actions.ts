@@ -1,6 +1,7 @@
 'use server'
 
 import { cookies } from 'next/headers'
+import { mintLiveToken, type LiveToken } from '@/services/liveToken'
 
 /**
  * Verifies if the request possesses a valid session cookie matching the configured passcode.
@@ -54,12 +55,12 @@ export async function logout(): Promise<void> {
 }
 
 /**
- * Securely retrieves the Gemini API Key from the server environment, gated by passcode validation.
+ * Mints a short-lived, single-use Gemini Live token for the browser. The API key never leaves the server.
  */
-export async function getGeminiApiKey(): Promise<string> {
+export async function createLiveToken(): Promise<LiveToken> {
   const isAuthenticated = await checkIsAuthenticated()
   if (!isAuthenticated) {
     throw new Error('Unauthorized')
   }
-  return process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || ''
+  return mintLiveToken(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '')
 }

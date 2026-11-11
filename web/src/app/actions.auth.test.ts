@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeAll, afterAll } from 'vitest'
 import * as actions from './actions'
-import { getGeminiApiKey } from './auth-actions'
+import { createLiveToken } from './auth-actions'
 
 // Any prisma.model.method(...) or prisma.$transaction(...) call is counted and resolves to null.
 const { dbCalls, makeCallableDb } = vi.hoisted(() => {
@@ -66,7 +66,10 @@ describe('server actions require authentication', () => {
     expect(dbCalls.count).toBe(0)
   })
 
-  it('getGeminiApiKey rejects with Unauthorized and never returns a key', async () => {
-    await expect(getGeminiApiKey()).rejects.toThrow('Unauthorized')
+  it('createLiveToken rejects with Unauthorized before minting a token', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    await expect(createLiveToken()).rejects.toThrow('Unauthorized')
+    expect(fetchSpy).not.toHaveBeenCalled()
+    fetchSpy.mockRestore()
   })
 })
