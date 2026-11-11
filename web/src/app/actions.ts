@@ -10,7 +10,8 @@ import { requireAuth } from '@/server/auth'
 import { buildVoiceContext } from '@/services/voiceContext'
 import { getCourseWithProfile, getProfileForTopic, getProfileForCourses } from '@/services/studyspaceService'
 import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
-import { generateExerciseForTopic } from '@/services/exerciseGenerator'
+import { generateExerciseForTopic, filterGeneratableTopicIds, chunkIds, GenerationError } from '@/services/exerciseGenerator'
+import type { Exercise, Topic } from '@prisma/client'
 import { submitExamForSession, type ExamSubmission } from '@/services/sessionService'
 import { gradeAnswer, logScore } from '@/lib/grading'
 import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
@@ -810,22 +811,45 @@ export async function getAnalyticsData() {
   };
 }
 
-export async function generateNextExercise(sessionId: string, topicIds: string[], existingExerciseIds: string[], missingCount: number = 1) {
+/** What the student sees when generation fails for a reason that is not one of the known GenerationErrors. */
+const GENERATION_FAILED_MESSAGE = 'The question generator is not available right now. Please try again in a moment.'
+
+/**
+ * Generates one more question for the session. Never returns provider errors: the failure is logged here and the
+ * student gets a short fixed sentence. Authentication errors are not caught (requireAuth runs before the try).
+ */
+export async function generateNextExercise(
+  sessionId: string,
+  topicIds: string[],
+  existingExerciseIds: string[],
+  // Kept for callers; the number of questions still missing does not change what one call does
+  missingCount: number = 1,
+): Promise<{ exercise: Exercise & { topic: Topic } } | { error: string }> {
+  void missingCount
   await requireAuth()
-  if (topicIds.length === 0) return null;
+  if (topicIds.length === 0) return { error: 'No topics are selected for this session.' }
 
   try {
+    // Never target topics without content or with only ungraded material (surveys, participation items)
+    const eligibleTopicIds = await filterGeneratableTopicIds(topicIds)
+    if (eligibleTopicIds.length === 0) {
+      throw new GenerationError('no_eligible_topic', 'None of the selected topics has graded study material to generate questions from.')
+    }
+
     // Find current representation of selected topics in the session to keep the questions balanced
-    const existingExercisesInSession = await prisma.exercise.findMany({
-      where: { id: { in: existingExerciseIds } },
-      select: { topicId: true }
-    });
+    const existingExercisesInSession: { topicId: string }[] = [];
+    for (const chunk of chunkIds(existingExerciseIds)) {
+      existingExercisesInSession.push(...(await prisma.exercise.findMany({
+        where: { id: { in: chunk } },
+        select: { topicId: true }
+      })));
+    }
 
     const representedTopicIds = new Set(existingExercisesInSession.map(ex => ex.topicId));
-    const uncoveredTopicIds = topicIds.filter(id => !representedTopicIds.has(id));
+    const uncoveredTopicIds = eligibleTopicIds.filter(id => !representedTopicIds.has(id));
 
-    // If all selected topics are already represented, fall back to the full list of topicIds
-    const targetPool = uncoveredTopicIds.length > 0 ? uncoveredTopicIds : topicIds;
+    // If all selected topics are already represented, fall back to the full list of eligible topics
+    const targetPool = uncoveredTopicIds.length > 0 ? uncoveredTopicIds : eligibleTopicIds;
 
     // Shuffle the pool to remove alphabetical or ordering bias in selection
     const shuffledTargetPool = [...targetPool];
@@ -840,7 +864,6 @@ export async function generateNextExercise(sessionId: string, topicIds: string[]
       existingExerciseIds,
       styleTopicIds: topicIds,
     });
-    if (!newEx) return null;
 
     // Update session
     const session = await prisma.studySession.findUnique({ where: { id: sessionId } });
@@ -852,10 +875,11 @@ export async function generateNextExercise(sessionId: string, topicIds: string[]
       });
     }
 
-    return newEx;
+    return { exercise: newEx };
   } catch (e) {
+    // Full error on the server only; the provider message can contain request details
     console.error("Failed to generate next exercise:", e);
-    return null;
+    return { error: e instanceof GenerationError ? e.userMessage : GENERATION_FAILED_MESSAGE };
   }
 }
 

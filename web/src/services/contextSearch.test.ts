@@ -8,6 +8,7 @@ import {
   clearVocabularyCache,
   getPrecedingTopicsContext,
   formatSearchResults,
+  isCrawlErrorResourceType,
 } from './contextSearch'
 
 vi.mock('@/lib/db', () => ({
@@ -169,5 +170,32 @@ describe('getPrecedingTopicsContext', () => {
     findMany.mockResolvedValueOnce([t('u2', null, 'short', 90), t('u1', null, 'w'.repeat(80), 80)] as never)
     const text = await getPrecedingTopicsContext({ courseId: 'c1', week: 'W1', order: 100 })
     expect(text).toBe(`Topic: Title u1\nTranscript:\n${'w'.repeat(80)}`)
+  })
+})
+
+describe('formatSearchResults with a total cap', () => {
+  const r = (id: string, len: number) => ({ id, title: id, week: 'W', resourceType: 'T', content: 'c'.repeat(len), score: 1 })
+
+  it('bounds the whole text, shares the budget and keeps short results whole', () => {
+    const text = formatSearchResults([r('a', 50_000), r('b', 100), r('c', 50_000)], 5000)
+    expect(text.length).toBeLessThanOrEqual(5000)
+    expect(text).toContain(`[Source: W - b (T)]\n${'c'.repeat(100)}`)
+    expect(text).toContain('[TRUNCATED]')
+    expect(text).toContain('[Source: W - a (T)]')
+    expect(text).toContain('[Source: W - c (T)]')
+  })
+
+  it('leaves text under the cap untouched', () => {
+    const results = [r('a', 10)]
+    expect(formatSearchResults(results, 5000)).toBe(formatSearchResults(results))
+  })
+})
+
+describe('isCrawlErrorResourceType', () => {
+  it('matches resource types that contain "Error" only', () => {
+    expect(isCrawlErrorResourceType('Slides PDF Error')).toBe(true)
+    expect(isCrawlErrorResourceType('Slides PDF')).toBe(false)
+    expect(isCrawlErrorResourceType(null)).toBe(false)
+    expect(isCrawlErrorResourceType(undefined)).toBe(false)
   })
 })

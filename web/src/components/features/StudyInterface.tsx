@@ -4,6 +4,7 @@ import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'reac
 import { Button } from '@/components/ui/button'
 import { Flashcard } from './Flashcard'
 import { SessionTimer } from './SessionTimer'
+import { generateWithRetry } from '@/lib/generationRetry'
 import { VoiceHub } from './VoiceHub'
 import { Dialog, DialogTrigger } from '@/components/ui/dialog'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
@@ -133,7 +134,11 @@ export function StudyInterface() {
   const [session, setSession] = useState<any>(null)
   const [exercises, setExercises] = useState<any[]>([])
   const [missingCount, setMissingCount] = useState(0)
-  const [isGeneratingNext, setIsGeneratingNext] = useState(false)
+  // Set when one question slot failed 3 times in a row; holds the message to show. Generation stops until Retry.
+  const [generationError, setGenerationError] = useState<string | null>(null)
+  // Guards for the background generator: only one loop at a time, and a loop stops when the session changes or ends
+  const generationLoopActiveRef = useRef(false)
+  const generationRunRef = useRef(0)
   const [currentIndex, setCurrentIndex] = useState(0)
   const [selectedHistory, setSelectedHistory] = useState<any>(null)
   const [isFocusMode, setIsFocusMode] = useState(false)
@@ -185,6 +190,7 @@ export function StudyInterface() {
     }
   }, [])
 
+  const stillGenerating = missingCount > 0 && !generationError
   const currentExercise = exercises[currentIndex]
 
   const parsedChoices = useMemo(() => {
@@ -743,35 +749,48 @@ export function StudyInterface() {
     }
   }
 
+  // Invalidates a running generation loop when the session changes or ends, and clears a failure of the old session
+  const sessionId = session?.id
+  const sessionEnded = session?.status === 'completed' || session?.status === 'cancelled'
   useEffect(() => {
-    if (session && missingCount > 0 && !isGeneratingNext) {
-      setIsGeneratingNext(true);
-      const generateOne = async () => {
-        try {
-          const currentIds = exercises.map((e: any) => e.id);
-          const newEx = await generateNextExercise(
-            session.id,
-            activeSessionTopics.length > 0 ? activeSessionTopics : topics.map(t => t.id),
-            currentIds,
-            missingCount
-          );
-          if (newEx) {
-            setExercises(prev => [...prev, newEx]);
-            setMissingCount(prev => prev - 1);
-          } else {
-            // Failed or no topics
-            setMissingCount(0);
-          }
-        } catch (e) {
-          console.error(e);
-          setMissingCount(0);
-        } finally {
-          setIsGeneratingNext(false);
-        }
-      };
-      generateOne();
+    return () => {
+      generationRunRef.current += 1
+      generationLoopActiveRef.current = false
+      setGenerationError(null)
     }
-  }, [session, missingCount, isGeneratingNext, exercises, activeSessionTopics, topics]);
+  }, [sessionId, sessionEnded])
+
+  useEffect(() => {
+    if (!sessionId || sessionEnded || missingCount <= 0 || generationError || generationLoopActiveRef.current) return
+    const runId = ++generationRunRef.current
+    const cancelled = () => generationRunRef.current !== runId
+    const topicIds = activeSessionTopics.length > 0 ? activeSessionTopics : topics.map(t => t.id)
+    const knownIds = exercises.map((e: any) => e.id)
+    generationLoopActiveRef.current = true
+    ;(async () => {
+      try {
+        let remaining = missingCount
+        while (remaining > 0) {
+          const outcome = await generateWithRetry(
+            () => generateNextExercise(sessionId, topicIds, knownIds, remaining),
+            cancelled,
+          )
+          if (outcome === 'cancelled' || cancelled()) return
+          if ('error' in outcome) {
+            // Stop here; the banner offers Retry. No timer restarts the loop.
+            setGenerationError(outcome.error)
+            return
+          }
+          knownIds.push(outcome.exercise.id)
+          remaining -= 1
+          setExercises(prev => [...prev, outcome.exercise])
+          setMissingCount(prev => Math.max(0, prev - 1))
+        }
+      } finally {
+        if (!cancelled()) generationLoopActiveRef.current = false
+      }
+    })()
+  }, [sessionId, sessionEnded, missingCount, generationError, exercises, activeSessionTopics, topics]);
 
   // Exam Countdown Timer tick useEffect
   useEffect(() => {
@@ -1307,12 +1326,24 @@ export function StudyInterface() {
                 </div>
               )}
 
+              {generationError && missingCount > 0 && !isDiagnosisLoading && (
+                <div role="alert" className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-amber-50 border border-amber-300 text-amber-900 p-3 rounded-lg text-sm font-sans">
+                  <div>
+                    <p className="font-semibold">{missingCount} of {exercises.length + missingCount} questions could not be generated.</p>
+                    <p className="text-xs">{generationError}</p>
+                  </div>
+                  <Button type="button" size="sm" variant="outline" onClick={() => setGenerationError(null)} className="shrink-0 border-amber-400 bg-white">
+                    Retry
+                  </Button>
+                </div>
+              )}
+
               {!isDiagnosisLoading && currentExercise ? (
                 <div className="space-y-4">
                   <div className="flex justify-between items-center text-sm font-medium text-charcoal-graphite bg-card p-3 rounded-lg border border-charcoal-graphite/10 shadow-sm">
                     <div className="flex items-center gap-4">
                       <span>Question {currentIndex + 1} of {exercises.length + missingCount}</span>
-                      {missingCount > 0 && (
+                      {stillGenerating && (
                         <span className="flex items-center text-fountain-ink text-xs font-semibold animate-pulse">
                           <FeynmanLogo variant="thinking" size={14} className="mr-1" />
                           Generating {missingCount} more...
@@ -1368,7 +1399,7 @@ export function StudyInterface() {
                       variant="outline"
                       size="sm"
                       onClick={() => {
-                        if (currentIndex === exercises.length - 1 && missingCount === 0) {
+                        if (currentIndex === exercises.length - 1 && !stillGenerating) {
                           if (session.mode === 'exam') {
                             const totalQs = exercises.length;
                             const answeredQs = Object.keys(draftAnswers).length;
@@ -1381,7 +1412,7 @@ export function StudyInterface() {
                           setCurrentIndex(Math.min(exercises.length - 1, currentIndex + 1))
                         }
                       }}
-                      disabled={currentIndex === exercises.length - 1 && missingCount > 0}
+                      disabled={currentIndex === exercises.length - 1 && stillGenerating}
                       className="flex-1 max-w-[120px] h-9 gap-1 font-semibold text-xs border border-charcoal-graphite/10 hover:bg-muted rounded-lg shrink-0"
                     >
                       Next
@@ -1413,10 +1444,10 @@ export function StudyInterface() {
                       Previous
                     </Button>
                     <Button
-                      variant={currentIndex === exercises.length - 1 && missingCount === 0 ? "default" : "outline"}
-                      disabled={currentIndex === exercises.length - 1 && missingCount > 0}
+                      variant={currentIndex === exercises.length - 1 && !stillGenerating ? "default" : "outline"}
+                      disabled={currentIndex === exercises.length - 1 && stillGenerating}
                       onClick={() => {
-                        if (currentIndex === exercises.length - 1 && missingCount === 0) {
+                        if (currentIndex === exercises.length - 1 && !stillGenerating) {
                           if (session.mode === 'exam') {
                             const totalQs = exercises.length;
                             const answeredQs = Object.keys(draftAnswers).length;
@@ -1430,9 +1461,9 @@ export function StudyInterface() {
                         }
                       }}
                     >
-                      {currentIndex === exercises.length - 1 && missingCount > 0 ? (
+                      {currentIndex === exercises.length - 1 && stillGenerating ? (
                         <><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Generating...</>
-                      ) : currentIndex === exercises.length - 1 && missingCount === 0 ? (
+                      ) : currentIndex === exercises.length - 1 && !stillGenerating ? (
                         session.mode === 'exam' ? 'Submit Exam' : 'Finish Session'
                       ) : (
                         <>Next <ChevronRight className="w-4 h-4 ml-2" /></>

@@ -30,11 +30,13 @@ vi.mock('@/lib/db', () => ({
       findFirst: vi.fn(),
       findMany: vi.fn(),
     },
+    $queryRaw: vi.fn().mockResolvedValue([]),
     exercise: {
       findMany: vi.fn(),
       findUnique: vi.fn(),
       create: vi.fn(),
       update: vi.fn(),
+      count: vi.fn(),
     },
     studyPlan: {
       findMany: vi.fn(),
@@ -133,6 +135,7 @@ describe('generateNextExercise action', () => {
     vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce(mockTopic as any)
     vi.mocked(prisma.topic.findMany).mockResolvedValue([mockTopic] as any)
     vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as any)
+    vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
 
     const mockGeneratedObject = {
       newExercise: {
@@ -186,7 +189,74 @@ describe('generateNextExercise action', () => {
       data: { exerciseIds: JSON.stringify(['ex-old', 'ex-new']) }
     })
 
-    expect(result).toEqual(mockCreatedExercise)
+    expect(result).toEqual({ exercise: mockCreatedExercise })
+  })
+
+  it('returns a plain error, and logs the full error, when the model fails (no key or payload reaches the student)', async () => {
+    const mockTopic = { id: 'topic-1', title: 'Target Topic', courseId: 'course-1', week: 'week-1', content: 'Some content' }
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce(mockTopic as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([mockTopic] as never)
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
+    const providerError = Object.assign(new Error('API key not valid. key=AIzaSyFAKEKEY123 url=https://generativelanguage.googleapis.com/v1beta/models/x'), {
+      requestBodyValues: { prompt: 'secret prompt' },
+      stack: 'Error: boom\n    at node_modules/ai/dist/index.js:1:1',
+    })
+    vi.mocked(generateObject).mockRejectedValueOnce(providerError)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+
+    const result = await generateNextExercise('session-1', ['topic-1'], [])
+
+    expect(result).toEqual({ error: expect.any(String) })
+    const message = (result as { error: string }).error
+    expect(message).not.toMatch(/AIza|key|googleapis|prompt|node_modules|\bat /i)
+    expect(message.length).toBeLessThan(120)
+    expect(logged).toHaveBeenCalledWith('Failed to generate next exercise:', providerError)
+    expect(prisma.exercise.create).not.toHaveBeenCalled()
+    expect(prisma.studySession.update).not.toHaveBeenCalled()
+    logged.mockRestore()
+  })
+
+  it('returns an error without calling the model when no topic has graded content to generate from', async () => {
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never) // no topic with content
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const result = await generateNextExercise('session-1', ['empty-1', 'empty-2'], [])
+    expect(result).toEqual({ error: expect.stringContaining('graded study material') })
+    expect(generateObject).not.toHaveBeenCalled()
+    logged.mockRestore()
+  })
+
+  it('skips topics that only hold ungraded exercises', async () => {
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([{ id: 'survey' }] as never) // has content
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([{ topicId: 'survey', isGraded: false }] as never)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const result = await generateNextExercise('session-1', ['survey'], [])
+    expect(result).toEqual({ error: expect.any(String) })
+    expect(generateObject).not.toHaveBeenCalled()
+    logged.mockRestore()
+  })
+
+  it('never sends more than 300 ids in one query, whatever the session size', async () => {
+    const mockTopic = { id: 'topic-1', title: 'T', courseId: 'course-1', week: 'w', content: 'c' }
+    vi.mocked(prisma.topic.findUnique).mockResolvedValueOnce(mockTopic as never)
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([mockTopic] as never)
+    vi.mocked(prisma.exercise.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exercise.count).mockResolvedValue(0 as never)
+    vi.mocked(generateObject).mockRejectedValueOnce(new Error('stop here'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const manyTopics = Array.from({ length: 1322 }, (_, i) => `topic-${i}`)
+    await generateNextExercise('session-1', manyTopics, Array.from({ length: 700 }, (_, i) => `ex-${i}`))
+    const lists = [...vi.mocked(prisma.exercise.findMany).mock.calls, ...vi.mocked(prisma.topic.findMany).mock.calls].map((c) => {
+      const where = (c[0] as { where?: Record<string, { in?: string[] } | undefined> })?.where ?? {}
+      return Math.max(0, ...Object.values(where).map((v) => v?.in?.length ?? 0))
+    })
+    expect(Math.max(...lists)).toBeLessThanOrEqual(300)
+    logged.mockRestore()
+  })
+
+  it('returns an error for an empty topic list', async () => {
+    expect(await generateNextExercise('session-1', [], [])).toEqual({ error: expect.any(String) })
   })
 })
 

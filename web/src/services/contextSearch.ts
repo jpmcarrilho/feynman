@@ -10,6 +10,12 @@ const VOCABULARY_TTL_MS = 5 * 60 * 1000
 const MAX_TERMS = 12
 const DEFAULT_LIMIT = 10
 const DEFAULT_MAX_CHARS_PER_TOPIC = 50_000
+/** resourceType values containing this mark a failed crawl/extraction: the content is binary garbage, not study material. */
+export const CRAWL_ERROR_MARKER = 'Error'
+export function isCrawlErrorResourceType(resourceType: string | null | undefined): boolean {
+  return !!resourceType && resourceType.includes(CRAWL_ERROR_MARKER)
+}
+
 // Safety bound on rows read per call. Prisma cannot order by relevance, so this should never be the
 // thing that decides the ranking; the term filters keep real queries far below it.
 const CANDIDATE_CAP = 2000
@@ -193,7 +199,7 @@ export async function searchTopics(courseId: string, queryText: string, opts: Se
     where: {
       courseId,
       // Crawl failures (resourceType "... Error") hold binary garbage that matches every term
-      AND: [{ OR: [{ resourceType: null }, { NOT: { resourceType: { contains: 'Error' } } }] }],
+      AND: [{ OR: [{ resourceType: null }, { NOT: { resourceType: { contains: CRAWL_ERROR_MARKER } } }] }],
       OR: terms.flatMap((t) => [
         { title: { contains: t } },
         { summary: { contains: t } },
@@ -232,11 +238,41 @@ export async function searchTopics(courseId: string, queryText: string, opts: Se
     })
 }
 
-/** Search results as the labelled text block the prompts expect. */
-export function formatSearchResults(results: SearchTopicResult[]): string {
-  return results
-    .map((t) => `[Source: ${t.week} - ${t.title} (${t.resourceType})]\n${t.content}`)
-    .join('\n\n=========================================\n\n')
+const RESULT_SEPARATOR = '\n\n=========================================\n\n'
+const TRUNCATION_MARK = '... [TRUNCATED]'
+
+const resultLabel = (t: SearchTopicResult) => `[Source: ${t.week} - ${t.title} (${t.resourceType})]\n`
+
+/** Splits `budget` over lengths so that short items keep their full length and the rest share what is left evenly. */
+function allocateBudget(lengths: number[], budget: number): number[] {
+  const order = lengths.map((len, i) => ({ len, i })).sort((a, b) => a.len - b.len)
+  const alloc = new Array<number>(lengths.length).fill(0)
+  let remaining = Math.max(0, budget)
+  order.forEach(({ len, i }, done) => {
+    const share = Math.floor(remaining / (order.length - done))
+    alloc[i] = Math.min(len, share)
+    remaining -= alloc[i]
+  })
+  return alloc
+}
+
+/**
+ * Search results as the labelled text block the prompts expect.
+ * `maxTotalChars` (optional) bounds the whole returned string, labels and separators included: the content budget is
+ * shared evenly over the results; results shorter than their share keep their full text.
+ */
+export function formatSearchResults(results: SearchTopicResult[], maxTotalChars?: number): string {
+  let contents = results.map((t) => t.content)
+  if (maxTotalChars !== undefined && results.length > 0) {
+    const overhead = results.reduce((n, t) => n + resultLabel(t).length, 0) + RESULT_SEPARATOR.length * (results.length - 1)
+    const alloc = allocateBudget(contents.map((c) => c.length), maxTotalChars - overhead)
+    contents = contents.map((c, i) => {
+      if (c.length <= alloc[i]) return c
+      return alloc[i] > TRUNCATION_MARK.length * 2 ? c.slice(0, alloc[i] - TRUNCATION_MARK.length) + TRUNCATION_MARK : c.slice(0, alloc[i])
+    })
+  }
+  const text = results.map((t, i) => `${resultLabel(t)}${contents[i]}`).join(RESULT_SEPARATOR)
+  return maxTotalChars !== undefined && text.length > maxTotalChars ? text.slice(0, maxTotalChars) : text
 }
 
 /** Search context for a text, leaving out the course's calibration module. '' when nothing matches. */
