@@ -15,6 +15,7 @@ import {
   saveChatLog,
   finishStudySession,
   getSessionWithExercises,
+  getSessionDetail,
   getClassContextForTopic,
   generateNextExercise,
   deleteStudySession,
@@ -975,10 +976,16 @@ If they ask to change or generate a study plan, guide them to click the gold "Pl
         setDraftAnswers({})
         setFlaggedIds([])
         setTimeLeft(data.session.timeLimit)
-        if (data.session.chatLog) {
-          liveAPI.setMessages(JSON.parse(data.session.chatLog))
-        } else {
-          liveAPI.setMessages([])
+        // The chat log is not part of the session payload; load it on demand
+        liveAPI.setMessages([])
+        try {
+          const detail = await getSessionDetail(id)
+          if (detail?.chatLog) {
+            const restored = JSON.parse(detail.chatLog)
+            if (Array.isArray(restored)) liveAPI.setMessages(restored)
+          }
+        } catch (e) {
+          console.error('Failed to load chat log', e)
         }
         setSelectedHistory(null)
         setActiveTab('study') // Force-switch to the Study tab so the session starts immediately!

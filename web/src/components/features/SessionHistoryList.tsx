@@ -22,8 +22,8 @@ export function SessionHistoryList({
         const logs = h.logs || [];
         const answeredLogs = logs.filter((l: any) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '');
         const correct = logs.filter((l: any) => l.isCorrect).length;
-        const total = h.mode === 'exam' && h.exerciseIds
-          ? JSON.parse(h.exerciseIds).length
+        const total = h.mode === 'exam' && h.exerciseCount
+          ? h.exerciseCount
           : answeredLogs.length;
         const isActiveSession = session?.id === h.id;
         return (

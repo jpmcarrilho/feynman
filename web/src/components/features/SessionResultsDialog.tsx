@@ -4,7 +4,14 @@ import { DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
-import { PlayCircle } from 'lucide-react'
+import { PlayCircle, Loader2 } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { getSessionDetail } from '@/app/actions'
+
+interface ChatMessage {
+  role: string;
+  text?: string;
+}
 
 interface SessionResultsDialogProps {
   selectedHistory: any;
@@ -17,12 +24,43 @@ export function SessionResultsDialog({
   onLoadSession,
   isLoading,
 }: SessionResultsDialogProps) {
+  const [loaded, setLoaded] = useState<{ id: string; messages: ChatMessage[] } | null>(null);
+  const sessionId: string | undefined = selectedHistory?.id;
+  // null while the transcript for the current session is still loading
+  const chatLog = loaded && loaded.id === sessionId ? loaded.messages : null;
+
+  // The transcript is not part of the history list; load it when the dialog opens.
+  useEffect(() => {
+    if (!sessionId) return;
+    let cancelled = false;
+    getSessionDetail(sessionId)
+      .then(detail => {
+        if (cancelled) return;
+        let parsed: unknown = [];
+        try {
+          parsed = detail?.chatLog ? JSON.parse(detail.chatLog) : [];
+        } catch {
+          parsed = [];
+        }
+        setLoaded({ id: sessionId, messages: Array.isArray(parsed) ? parsed : [] });
+      })
+      .catch(e => {
+        console.error('Failed to load session detail', e);
+        if (!cancelled) setLoaded({ id: sessionId, messages: [] });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId]);
+
   if (!selectedHistory) return null;
+
+  const visibleMessages = (chatLog || []).filter(m => !String(m.text ?? '').startsWith('[SYSTEM'));
 
   const answeredLogs = selectedHistory.logs.filter((l: any) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '');
   const correctCount = selectedHistory.logs.filter((l: any) => l.isCorrect).length;
-  const totalCount = selectedHistory.mode === 'exam' && selectedHistory.exerciseIds
-    ? JSON.parse(selectedHistory.exerciseIds).length
+  const totalCount = selectedHistory.mode === 'exam' && selectedHistory.exerciseCount
+    ? selectedHistory.exerciseCount
     : answeredLogs.length;
 
   return (
@@ -56,9 +94,13 @@ export function SessionResultsDialog({
 
         <div className="space-y-2">
           <Label className="font-semibold">Tutor Chat History</Label>
-          {selectedHistory.chatLog ? (
+          {chatLog === null ? (
+            <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground py-4">
+              <Loader2 className="w-4 h-4 animate-spin" /> Loading conversation...
+            </div>
+          ) : visibleMessages.length > 0 ? (
             <ScrollArea className="h-[250px] border rounded-md p-3 bg-muted/10 scrollbar-thin">
-              {JSON.parse(selectedHistory.chatLog).filter((m: any) => !m.text.startsWith('[SYSTEM')).map((msg: any, idx: number) => (
+              {visibleMessages.map((msg, idx) => (
                 <div key={idx} className={`flex mb-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[85%] rounded-xl px-4 py-2 text-sm shadow-sm border ${
                     msg.role === 'user' 
@@ -69,9 +111,6 @@ export function SessionResultsDialog({
                   </div>
                 </div>
               ))}
-              {JSON.parse(selectedHistory.chatLog).filter((m: any) => !m.text.startsWith('[SYSTEM')).length === 0 && (
-                <div className="text-sm text-muted-foreground text-center py-4">No conversation recorded.</div>
-              )}
             </ScrollArea>
           ) : (
             <div className="text-sm text-muted-foreground text-center py-4">No conversation recorded.</div>

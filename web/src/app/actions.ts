@@ -10,6 +10,81 @@ import fs from 'fs'
 import path from 'path'
 import { requireAuth } from '@/server/auth'
 
+// Fields the session list, results dialog and plan view read. No chatLog, diagnosis, draftAnswers or flaggedIds.
+// exerciseIds is selected only so the server can turn it into exerciseCount (see withExerciseCount).
+const SESSION_LIST_SELECT = {
+  id: true,
+  title: true,
+  startTime: true,
+  endTime: true,
+  status: true,
+  mode: true,
+  timeLimit: true,
+  sourcingMix: true,
+  studyPlanId: true,
+  courseId: true,
+  exerciseIds: true,
+  logs: {
+    select: {
+      id: true,
+      exerciseId: true,
+      isCorrect: true,
+      userAnswer: true,
+      timestamp: true,
+      exercise: {
+        select: { id: true, questionText: true, correctAnswer: true, exerciseType: true },
+      },
+    },
+  },
+} as const
+
+// Every exercise column plus the topic without its (up to 830k chars) content.
+const EXERCISE_CLIENT_SELECT = {
+  id: true,
+  topicId: true,
+  questionText: true,
+  exerciseType: true,
+  choices: true,
+  correctAnswer: true,
+  explanation: true,
+  isGraded: true,
+  origin: true,
+  status: true,
+  promptVersion: true,
+  originalQuestionText: true,
+  enrichedAt: true,
+  reportedReason: true,
+  createdAt: true,
+  topic: {
+    select: {
+      id: true,
+      courseId: true,
+      title: true,
+      week: true,
+      className: true,
+      unit: true,
+      resourceType: true,
+      localPath: true,
+      isQuantitative: true,
+      course: { select: { id: true, code: true, title: true } },
+    },
+  },
+} as const
+
+/** Replaces the legacy exerciseIds JSON string with its length so the client never needs the id list. */
+function withExerciseCount<T extends { exerciseIds?: string | null }>(session: T) {
+  const { exerciseIds, ...rest } = session
+  let exerciseCount: number | null = null
+  if (exerciseIds) {
+    try {
+      exerciseCount = (JSON.parse(exerciseIds) as unknown[]).length
+    } catch {
+      exerciseCount = null
+    }
+  }
+  return { ...rest, exerciseCount }
+}
+
 export async function explainMistake({
   questionText,
   choices,
@@ -511,7 +586,16 @@ export async function createStudySession(
     include: { logs: true }
   })
 
-  return { session, exercises: selected, missingCount }
+  // Return exercises without topic.content; enrichment above already read what it needed server-side.
+  const selectedIds: string[] = selected.map(e => e.id)
+  const rows = selectedIds.length > 0
+    ? await prisma.exercise.findMany({ where: { id: { in: selectedIds } }, select: EXERCISE_CLIENT_SELECT })
+    : []
+  const clientExercises = selectedIds
+    .map(id => rows.find(r => r.id === id))
+    .filter((r): r is (typeof rows)[number] => !!r)
+
+  return { session, exercises: clientExercises, missingCount }
 }
 
 export async function logAnswer(sessionId: string, exerciseId: string, isCorrect: boolean, duration: number, userAnswer?: string) {
@@ -561,9 +645,18 @@ export async function finishStudySession(sessionId: string) {
 
 export async function getSessionHistory() {
   await requireAuth()
-  return prisma.studySession.findMany({
+  const sessions = await prisma.studySession.findMany({
     orderBy: { startTime: 'desc' },
-    include: { logs: { include: { exercise: true } } }
+    select: SESSION_LIST_SELECT
+  })
+  return sessions.map(withExerciseCount)
+}
+
+export async function getSessionDetail(sessionId: string) {
+  await requireAuth()
+  return prisma.studySession.findUnique({
+    where: { id: sessionId },
+    select: { chatLog: true, diagnosis: true }
   })
 }
 
@@ -591,7 +684,7 @@ export async function getSessionWithExercises(sessionId: string) {
   await requireAuth()
   const session = await prisma.studySession.findUnique({
     where: { id: sessionId },
-    include: { logs: { include: { exercise: true } } }
+    select: SESSION_LIST_SELECT
   })
   
   if (!session || !session.exerciseIds) return null
@@ -599,13 +692,13 @@ export async function getSessionWithExercises(sessionId: string) {
   const ids = JSON.parse(session.exerciseIds) as string[]
   const exercises = await prisma.exercise.findMany({
     where: { id: { in: ids } },
-    include: { topic: { include: { course: true } } }
+    select: EXERCISE_CLIENT_SELECT
   })
 
   // Restore original order
   const orderedExercises = ids.map(id => exercises.find(e => e.id === id)).filter(Boolean)
 
-  return { session, exercises: orderedExercises }
+  return { session: withExerciseCount(session), exercises: orderedExercises }
 }
 
 export async function getAnalyticsData() {
@@ -1619,14 +1712,15 @@ export async function saveAndDeployStudyPlan(planData: any) {
 export async function getStudyPlans() {
   await requireAuth()
   try {
-    return await prisma.studyPlan.findMany({
+    const plans = await prisma.studyPlan.findMany({
       orderBy: { createdAt: 'desc' },
       include: {
         sessions: {
-          include: { logs: true }
+          select: SESSION_LIST_SELECT
         }
       }
     });
+    return plans.map(plan => ({ ...plan, sessions: plan.sessions.map(withExerciseCount) }));
   } catch (error) {
     console.error("Failed to fetch study plans:", error);
     return [];

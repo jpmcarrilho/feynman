@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { explainMistake, generateNextExercise, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession } from './actions'
+import { explainMistake, generateNextExercise, getSessionHistory, getSessionDetail, getSessionWithExercises, getStudyPlans, createStudySession, needsContextEnrichment, enrichExerciseWithContext, getPreviousLectureTranscripts, deleteStudySession } from './actions'
 import { generateText, generateObject } from 'ai'
 import { prisma } from '@/lib/db'
 
@@ -33,12 +33,18 @@ vi.mock('@/lib/db', () => ({
       create: vi.fn(),
       update: vi.fn(),
     },
+    studyPlan: {
+      findMany: vi.fn(),
+    },
     studySession: {
+      findMany: vi.fn(),
+      create: vi.fn(),
       findUnique: vi.fn(),
       update: vi.fn(),
       delete: vi.fn(),
     },
     exerciseLog: {
+      findMany: vi.fn(),
       deleteMany: vi.fn(),
     },
   },
@@ -270,5 +276,102 @@ describe('deleteStudySession action', () => {
 
     const result = await deleteStudySession('session-1')
     expect(result).toBe(false)
+  })
+})
+
+
+describe('payload trimming', () => {
+  const callArg = (fn: unknown, n = 0): unknown =>
+    (fn as { mock: { calls: unknown[][] } }).mock.calls[n][0]
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  it('getSessionHistory selects list fields only (no chatLog, diagnosis, topic content) and returns exerciseCount', async () => {
+    vi.mocked(prisma.studySession.findMany).mockResolvedValueOnce([
+      { id: 's1', mode: 'exam', exerciseIds: '["a","b","c"]', logs: [] },
+      { id: 's2', mode: 'study', exerciseIds: null, logs: [] },
+    ] as never)
+
+    const result = await getSessionHistory()
+
+    const args = callArg(prisma.studySession.findMany)
+    expect(args).not.toHaveProperty('include')
+    expect(args).toHaveProperty('select.id', true)
+    expect(args).not.toHaveProperty('select.chatLog')
+    expect(args).not.toHaveProperty('select.diagnosis')
+    expect(args).not.toHaveProperty('select.draftAnswers')
+    expect(args).toHaveProperty('select.logs.select.exercise.select', {
+      id: true, questionText: true, correctAnswer: true, exerciseType: true,
+    })
+    expect(result[0].exerciseCount).toBe(3)
+    expect(result[0]).not.toHaveProperty('exerciseIds')
+    expect(result[1].exerciseCount).toBeNull()
+  })
+
+  it('getStudyPlans selects sessions with the list select (no chatLog)', async () => {
+    vi.mocked(prisma.studyPlan.findMany).mockResolvedValueOnce([
+      { id: 'p1', sessions: [{ id: 's1', exerciseIds: '["a"]', logs: [] }] },
+    ] as never)
+
+    const plans = await getStudyPlans()
+
+    const args = callArg(prisma.studyPlan.findMany)
+    expect(args).toHaveProperty('include.sessions.select.id', true)
+    expect(args).not.toHaveProperty('include.sessions.select.chatLog')
+    expect(plans[0].sessions[0].exerciseCount).toBe(1)
+  })
+
+  it('getSessionDetail returns the chat log and diagnosis', async () => {
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValueOnce(
+      { chatLog: '[{"role":"user","text":"hi"}]', diagnosis: 'd' } as never
+    )
+
+    const detail = await getSessionDetail('s1')
+
+    expect(prisma.studySession.findUnique).toHaveBeenCalledWith({
+      where: { id: 's1' },
+      select: { chatLog: true, diagnosis: true },
+    })
+    expect(detail).toEqual({ chatLog: '[{"role":"user","text":"hi"}]', diagnosis: 'd' })
+  })
+
+  it('getSessionWithExercises loads exercises with a topic select that has no content', async () => {
+    vi.mocked(prisma.studySession.findUnique).mockResolvedValueOnce(
+      { id: 's1', exerciseIds: '["e2","e1"]', logs: [] } as never
+    )
+    vi.mocked(prisma.exercise.findMany).mockResolvedValueOnce([{ id: 'e1' }, { id: 'e2' }] as never)
+
+    const data = await getSessionWithExercises('s1')
+
+    expect(callArg(prisma.studySession.findUnique)).not.toHaveProperty('select.chatLog')
+    const exArgs = callArg(prisma.exercise.findMany)
+    expect(exArgs).not.toHaveProperty('include')
+    expect(exArgs).not.toHaveProperty('select.topic.select.content')
+    expect(exArgs).toHaveProperty('select.topic.select.course.select.code', true)
+    expect(data?.exercises.map(e => e?.id)).toEqual(['e2', 'e1'])
+    expect(data?.session).not.toHaveProperty('exerciseIds')
+    expect(data?.session.exerciseCount).toBe(2)
+  })
+
+  it('createStudySession returns exercises re-read without topic content', async () => {
+    const candidate = {
+      id: 'e1', topicId: 't1', questionText: 'Q', enrichedAt: new Date(),
+      topic: { id: 't1', title: 'T', courseId: 'c1', content: 'HUGE' },
+    }
+    vi.mocked(prisma.exercise.findMany)
+      .mockResolvedValueOnce([candidate] as never) // candidate pool
+      .mockResolvedValueOnce([{ id: 'e1', topic: { id: 't1' } }] as never) // client select
+    vi.mocked(prisma.topic.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.exerciseLog.findMany).mockResolvedValue([] as never)
+    vi.mocked(prisma.studySession.create).mockResolvedValueOnce({ id: 's1' } as never)
+
+    const res = await createStudySession([], 1, 'study', null, 0)
+
+    const clientArgs = callArg(prisma.exercise.findMany, 1)
+    expect(clientArgs).not.toHaveProperty('select.topic.select.content')
+    expect(clientArgs).toHaveProperty('select.questionText', true)
+    expect(res.exercises).toEqual([{ id: 'e1', topic: { id: 't1' } }])
   })
 })
