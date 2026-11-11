@@ -63,6 +63,23 @@ The switch only works from the Mac itself (open the app at `localhost`); on the 
 
 Optional `PHONE_ACCESS_HOST=<mac>.<tailnet>.ts.net` adds that name to `serverActions.allowedOrigins` and `allowedDevOrigins`. It is only needed if forms and buttons on the phone fail with "Invalid Server Actions request" in the server log: Next accepts a server action when the request's `Origin` equals its `Host` (or `X-Forwarded-Host`), and Tailscale's documentation does not say which `Host` Serve forwards. Set it before `next build` / `next start`, because `next.config.ts` reads it when it is loaded.
 
+## Run as a background service
+
+A launchd user agent (`com.feynman.studyhub`) can run the app in the background. It starts at login and restarts if it crashes. It serves a production build bound to `127.0.0.1` on port 3000 (or `PORT`).
+
+From the repo root:
+```bash
+scripts/launchd/install.sh --dry-run   # preview: runs the checks, prints the plist, builds nothing
+scripts/launchd/install.sh             # builds web/ and loads the agent
+```
+The install script needs `web/.env` (with `APP_PASSCODE` and `GOOGLE_API_KEY`) and `web/node_modules`, and it refuses to run if port 3000 is already in use.
+
+- **Stop or uninstall:** `scripts/launchd/uninstall.sh`. Stop the service before running `npm run dev` on the same port and database.
+- **Update:** after pulling new code or changing the Node version, run `scripts/launchd/uninstall.sh` and then `scripts/launchd/install.sh` again, so the build and the plist pick up the change.
+- **Logs:** `~/Library/Logs/feynman-studyhub/out.log` and `err.log`. Uninstall keeps them.
+
+Warning: the service opens the real database (`web/dev.db`), so back it up before the first install.
+
 ## Data Ingestion, Seeding & Utilities
 
 Data is generated through a crawler pipeline (see `README_CRAWLER.md` in the root).
