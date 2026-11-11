@@ -605,6 +605,19 @@ export async function getProfileAction(courseId: string): Promise<TutorProfile> 
 
 ---
 
+### 5.7 Tutor chat modes (owner decision, 2026-11-10)
+
+How the tutor responds in the chat/voice panel is defined by the persona, and the student can switch mode in the chat. There is no global "always help when asked" rule.
+
+- Modes (`TutorChatMode`, in `src/lib/studyspace/profile.ts`): `probe` (ask before telling: challenge the student's reasoning, give a hint only after an attempt), `guide` (short hints and steps toward the answer, one at a time, then a check question), `explain` (answer the question directly and briefly in Feynman style, then one check question).
+- Default per persona: `TutorProfile` gains `defaultChatMode: TutorChatMode`. Presets: `socratic_professor` → `probe`, `patient_coach` → `guide`, `exam_driller` → `probe`. The persona card (T25) shows and lets the owner edit it. Legacy profiles use `probe` (today's behavior). `parseProfile` must accept stored profiles without the field and fill it from the tone preset.
+- Exam sessions: the selector is hidden and the mode is fixed to an exam directive (no hints, no answers, no solution content), whatever the persona says.
+- Prompts (`src/lib/prompts/`): `chatModeDirective(profile, mode, sessionMode)` returns the behavior block. The per-exercise context message ends with this directive instead of the hard-coded "act as the Thesis Examiner / initiate oral defense" paragraph; that paragraph's wording becomes the `probe` directive. `voiceSystemInstruction(profile)` no longer hard-codes examiner behavior.
+- Switching: the tutor panel has a three-way selector. Changing it sends `sendContext("[SYSTEM MESSAGE: The student switched the tutor to <mode> mode. <directive>]", { interrupt: false })`; no reconnect. The chosen mode is kept per studyspace in localStorage (`feynman_chat_mode_<courseId>`) and falls back to `profile.defaultChatMode`.
+- The mode is part of the context key only for the switch message; it must not cause the exercise context to be re-sent.
+
+---
+
 ## 6. Tasks (strict linear order)
 
 Every task's **Verify** block includes: `npm run lint`, `npm run typecheck`, `npx vitest run` (no new failures vs. the T01 baseline; new tests pass), `npm run build` where stated, and a short manual browser check. Manual checks use `npm run dev` on `http://localhost:3000` unless stated otherwise; log in with the passcode from `.env`. For `curl` checks use `-b "feynman_session=$APP_PASSCODE"` with the value from `.env`.
@@ -706,6 +719,7 @@ Commit: `fix: open exam diagnosis, cancel exams without scoring, delete plans wi
 ### Phase C — Generalize the tutor and harden generation
 
 #### T09 — Prompts module and profile-driven prompts (sonnet)
+Added 2026-11-10 (section 5.7): also add `TutorChatMode`, `defaultChatMode` on the profile (with the backward-compatible parse), `chatModeDirective`, and use it at the end of the per-exercise context message and in the exam path. Add a minimal three-way mode selector to `VoiceHub.tsx` (hidden in exam sessions) that sends the switch message with `sendContext`; until T19 there is no `courseId` in the UI, so store the choice under `feynman_chat_mode_legacy`. Tests: directive text per mode; exam always yields the exam directive; old stored profiles parse. Browser check: in each mode, type "Give me a hint for this question" and confirm the reply style differs as specified.
 Depends: T08. Files: new `src/lib/ai.ts`, `src/lib/prompts/*.ts`, `src/lib/prompts/prompts.test.ts`, `src/services/studyspaceService.ts` (only `getProfileForCourse`, `getProfileForTopic`, `getCourseWithProfile` here); modify `src/app/actions.ts`, `src/services/summaryService.ts`, `src/services/artifactsService.ts`, `src/components/features/StudyInterface.tsx` (only the `useLiveAPI(...)` argument and the context message builders from T07), `src/services/voiceContext.ts`, `src/app/actions.test.ts`.
 Steps:
 1. Implement builders from 5.3 for all existing prompts (not the ingestion ones yet). Keep link instructions in the OLD path format in this task (links change in T10) — `fileLinkInstructions()` returns today's text for now.
@@ -835,6 +849,7 @@ Verify: lint/typecheck/vitest/`npm run build`; `/` after login → `/spaces` wit
 Commit: `feat(spaces): studyspace list and per-space study route with scoped data and voice persona`
 
 #### T20 — Phone study flow: confirm answers, tutor bottom sheet (sonnet)
+Added 2026-11-10 (section 5.7): the bottom sheet carries the chat mode selector; from T19 on the choice is stored per studyspace (`feynman_chat_mode_<courseId>`, migrating `feynman_chat_mode_legacy`).
 Depends: T19. Files: `src/components/features/Flashcard.tsx` (+ test), `src/components/features/StudyInterface.tsx`, new `src/components/features/TutorSheet.tsx` (+ test).
 Steps:
 1. Flashcard (study mode): tapping a single-choice option selects it; a "Check answer" button commits (same as the multi-select/numeric/dropdown submit). Exam mode keeps saving the draft on selection (drafts are not commits).
@@ -906,6 +921,7 @@ Verify: lint/typecheck/vitest/`npm run build`. Browser: create "Test space", upl
 Commit: `feat(spaces): new-studyspace wizard with upload, processing status and outline editor`
 
 #### T25 — Persona proposal, card, and starter exercises after acceptance (sonnet)
+Added 2026-11-10 (section 5.7): the proposal includes `defaultChatMode`, and the persona card shows it as an editable field next to the tone preset.
 Depends: T24. Files: new `src/server/ingest/profileProposal.ts` (+ test), `src/components/features/spaces/PersonaCard.tsx` (+ test), `src/lib/prompts/profile.ts`; modify `src/server/ingest/runner.ts` (call `maybeProposeProfile` after terminal source states), `src/app/spaces/actions.ts` (`regenerateProfileAction`, `acceptProfileAction`, `dismissProfileSuggestionAction`, `splitStudyspaceAction`), setup page (persona step after outline).
 Steps:
 1. `proposeProfile(courseId)`: outlines + samples of ready sources, failed ones in `excludedSources`, `generateObject(ProfileProposalSchema)`, fill `version`, `calibrationModule: null`, `examPreset: null`, `questionTypeCycles: null`; normalize mixes; `split` when `!subjectsCoherent` with ≥ 2 groups.
