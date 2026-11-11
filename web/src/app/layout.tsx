@@ -1,4 +1,4 @@
-import type { Metadata } from "next";
+import type { Metadata, Viewport } from "next";
 import { Inter, Playfair_Display, Fira_Code } from "next/font/google";
 import "./globals.css";
 // Loaded once for every page: any markdown with math (study cards, tutor chat, viewer, diagnosis reports) needs it
@@ -22,6 +22,15 @@ const firaCode = Fira_Code({
 export const metadata: Metadata = {
   title: "Feynman",
   description: "Understand Everything. Simplify Anything.",
+  appleWebApp: {
+    capable: true,
+    title: "Feynman",
+    statusBarStyle: "default",
+  },
+};
+
+export const viewport: Viewport = {
+  themeColor: "#2C2E33",
 };
 
 export default function RootLayout({
