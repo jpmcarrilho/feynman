@@ -1,5 +1,6 @@
 'use server'
 
+import { expandGroupSelection } from '@/lib/exerciseGroups'
 import { transcriptForSave } from '@/lib/tutorText'
 import { buildSessionTitle } from '@/lib/sessionTitle';
 import { generateText, generateObject } from 'ai'
@@ -368,6 +369,19 @@ export async function startSession(input: StartSessionInput): Promise<SessionSta
     unstudiedCandidates = unstudiedPool;
   } else {
     selected = [];
+  }
+
+  // A multi-part problem is never split: the drawn sub-questions bring their group, in order, and the session may run over the
+  // asked size by one group (standalone questions at the end make room first)
+  const drawnGroupIds = [...new Set(selected.map((e: any) => e.groupId as string | null).filter((id): id is string => !!id))]
+  if (drawnGroupIds.length > 0) {
+    const members = await prisma.exercise.findMany({
+      where: { groupId: { in: drawnGroupIds }, isGraded: true, status: 'active' },
+      include: { topic: true },
+    })
+    const siblings = new Map<string, any[]>()
+    for (const m of members) siblings.set(m.groupId as string, [...(siblings.get(m.groupId as string) ?? []), m])
+    selected = expandGroupSelection(selected, siblings, count)
   }
 
   // Determine a descriptive title based on selected courses and weeks (the title of the studyspace for uploaded ones)
@@ -1280,7 +1294,7 @@ export async function getTopicsWithPerformance(courseId?: string) {
     // what the student already answered, but are not part of the pool they can still cover.
     const exercises = await prisma.exercise.findMany({
       where: scope ? { status: { not: 'rejected' }, topic: { courseId: scope } } : { status: { not: 'rejected' } },
-      select: { id: true, topicId: true, status: true }
+      select: { id: true, topicId: true, status: true, groupId: true }
     });
 
     const logs = await prisma.exerciseLog.findMany({
@@ -1293,6 +1307,10 @@ export async function getTopicsWithPerformance(courseId?: string) {
       const topicExercises = exercises.filter(e => e.topicId === t.id);
       const activeIds = new Set(topicExercises.filter(e => e.status === 'active').map(e => e.id));
       const totalExercises = activeIds.size;
+      // Multi-part problems among the questions that can still be covered: how many problems and how many parts
+      const activeGrouped = topicExercises.filter((e) => e.status === 'active' && e.groupId)
+      const groupedExercises = activeGrouped.length
+      const groupCount = new Set(activeGrouped.map((e) => e.groupId)).size
 
       const exerciseIds = topicExercises.map(e => e.id);
       const topicLogs = logs.filter(l => exerciseIds.includes(l.exerciseId));
@@ -1317,7 +1335,9 @@ export async function getTopicsWithPerformance(courseId?: string) {
         totalExercises,
         uniquelyCompleted,
         accuracy,
-        coverage
+        coverage,
+        groupedExercises,
+        groupCount,
       };
     });
 

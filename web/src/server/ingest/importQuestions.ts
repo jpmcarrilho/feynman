@@ -27,6 +27,7 @@ import { ImportedQuestionsSchema, type ImportedQuestion } from './schemas'
 import { structuredCall, newModelStats, StageError, type GenerateObjectFn, type ModelStats } from './modelCall'
 import { mapWithConcurrency, STAGE_CONCURRENCY } from './pool'
 import { collapseSpace } from './segment'
+import { braceNotationToMath, numericParts, hasLetterPrefixes, stripChoiceLetter, needsExternalData } from './edxNotation'
 
 /** The heuristic needs at least this many question-like marks in a topic before the model is asked. */
 export const QUESTION_HEURISTIC_MIN_MATCHES = 3
@@ -171,7 +172,12 @@ export type Candidate = {
   answerQuote?: string
   /** Open questions only: the key points condensed from the written model answer in `correctAnswer`. */
   keyPoints?: string[]
+  /** A sub-question of a multi-part problem (edX files with `# Problem set:` sections): the shared stem and the position in it. */
+  group?: CandidateGroup
 }
+
+/** Sub-questions of one problem set share `key` (the section's index in the file) and the stem. */
+export type CandidateGroup = { key: string; title: string; stem: string; position: number }
 
 export type AcceptedQuestion = {
   questionText: string
@@ -264,6 +270,8 @@ export function acceptCandidate(c: Candidate, sourceText: string | null): { ok: 
   const correctAnswer = (c.correctAnswer ?? '').trim()
   if (!questionText) return { ok: false, reason: 'empty_question' }
   if (!correctAnswer || correctAnswer === '[]') return { ok: false, reason: 'no_answer_in_source' }
+  // The edX export holds questions that need the course dataset (run code on it); the app has no data to give the student
+  if (sourceText === null && needsExternalData(questionText)) return { ok: false, reason: 'needs_external_data' }
   if (c.exerciseType === 'open') return acceptOpenCandidate(c, questionText, choices, correctAnswer, sourceText)
 
   if (sourceText !== null) {
@@ -336,15 +344,96 @@ export function cleanEdxExplanation(raw: string): string {
   return raw.replace(/^\s*Explanation\s*\n/, '').replace(/\n\s*(Review|Submit)\s*$/i, '').trim()
 }
 
-/** Parses an edX markdown file into candidates (no model call). Blocks without a marked answer come back with an empty key. */
+const PROBLEM_SET_HEADER = /^# Problem set:[ \t]*(.*)$/m
+
+/**
+ * Splits an edX file into its problem sets. Text before the first `# Problem set: <title>` line is standalone questions; a
+ * problem set holds an optional `## Shared context` (the stem: setup, model, figure) and its `# Question` blocks. A set ends at a `# End of problem set` line (without it, at the next set or the end of the file). A set with a
+ * stem and at least two questions is a group; anything else is read as standalone questions.
+ */
+export const PROBLEM_SET_END = '# End of problem set'
+
+export function splitProblemSets(text: string): { title: string | null; stem: string; body: string }[] {
+  const out: { title: string | null; stem: string; body: string }[] = []
+  const parts = text.split(/^(?=# Problem set:)/m)
+  for (const part of parts) {
+    const header = part.match(PROBLEM_SET_HEADER)
+    if (!header || !part.startsWith('# Problem set:')) {
+      if (part.trim()) out.push({ title: null, stem: '', body: part })
+      continue
+    }
+    // The set ends at its end marker; whatever follows it (up to the next set) is standalone questions
+    const endAt = part.search(/^# End of problem set[ \t]*$/m)
+    const inside = endAt === -1 ? part : part.slice(0, endAt)
+    const after = endAt === -1 ? '' : part.slice(part.indexOf('\n', endAt) === -1 ? part.length : part.indexOf('\n', endAt) + 1)
+    const rest = inside.slice(inside.indexOf('\n') + 1)
+    const firstQuestion = rest.search(/^# Question/m)
+    const head = firstQuestion === -1 ? rest : rest.slice(0, firstQuestion)
+    const body = firstQuestion === -1 ? '' : rest.slice(firstQuestion)
+    const stem = head.replace(/^\s*## Shared context\s*\n/, '').trim()
+    out.push({ title: header[1].trim(), stem, body })
+    if (after.trim()) out.push({ title: null, stem: '', body: after })
+  }
+  return out
+}
+
+/** The marked options of a parsed edX block: a JSON array for several, the text for one, none for an unmarked block. */
+function markedOptions(correctAnswer: string, exerciseType: string): string[] {
+  if (!correctAnswer) return []
+  if (exerciseType !== 'multiple_choice') return [correctAnswer]
+  try {
+    const parsed = JSON.parse(correctAnswer)
+    return Array.isArray(parsed) ? parsed.map(String) : [correctAnswer]
+  } catch {
+    return [correctAnswer]
+  }
+}
+
+function edxBlockCandidates(text: string): Candidate[] {
+  const out: Candidate[] = []
+  for (const p of parseExerciseMarkdown(text)) {
+    const questionText = braceNotationToMath(cleanEdxQuestionText(p.questionText))
+    const explanation = braceNotationToMath(cleanEdxExplanation(p.explanation))
+    const type = p.exerciseType ?? 'single_choice'
+    const parts = numericParts(p.choices, markedOptions(p.correctAnswer, type))
+    if (parts) {
+      for (const part of parts) {
+        out.push({
+          questionText: parts.length > 1 ? `${questionText}\n\nEnter the value of: ${part.label}` : questionText,
+          exerciseType: 'numeric', choices: [], correctAnswer: part.value, explanation,
+        })
+      }
+      continue
+    }
+    const lettered = hasLetterPrefixes(p.choices)
+    const fix = (t: string) => braceNotationToMath(lettered ? stripChoiceLetter(t) : t)
+    out.push({
+      questionText, exerciseType: type, choices: p.choices.map(fix),
+      correctAnswer: type === 'multiple_choice' ? JSON.stringify(markedOptions(p.correctAnswer, type).map(fix)) : fix(p.correctAnswer),
+      explanation,
+    })
+  }
+  return out
+}
+
+/**
+ * Parses an edX markdown file into candidates (no model call). Blocks without a marked answer come back with an empty key.
+ * A problem whose options are all marked numbers is a numeric problem, one question per answer box (a multi-part one is
+ * told apart by its label, which is added to the question). Sub/superscripts written with braces are put inside `$...$`.
+ * The questions of a `# Problem set:` section with a stem carry the group (`candidate.group`).
+ */
 export function edxCandidates(text: string): Candidate[] {
-  return parseExerciseMarkdown(text).map((p) => ({
-    questionText: cleanEdxQuestionText(p.questionText),
-    exerciseType: p.exerciseType ?? 'single_choice',
-    choices: p.choices,
-    correctAnswer: p.correctAnswer,
-    explanation: cleanEdxExplanation(p.explanation),
-  }))
+  const out: Candidate[] = []
+  splitProblemSets(text).forEach((set, index) => {
+    const cands = edxBlockCandidates(set.body)
+    const stem = braceNotationToMath(set.stem)
+    if (set.title !== null && stem && cands.length >= 2) {
+      cands.forEach((c, position) => out.push({ ...c, group: { key: `set-${index}`, title: set.title as string, stem, position } }))
+    } else {
+      out.push(...cands)
+    }
+  })
+  return out
 }
 
 // ---------------------------------------------------------------------------------------------------------------------
@@ -434,16 +523,18 @@ export async function importQuestionsForSource(
     const study = topics.filter((t) => !notStudy.has(t.id) && (t.content ?? '').trim() !== '')
     stats.topicsStudyMaterial = study.length
 
-    const accepted: { topicId: string; q: AcceptedQuestion; fromModel: boolean; quote: string | null }[] = []
+    const accepted: { topicId: string; q: AcceptedQuestion; fromModel: boolean; quote: string | null; group: CandidateGroup | null }[] = []
     const seen = new Set<string>()
     const take = (topicId: string, c: Candidate, sourceText: string | null) => {
       stats.candidates++
+      // A problem set whose setup needs the course dataset cannot be answered here, whatever its single questions say
+      if (c.group && sourceText === null && needsExternalData(c.group.stem)) return addReject(stats, 'needs_external_data', c.questionText ?? '')
       const result = acceptCandidate(c, sourceText)
       if (!result.ok) return addReject(stats, result.reason, c.questionText ?? '')
       const key = haystack(result.question.questionText)
       if (seen.has(key)) return addReject(stats, 'duplicate_in_file', c.questionText)
       seen.add(key)
-      accepted.push({ topicId, q: result.question, fromModel: sourceText !== null, quote: sourceText !== null ? (c.answerQuote ?? null) : null })
+      accepted.push({ topicId, q: result.question, fromModel: sourceText !== null, quote: sourceText !== null ? (c.answerQuote ?? null) : null, group: c.group ?? null })
     }
 
     let edx: Candidate[] | null = null
@@ -454,7 +545,18 @@ export async function importQuestionsForSource(
 
     if (edx) {
       stats.path = 'edx_markdown'
-      edx.forEach((c, i) => take(topicForEdxBlock(c.questionText, i, edx.length, study).id, c, null))
+      // All sub-questions of a problem set belong to the topic of its first question
+      const topicOfGroup = new Map<string, string>()
+      edx.forEach((c, i) => {
+        let topicId: string
+        if (c.group) {
+          topicId = topicOfGroup.get(c.group.key) ?? topicForEdxBlock(c.questionText, i, edx.length, study).id
+          topicOfGroup.set(c.group.key, topicId)
+        } else {
+          topicId = topicForEdxBlock(c.questionText, i, edx.length, study).id
+        }
+        take(topicId, c, null)
+      })
     } else if (study.length > 0) {
       // A quiz and its key can land in different topics (questions on pages 1-2, key on page 3): a topic with an answer cue but
       // no question pattern is a key, and its text is an extra answer source for the question topics of this source.
@@ -495,13 +597,24 @@ export async function importQuestionsForSource(
     await prisma.$transaction(async (tx) => {
       await tx.exercise.deleteMany({ where: { id: { startsWith: 'imp-' }, topic: { sourceId }, logs: { none: {} } } })
       const kept = await tx.exercise.findMany({ where: { id: { startsWith: 'imp-' }, topic: { sourceId } }, select: { questionText: true } })
+      await tx.exerciseGroup.deleteMany({ where: { topic: { sourceId }, origin: 'imported', exercises: { none: {} } } })
       const keptKeys = new Set(kept.map((k) => haystack(k.questionText)))
-      for (const { topicId, q, fromModel, quote } of accepted) {
+      const groupIds = new Map<string, string>()
+      for (const { topicId, q, fromModel, quote, group } of accepted) {
         if (keptKeys.has(haystack(q.questionText))) continue
+        let groupId: string | null = null
+        if (group) {
+          groupId = groupIds.get(group.key) ?? null
+          if (!groupId) {
+            const made = await tx.exerciseGroup.create({ data: { topicId, title: group.title, stem: group.stem, origin: 'imported' } })
+            groupId = made.id
+            groupIds.set(group.key, groupId)
+          }
+        }
         const id = `imp-${crypto.randomUUID()}`
         await tx.exercise.create({
           data: {
-            id, topicId, questionText: q.questionText, exerciseType: q.exerciseType, choices: JSON.stringify(q.choices),
+            id, topicId, groupId, groupPosition: group ? group.position : null, questionText: q.questionText, exerciseType: q.exerciseType, choices: JSON.stringify(q.choices),
             correctAnswer: q.correctAnswer, explanation: q.explanation, isGraded: true, origin: 'imported', status: 'active',
             keyPoints: q.exerciseType === 'open' ? JSON.stringify(q.keyPoints) : null,
             promptVersion: fromModel ? INGEST_PROMPT_VERSION : null,

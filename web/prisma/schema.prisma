@@ -67,6 +67,7 @@ model Topic {
   course         Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)   // NEW delete rule
   source         Source?    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
   exercises      Exercise[]
+  groups         ExerciseGroup[]
 
   @@index([courseId, order])
   @@index([courseId, week])  // NEW
@@ -89,12 +90,31 @@ model Exercise {
   enrichedAt           DateTime?     // NEW: replaces the "<!-- enriched -->" marker
   reportedReason       String?       // NEW
   keyPoints            String?       // JSON string[] (2 to 4 points) for exerciseType "open"; null for every other type
+  groupId              String?       // NEW: the multi-part problem this question belongs to (shared stem), null for a standalone question
+  groupPosition        Int?          // NEW: order inside the group, 0-based
   createdAt            DateTime      @default(now())      // NEW
   topic                Topic         @relation(fields: [topicId], references: [id], onDelete: Cascade) // NEW delete rule
+  group                ExerciseGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
   logs                 ExerciseLog[]
   sessionItems         SessionExercise[] // NEW
 
   @@index([topicId]) // NEW
+  @@index([groupId])
+}
+
+/// A multi-part problem: a shared stem (setup, model, figure) and its ordered sub-questions (Exercise.groupId/groupPosition).
+model ExerciseGroup {
+  id        String     @id @default(uuid())
+  topicId   String
+  title     String
+  stem      String     // markdown shown above every sub-question
+  origin    String     @default("imported") // "imported" | "generated"
+  status    String     @default("active")
+  createdAt DateTime   @default(now())
+  topic     Topic      @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  exercises Exercise[]
+
+  @@index([topicId])
 }
 
 model StudySession {

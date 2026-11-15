@@ -191,10 +191,14 @@ describe('latexProblems', () => {
     expect(latexProblems('$\\\\delta$')).toContain('double_escaped_latex')
     expect(latexProblems('open \\( never closed')).toContain('unmatched_math_delimiter')
   })
-  it('flags two currency amounts that the renderer would read as one math span, not a single dollar sign', () => {
-    expect(latexProblems('It costs $100 per year or $50 per month')).toContain('currency_read_as_math')
+  it('does not flag money: the renderer escapes it before it reads math', () => {
+    expect(latexProblems('It costs $100 per year or $50 per month')).toEqual([])
+    expect(latexProblems('Country A earns $85,000 per head and country B $160. The ratio is 530x.')).toEqual([])
     expect(latexProblems('It costs $100 per year')).toEqual([])
     expect(latexProblems('Let $x$ and $y$ be reals')).toEqual([])
+  })
+  it('accepts an escaped dollar inside a math span', () => {
+    expect(latexProblems('A borrower with wealth $w = \\$500$ invests $k$.')).toEqual([])
   })
 })
 
@@ -287,3 +291,31 @@ describe('open questions', () => {
     expect(bad.ok).toBe(false)
   })
 })
+
+describe('lettered choices', () => {
+  const base = { questionText: 'Which is right?', exerciseType: 'single_choice', correctAnswer: 'b. Two', explanation: 'Because.' }
+  it('rejects a generated question whose choices carry list letters, in any order', () => {
+    const issues = validateExerciseStructure({ ...base, choices: ['c. Three', 'b. Two', 'a. One'] })
+    expect(issues.map((i) => i.code)).toContain('choices_lettered')
+  })
+  it('does not reject plain options, a single lettered option, or an imported question', () => {
+    expect(validateExerciseStructure({ ...base, correctAnswer: 'Two', choices: ['One', 'Two', 'Three'] }).map((i) => i.code)).not.toContain('choices_lettered')
+    expect(validateExerciseStructure({ ...base, correctAnswer: 'a lot', choices: ['a lot', 'Two', 'Three'] }).map((i) => i.code)).not.toContain('choices_lettered')
+    expect(validateExerciseStructure({ ...base, choices: ['a. One', 'b. Two', 'c. Three'] }, { origin: 'imported' }).map((i) => i.code)).not.toContain('choices_lettered')
+  })
+})
+
+describe('explanations that cite option letters', () => {
+  const ok = { questionText: 'Which is right?', exerciseType: 'single_choice', choices: ['One', 'Two', 'Three'], correctAnswer: 'Two' }
+  it('rejects a generated question whose explanation says "statements a and c"', () => {
+    expect(validateExerciseStructure({ ...ok, explanation: 'Statements a, b, and c are correct.' }).map((i) => i.code)).toContain('explanation_cites_letter')
+    expect(validateExerciseStructure({ ...ok, explanation: 'Option b is correct because it holds.' }).map((i) => i.code)).toContain('explanation_cites_letter')
+    expect(validateExerciseStructure({ ...ok, explanation: 'The first three statements are correct; the fourth is not.' }).map((i) => i.code)).toContain('explanation_cites_letter')
+  })
+  it('accepts a scenario with capital letters, plain prose and imported explanations', () => {
+    expect(validateExerciseStructure({ ...ok, explanation: 'Under Option A the tenant bears risk; Contract B shares it. A good answer names both.' }).map((i) => i.code)).not.toContain('explanation_cites_letter')
+    expect(validateExerciseStructure({ ...ok, explanation: 'The answer is two.' }).map((i) => i.code)).not.toContain('explanation_cites_letter')
+    expect(validateExerciseStructure({ ...ok, explanation: 'Option b is correct.' }, { origin: 'imported' }).map((i) => i.code)).not.toContain('explanation_cites_letter')
+  })
+})
+

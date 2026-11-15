@@ -15,3 +15,4 @@ export type { ExerciseContextInput, ExerciseAnswerState, CheckedAnswer, AnswerKe
 export { ocrPagesPrompt, segmentSinglePrompt, segmentWindowPrompt, moduleGroupingPrompt, importQuestionsPrompt, INGEST_PROMPT_VERSION } from './ingest'
 export { proposeProfilePrompt, profileUpdatePrompt, fitProposalSources, PROFILE_PROMPT_CAPS, PROFILE_PROMPT_VERSION } from './profile'
 export type { ProposalOutlineSource, FittedProposalSource } from './profile'
+export { generateProblemPrompt, GENERATE_PROBLEM_PROMPT_VERSION, PROBLEM_MIN_PARTS, PROBLEM_MAX_PARTS } from './problem'

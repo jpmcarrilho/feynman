@@ -459,7 +459,7 @@ export interface GeneratorChecks {
   openSolve: typeof openSolve
   gradeOpenAnswer: typeof gradeOpenAnswer
 }
-const DEFAULT_CHECKS: GeneratorChecks = { blindSolve, openSolve, gradeOpenAnswer }
+export const DEFAULT_CHECKS: GeneratorChecks = { blindSolve, openSolve, gradeOpenAnswer }
 
 /** What the quality gate of a written-answer question stores as the start of the rejection reason. */
 export const OPEN_SOLVE_REASON_PREFIX = `open_solve[${OPEN_SOLVE_PROMPT_VERSION}/${GRADE_OPEN_PROMPT_VERSION}]`
@@ -469,7 +469,7 @@ export const OPEN_SOLVE_REASON_PREFIX = `open_solve[${OPEN_SOLVE_PROMPT_VERSION}
  * questions go through the blind solve. A written-answer question goes through `openSolve` (a student with the same grounding
  * window answers it) and `gradeOpenAnswer` on that answer: it passes only when the question is answerable and the answer scores 1.
  */
-async function rejectionReason(candidate: {
+export async function rejectionReason(candidate: {
   questionText: string
   exerciseType: string
   choices: string[]

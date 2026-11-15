@@ -9,6 +9,7 @@ import {
   TOPIC_REJECTION_LIMIT,
   SESSION_REJECTION_LIMIT,
 } from '@/services/exerciseGenerator'
+import { generateProblemForTopic } from '@/services/problemGenerator'
 import { CourseScopeError } from '@/services/courseScope'
 import { parseIdList } from '@/services/sessionService'
 
@@ -21,6 +22,11 @@ export type NextExerciseResult =
   | { exercise: Exercise & { topic: Topic } }
   | { error: string; /** false: asking again cannot succeed (the client stops and shows the message without a Retry). Absent: transient, retry. */ retryable?: false }
   | { stopped: true }
+
+/** Share of generated slots on a quantitative (calculation) topic that become a multi-part problem (a stem and 3 to 5 parts) instead of one question. */
+export const GENERATED_PROBLEM_SHARE = 0.5
+/** A problem is only generated when the session still has room for at least this many questions. */
+export const MIN_ROOM_FOR_PROBLEM = 3
 
 /** Topics judged to be course logistics that one request skips over before giving up. */
 export const MAX_LOGISTICS_SKIPS = 2
@@ -101,6 +107,15 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
     }
     const representedTopicIds = new Set(existingExercisesInSession.map((ex) => ex.topicId))
 
+    // The rest of a generated problem comes first: its parts were stored with the problem and cost no model call. A problem is
+    // never cut short by the target size of the session.
+    const pending = await nextPendingGroupMember(existingExerciseIds)
+    if (pending) {
+      const appendedPending = await appendToSession(sessionId, pending.id, { allowOverTarget: true })
+      if (!appendedPending) return { stopped: true }
+      return { exercise: { ...pending, topic: { ...pending.topic, content: null } } }
+    }
+
     // A topic the model judges to be course logistics is marked (see generateExerciseForTopic) and skipped here at once,
     // so the slot moves on to another topic instead of failing. At most MAX_LOGISTICS_SKIPS such topics per request.
     const skipped = new Set<string>()
@@ -123,6 +138,22 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
         const j = Math.floor(Math.random() * (i + 1))
         ;[shuffledTargetPool[i], shuffledTargetPool[j]] = [shuffledTargetPool[j], shuffledTargetPool[i]]
       }
+
+      // A multi-part problem now and then on a quantitative topic, when the session has room for it
+      const room = session.targetCount === null ? Number.POSITIVE_INFINITY : session.targetCount - existingExerciseIds.length
+      if (room >= MIN_ROOM_FOR_PROBLEM && Math.random() < GENERATED_PROBLEM_SHARE) {
+        const quant = await prisma.topic.findUnique({ where: { id: shuffledTargetPool[0] }, select: { isQuantitative: true } })
+        if (quant?.isQuantitative) {
+          try {
+            const problem = await generateProblemForTopic({ primaryTopicId: shuffledTargetPool[0], poolTopicIds: targetPool, existingExerciseIds, styleTopicIds: topicIds })
+            newEx = problem.exercises[0]
+          } catch (e) {
+            // Any failure falls back to one ordinary question for this slot (a logistics topic is marked by that path)
+            console.warn('Problem generation failed, generating a single question instead:', e instanceof GenerationError ? e.code : e)
+          }
+        }
+      }
+      if (newEx) break
 
       try {
         newEx = await generateExerciseForTopic({
@@ -165,13 +196,13 @@ export async function generateNextForSession(sessionId: string, courseId?: strin
  * transaction that re-reads the status and the item count. A unique-constraint conflict on the position (another
  * request appended first) is retried once. Returns false when the session is no longer active or is already full.
  */
-export async function appendToSession(sessionId: string, exerciseId: string): Promise<boolean> {
+export async function appendToSession(sessionId: string, exerciseId: string, opts: { allowOverTarget?: boolean } = {}): Promise<boolean> {
   const attempt = () =>
     prisma.$transaction(async (tx) => {
       const session = await tx.studySession.findUnique({ where: { id: sessionId }, select: { status: true, targetCount: true } })
       if (!session || session.status !== 'active') return false
       const agg = await tx.sessionExercise.aggregate({ where: { sessionId }, _max: { position: true }, _count: { _all: true } })
-      if (session.targetCount !== null && agg._count._all >= session.targetCount) return false
+      if (!opts.allowOverTarget && session.targetCount !== null && agg._count._all >= session.targetCount) return false
       await tx.sessionExercise.create({ data: { sessionId, exerciseId, position: (agg._max.position ?? -1) + 1 } })
       return true
     })
@@ -181,4 +212,24 @@ export async function appendToSession(sessionId: string, exerciseId: string): Pr
     if ((e as { code?: string })?.code === 'P2002') return attempt()
     throw e
   }
+}
+
+/**
+ * The next sub-question of a generated problem that is partly in the session (`inSessionIds` are the ids of its questions): the
+ * first active part (by position) that is not in it yet, of the first such problem. Null when no generated problem in the
+ * session is incomplete.
+ */
+export async function nextPendingGroupMember(inSessionIds: string[]): Promise<(Exercise & { topic: Topic }) | null> {
+  const inSession = new Set(inSessionIds)
+  const groupIds = new Set<string>()
+  for (const chunk of chunkIds(inSessionIds)) {
+    const rows = await prisma.exercise.findMany({ where: { id: { in: chunk }, groupId: { not: null }, group: { origin: 'generated' } }, select: { groupId: true } })
+    for (const r of rows) if (r?.groupId) groupIds.add(r.groupId)
+  }
+  for (const groupId of groupIds) {
+    const members = await prisma.exercise.findMany({ where: { groupId, status: 'active' }, orderBy: { groupPosition: 'asc' }, include: { topic: true } })
+    const next = members.find((m) => !inSession.has(m.id))
+    if (next) return next
+  }
+  return null
 }

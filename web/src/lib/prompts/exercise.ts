@@ -179,6 +179,7 @@ ${g.synthesisBlock}
 CRITICAL FORMATTING & STRUCTURE INSTRUCTIONS:
 ${g.formatRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}
 ${g.formatRules.length + 1}. MATH AND SYMBOLS: Write every mathematical expression or symbol, in the question, the choices, the model answer, the key points and the explanation, between dollar signs ($...$ inline, $$...$$ on its own line), for example $\\beta > 0$. Never write LaTeX commands (\\beta, \\frac, x_{i}) outside the dollar signs, and never double the backslashes. Write currency with an escaped dollar sign (\\$5), never a bare dollar sign. The options of a "dropdown" question are plain text: no LaTeX, no dollar signs.
+${g.formatRules.length + 2}. NO OPTION LETTERS: Write choices and dropdown options without list letters or numbers (no "a.", "b)", "(c)"). The choices are shuffled and the card numbers them itself, so never refer to an option by letter or position in the question or the explanation ("statements a and c are correct"); name the content of the option instead.
 
 CRITICAL FORMAT SELECTION:
 You MUST generate an exercise of type: "${targetType}".

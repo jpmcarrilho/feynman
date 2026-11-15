@@ -14,6 +14,8 @@ import type { SelfScore } from '@/lib/openAnswer'
 import type { OpenCheckOutcome } from '@/lib/openAnswerClient'
 
 interface FlashcardProps {
+  /** A sub-question of a multi-part problem: the shared stem is shown above the question (see lib/exerciseGroups.ts). */
+  group?: { title: string; stem: string; part: number; total: number } | null
   questionText: string
   exerciseType?: string
   choices: string[]
@@ -57,7 +59,7 @@ const REPORT_OPTIONS: { value: ReportReason; label: string }[] = [
 const QUESTION_PROSE = 'prose dark:prose-invert max-w-none min-w-0 break-words text-xl leading-relaxed max-sm:text-[1.0625rem]! max-sm:leading-normal max-sm:[&_h1]:text-xl max-sm:[&_h2]:text-lg max-sm:[&_h3]:text-base max-sm:[&_h4]:text-base max-sm:[&_p]:my-2'
 const CHOICE_PROSE = 'prose dark:prose-invert max-w-none min-w-0 text-sm break-words'
 
-export function Flashcard({ questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, result, onRequestExplanation, onReport, reported = false, openProps }: FlashcardProps) {
+export function Flashcard({ group = null, questionText, exerciseType = 'single_choice', choices, correctAnswer, explanation, initialSelectedChoice, hasBeenAnswered, isExamMode = false, onAnswer, result, onRequestExplanation, onReport, reported = false, openProps }: FlashcardProps) {
   // The same type resolution and grading the server uses (src/lib/grading.ts)
   const effectiveExerciseType = resolveExerciseType({ exerciseType, choices, questionText })
   const grade = (userAnswer: string) =>
@@ -240,6 +242,14 @@ export function Flashcard({ questionText, exerciseType = 'single_choice', choice
   return (
     <Card className="w-full max-w-2xl min-w-0 mx-auto overflow-visible max-sm:[--card-spacing:--spacing(3)] shadow-md border border-charcoal-graphite/10 bg-card">
       <CardHeader>
+        {group && (
+          <details open className="mb-4 w-full min-w-0 rounded-lg border border-fountain-ink/20 bg-fountain-ink/5 p-3" data-testid="group-stem">
+            <summary className="cursor-pointer select-none text-xs font-semibold uppercase tracking-wide text-fountain-ink">
+              Problem · part {group.part} of {group.total}{group.title ? ` · ${group.title}` : ''}
+            </summary>
+            <Md text={group.stem} className={`${CHOICE_PROSE} mt-2 text-base`} />
+          </details>
+        )}
         <div className="w-full min-w-0">{renderQuestionText()}</div>
       </CardHeader>
       <CardContent className="space-y-4 max-sm:space-y-3 min-w-0">

@@ -782,3 +782,58 @@ describe('files with only one or two questions', () => {
     expect(calls).toBe(0)
   })
 })
+
+describe('problem sets (multi-part problems)', () => {
+  const q = (text: string, right: string, wrong: string[]) => `# Question\n${text}\n\n## Choices\n- [x] ${right}\n${wrong.map((w) => `- [ ] ${w}`).join('\n')}\n\n## Explanation/Solution\nExplanation\n\nBecause ${right}.\n`
+  const FILE = [
+    q('Standalone: which is a fruit?', 'Apple', ['Rock', 'Chair']),
+    '# Problem set: Tax collector model',
+    '## Shared context',
+    'A citizen pays a bribe $b$ to a collector who reports $\\tau$ for true value $\\tau^*$.',
+    '',
+    q('What is the citizen payoff if the collector reports truthfully?', 'Minus tau minus b', ['Plus b', 'Zero']),
+    q('What is the collector payoff if the collector reports truthfully?', 'b', ['Zero', 'Minus b']),
+    q('When is lying profitable?', 'Never', ['Always', 'Sometimes']),
+    '# Problem set: One part only',
+    '## Shared context',
+    'Some setup text.',
+    '',
+    q('Single sub question?', 'Yes', ['No', 'Maybe']),
+    '# Problem set: Needs the data',
+    '## Shared context',
+    'Load the data in R and run a regression.',
+    '',
+    q('What is the first coefficient?', 'One', ['Two', 'Three']),
+    q('What is the second coefficient?', 'Two', ['One', 'Three']),
+  ].join('\n')
+
+  it('parses sections into groups only when there is a stem and at least two questions', () => {
+    const cs = edxCandidates(FILE)
+    expect(cs).toHaveLength(7)
+    expect(cs[0].group).toBeUndefined()
+    expect(cs.slice(1, 4).map((c) => c.group?.position)).toEqual([0, 1, 2])
+    expect(cs[1].group).toMatchObject({ title: 'Tax collector model' })
+    expect(cs[1].group?.stem).toContain('citizen pays a bribe')
+    expect(cs[4].group).toBeUndefined()
+  })
+
+  it('stores a group with its stem and ordered sub-questions, and skips a set whose setup needs the dataset', async () => {
+    const { id, topicIds } = await makeSource({ ext: '.md', original: FILE, topics: [{ title: 'Exercises', content: FILE }] })
+    const result = await importQuestionsForSource(id, { generate: generateWith([]) })
+    expect(result.stats.rejected).toEqual({ needs_external_data: 2 })
+    const groups = await prisma.exerciseGroup.findMany({ where: { topicId: { in: topicIds } } })
+    expect(groups).toHaveLength(1)
+    expect(groups[0]).toMatchObject({ title: 'Tax collector model', origin: 'imported', status: 'active' })
+    const members = await prisma.exercise.findMany({ where: { groupId: groups[0].id }, orderBy: { groupPosition: 'asc' } })
+    expect(members.map((m) => m.groupPosition)).toEqual([0, 1, 2])
+    expect(members[0].questionText).toContain('citizen payoff')
+    const loose = await prisma.exercise.findMany({ where: { topicId: { in: topicIds }, groupId: null } })
+    expect(loose).toHaveLength(2)
+    // re-running replaces the unanswered questions and leaves one group, not two
+    await prisma.source.update({ where: { id }, data: { status: 'importing_questions' } })
+    await importQuestionsForSource(id, { generate: generateWith([]) })
+    expect(await prisma.exerciseGroup.count({ where: { topicId: { in: topicIds } } })).toBe(1)
+    expect(await prisma.exercise.count({ where: { topicId: { in: topicIds } } })).toBe(5)
+  })
+})
+

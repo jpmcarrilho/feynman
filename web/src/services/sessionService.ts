@@ -64,6 +64,9 @@ export const EXERCISE_CLIENT_SELECT = {
   reportedReason: true,
   keyPoints: true,
   createdAt: true,
+  groupId: true,
+  groupPosition: true,
+  group: { select: { id: true, title: true, stem: true } },
   topic: {
     select: {
       id: true,

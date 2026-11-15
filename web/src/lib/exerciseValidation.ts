@@ -15,6 +15,7 @@
  */
 import { gradeAnswer, normalize, resolveExerciseType } from '@/lib/grading'
 import { MODEL_ANSWER_MAX_CHARS, OPEN_KEY_POINTS, parseKeyPoints } from '@/lib/openAnswer'
+import { escapeCurrencyDollars } from '@/lib/currencyDollars'
 
 export type ExerciseKind = 'single_choice' | 'multiple_choice' | 'numeric' | 'dropdown' | 'open'
 
@@ -78,12 +79,13 @@ export const DROPDOWN_PLACEHOLDER = '[Dropdown 1]'
 
 // --- LaTeX ------------------------------------------------------------------------------------------------------
 
-// The delimited spans the renderer turns into math, longest delimiters first. Inline `$..$` may not contain `$`.
+// The delimited spans the renderer turns into math, longest delimiters first. Inline `$..$` may not contain an unescaped `$`.
 const MATH_SPAN_PATTERNS = [
   /\$\$[\s\S]+?\$\$/g,
   /\\\[[\s\S]+?\\\]/g,
   /\\\([\s\S]+?\\\)/g,
-  /(?<!\\)\$[^$]+?(?<!\\)\$/g,
+  // An escaped dollar (`\$`) may sit inside the span: `$w = \$500$`
+  /(?<!\\)\$(?:[^$\\]|\\[\s\S])+?(?<!\\)\$/g,
 ]
 
 function mathSpans(text: string): { spans: string[]; rest: string } {
@@ -99,8 +101,10 @@ function mathSpans(text: string): { spans: string[]; rest: string } {
 }
 
 /** Problems with the LaTeX of one rendered text. Empty when the text renders as intended. */
-export function latexProblems(text: string): string[] {
+export function latexProblems(rawText: string): string[] {
   const problems: string[] = []
+  // The renderer escapes money dollars before it reads math (preprocessLaTeX), so check the text the way it is rendered
+  const text = escapeCurrencyDollars(rawText)
   const { spans, rest } = mathSpans(text)
   if (/\\[A-Za-z]{2,}/.test(rest) || /[\w)\]}]\s?[_^]\{/.test(rest)) problems.push('bare_latex')
   if (/\\[()[\]]|\$\$/.test(rest)) problems.push('unmatched_math_delimiter')
@@ -134,6 +138,17 @@ function parseChoiceList(choices: ValidatableExercise['choices']): string[] | nu
 
 function hasDuplicates(values: string[]): boolean {
   return new Set(values.map(normalize)).size !== values.length
+}
+
+/** Every option starts with a list letter ("a. ...", "(b) ..."): the card numbers options itself and generated ones are shuffled. */
+export function allChoicesLettered(choices: string[]): boolean {
+  return choices.length >= 2 && choices.every((c) => /^\(?[a-h][.)]\s+\S/i.test(c.trim()))
+}
+
+/** The explanation points at an option by letter or position ("Statements a and c are correct", "the first three statements"): the options are shuffled and shown without letters. Lower-case letters only, so "Option A" in a scenario is fine. */
+export function citesOptionLetter(text: string): boolean {
+  return /\b(?:[Ss]tatements?|[Oo]ptions?|[Cc]hoices?|[Aa]nswers?|[Rr]esponses?)\s+\(?[a-e]\)?(?=[\s,.):;]|$)/.test(text)
+    || /\b(?:[Tt]he )?(?:first|second|third|fourth|last)(?: (?:two|three|four))? (?:statements?|options?|choices?|answers?|responses?)\b/.test(text)
 }
 
 const DROPDOWN_PREFIX = /^\[Dropdown (\d+)\]\s*/
@@ -200,6 +215,8 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
       const min = opts.origin === 'imported' ? IMPORTED_SINGLE_CHOICE_MIN : CHOICE_LIMITS.single_choice.min
       if (choices.length < min || choices.length > max) add('choice_count', `Single choice needs ${min}-${max} choices, has ${choices.length}.`)
       if (hasDuplicates(choices)) add('duplicate_choices', 'Two choices are the same.')
+      if (opts.origin !== 'imported' && allChoicesLettered(choices)) add('choices_lettered', 'The choices start with list letters; write them without "a.", "b.".')
+      if (opts.origin !== 'imported' && citesOptionLetter(ex.explanation ?? '')) add('explanation_cites_letter', 'The explanation refers to options by letter; name the content instead.')
       const matches = choices.filter((c) => c.trim() === answer.trim())
       if (!answer.trim() || matches.length !== 1) add('answer_not_in_choices', 'The correct answer is not exactly one of the choices.')
       else if (!gradeAnswer(gradable, matches[0]).isCorrect) add('ungradable_answer', 'The correct choice does not grade as correct.')
@@ -209,6 +226,8 @@ export function validateExerciseStructure(ex: ValidatableExercise, opts: Validat
       const { min, max } = CHOICE_LIMITS.multiple_choice
       if (choices.length < min || choices.length > max) add('choice_count', `Multiple choice needs ${min}-${max} choices, has ${choices.length}.`)
       if (hasDuplicates(choices)) add('duplicate_choices', 'Two choices are the same.')
+      if (opts.origin !== 'imported' && allChoicesLettered(choices)) add('choices_lettered', 'The choices start with list letters; write them without "a.", "b.".')
+      if (opts.origin !== 'imported' && citesOptionLetter(ex.explanation ?? '')) add('explanation_cites_letter', 'The explanation refers to options by letter; name the content instead.')
       let parsed: unknown
       try {
         parsed = JSON.parse(answer)

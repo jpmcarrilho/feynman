@@ -1,5 +1,8 @@
 'use client'
 
+import { groupContext, problemSummary, type PartState } from '@/lib/exerciseGroups'
+import { ProblemParts } from './ProblemParts'
+import { SourceCredit } from './SourceCredit'
 import { useState, useEffect, useMemo, useRef, useSyncExternalStore } from 'react'
 import { Button } from '@/components/ui/button'
 import { Flashcard } from './Flashcard'
@@ -2129,8 +2132,28 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
                     </Button>
                   </div>
 
+                  {(() => {
+                    const examOpen = session.mode === 'exam' && session.status === 'active'
+                    const logOf = (it: { id: string }) => session.logs?.find((l: { exerciseId: string }) => l.exerciseId === it.id)
+                    const summary = problemSummary(
+                      exercises,
+                      currentIndex,
+                      (it): PartState => {
+                        if (examOpen) return draftAnswers[it.id] ? 'answered' : 'open'
+                        const lg = logOf(it)
+                        if (!lg) return 'open'
+                        const score = logScore(lg)
+                        return score >= 1 ? 'correct' : score > 0 ? 'partial' : 'incorrect'
+                      },
+                      (it) => flaggedIds.includes(it.id),
+                      (it) => { const lg = logOf(it); return lg ? logScore(lg) : 0 },
+                    )
+                    return summary ? <ProblemParts summary={summary} onSelect={goToIndex} showScore={!examOpen} /> : null
+                  })()}
+
                   <Flashcard
                     key={currentExercise.id} // forces remount on question change
+                    group={groupContext(exercises, currentIndex)}
                     questionText={currentExercise.questionText}
                     exerciseType={currentExercise.exerciseType || 'single_choice'}
                     choices={parsedChoices}
@@ -2157,6 +2180,7 @@ export function StudyInterface({ courseId, courseTitle, profile: storedProfile, 
                       return ok
                     }}
                   />
+                  <SourceCredit courseCode={currentExercise.topic?.course?.code} origin={currentExercise.origin} />
 
                   <div className="flex justify-between pt-6">
                     <Button
