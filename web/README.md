@@ -1,6 +1,6 @@
 # DEDP Study Application
 
-This is a Next.js application built to help students study for MIT's Data, Economics, and Development Policy (DEDP) MicroMasters courses. It provides an interactive flashcard system, AI-assisted explanations, and study analytics.
+This is the Next.js application of the Feynman study platform: studyspaces built from your own course files, imported and AI-written practice questions, a Socratic tutor, and study analytics. The root README has the overview, the Gemini key and cost guide, and the quick start.
 
 ## Tech Stack
 
@@ -34,14 +34,15 @@ This is a Next.js application built to help students study for MIT's Data, Econo
    cp .env.example .env
    ```
    Open `.env` and configure the following parameters:
-   *   `GOOGLE_API_KEY`: Your Google AI Studio Gemini API key.
+   *   `GOOGLE_GENERATIVE_AI_API_KEY` and `GOOGLE_API_KEY`: your Gemini API key from Google AI Studio, in both (text generation reads the first, the voice tutor the second). See the root README, "Get a Gemini API key".
    *   `APP_PASSCODE`: A secure passcode used to log into the application.
    *   `DATABASE_URL`: Set to `file:./dev.db` for local SQLite development.
 
 3. **Database Setup**:
-   Initialize the SQLite database schema with Prisma:
+   Build the database client and create the SQLite database with its migrations:
    ```bash
-   npx prisma db push
+   npx prisma generate
+   npx prisma migrate deploy
    ```
 
 4. **Run the Development Server**:
