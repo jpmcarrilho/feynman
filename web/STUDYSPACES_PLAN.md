@@ -315,7 +315,7 @@ storage/
   summaries/sessions/<sessionId>_index.md        session index files for NEW sessions
 ```
 
-Legacy summaries stay where they are (`summaries/<code>/…`, tracked in git). `summaryDirFor(course)` returns `summaries/<code>` if that directory exists, else `storage/summaries/<courseId>`. Session index files: write new ones to `storage/summaries/sessions/`; read legacy ones from `summaries/`.
+Legacy summaries stay where they are (`summaries/<code>/…`; no longer tracked in git, they stay on the student's machine). `summaryDirFor(course)` returns `summaries/<code>` if that directory exists, else `storage/summaries/<courseId>`. Session index files: write new ones to `storage/summaries/sessions/`; read legacy ones from `summaries/`.
 
 ### 3.5 Course/topic conventions for uploaded content
 

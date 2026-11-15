@@ -16,3 +16,7 @@ MIT_Learn_Courses/resources_registry.csv
 MIT_Learn_Courses/main_page.html
 /comprehensive_review_pe.jpeg
 
+# Summaries and session index files the app writes while the student studies: derived from the course material and from the
+# student's own sessions, kept on the student's machine only
+web/summaries/
+
