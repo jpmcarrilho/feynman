@@ -61,7 +61,9 @@ One-time setup (you do this yourself):
 
 The switch only works from the Mac itself (open the app at `localhost`); on the phone the card shows the state and address only. "Tailscale not running" means the Tailscale app is closed or signed out on the Mac. If the Tailscale binary is somewhere unusual, set `TAILSCALE_BIN` to its path.
 
-Optional `PHONE_ACCESS_HOST=<mac>.<tailnet>.ts.net` adds that name to `serverActions.allowedOrigins` and `allowedDevOrigins`. It is only needed if forms and buttons on the phone fail with "Invalid Server Actions request" in the server log: Next accepts a server action when the request's `Origin` equals its `Host` (or `X-Forwarded-Host`), and Tailscale's documentation does not say which `Host` Serve forwards. Set it before `next build` / `next start`, because `next.config.ts` reads it when it is loaded.
+**Easiest way to start everything: `scripts/run.sh`** (from the repo root; `--prod` for the production build, `--dry-run` to preview). It finds the Mac's `.ts.net` address, passes it to the app as `PHONE_ACCESS_HOST`, binds to 127.0.0.1, refuses to start when the port is busy, and prints the addresses for the Mac and the phone. It never changes the Tailscale setup.
+
+`PHONE_ACCESS_HOST=<mac>.<tailnet>.ts.net` adds that name to `serverActions.allowedOrigins` and `allowedDevOrigins`. With `next dev` it is required for the phone: without it Next answers 403 to every `/_next/*` request that carries the phone's `Origin` ("Blocked cross-origin request to Next.js dev resource" in the log), the page's scripts do not run and the login form does nothing. With a production build it is only needed if forms and buttons on the phone fail with "Invalid Server Actions request" in the server log: Next accepts a server action when the request's `Origin` equals its `Host` (or `X-Forwarded-Host`), and Tailscale's documentation does not say which `Host` Serve forwards. Set it before `next build` / `next start` / `next dev`, because `next.config.ts` reads it when it is loaded (`scripts/run.sh` does this).
 
 ## Run as a background service
 
