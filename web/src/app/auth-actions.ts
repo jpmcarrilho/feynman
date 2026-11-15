@@ -31,7 +31,10 @@ export async function loginWithPasscode(passcode: string): Promise<{ success: bo
     return { success: false, error: 'Server authentication is unconfigured.' }
   }
 
-  if (passcode === securePasscode) {
+  // A passcode pasted on a phone or copied from a terminal often carries a trailing space or newline: compare without them
+  const submitted = typeof passcode === 'string' ? passcode.trim() : ''
+
+  if (submitted !== '' && submitted === securePasscode) {
     const cookieStore = await cookies()
     cookieStore.set('feynman_session', securePasscode, {
       httpOnly: true,
