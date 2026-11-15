@@ -33,7 +33,7 @@ By hosting, adapting, or running this application, you agree to comply with the 
 To ensure absolute compliance with copyright laws and trademark fair use, the following boundaries are strictly enforced:
 
 * **Zero Copyrighted Files Packaged**: This public code repository **does not host, bundle, or distribute any proprietary university course files**, slides, lecture transcripts, exams, textbooks, or protected video datasets.
-* **100% Local Ingestion**: All data ingestion, crawling, database seeding, or file unzipping (`seed.ts`, `check_auth.js`) occurs **entirely locally on the student's personal machine**. The public source code acts merely as a set of algorithmic instructions.
+* **100% Local Ingestion**: All data ingestion, database seeding, or file unzipping (`seed.ts`) occurs **entirely locally on the student's personal machine**. The public source code acts merely as a set of algorithmic instructions.
 * **Personal Authorization**: The platform only processes files that the student already has legitimate, authorized personal access to (such as files downloaded under their own credentials on university edX/MITx portals or course directories).
 * **Trademark Fair Use**: The terms "MIT", "MITx Online", "MIT OpenCourseWare", and all related logos are trademarks of their respective owners. They are used here purely for nominative, descriptive, and non-commercial educational purposes, qualifying as Fair Use under trademark law.
 * **Takedown & Good Faith Cooperation**: In the event that any institution, copyright holder, or faculty member objects to any code reference or default indexing pattern, we commit to immediate good-faith cooperation. Please file an issue on this repository, and any references will be removed or altered within 24 hours.

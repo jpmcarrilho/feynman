@@ -8,13 +8,13 @@ node_modules/
 *.log
 test.js
 
-# Course material downloaded from MIT Learn. It belongs to MIT / MITx and is kept on the student's own machine only, never committed
-# (see ATTRIBUTION.md and LICENSE Part 3). The crawler scripts and README_CRAWLER.md in the same folder are code and stay tracked.
-MIT_Learn_Courses/*/
-MIT_Learn_Courses/*_outline.json
-MIT_Learn_Courses/resources_registry.csv
-MIT_Learn_Courses/main_page.html
+# Course material the student saved from MIT Learn for their own study, and the helper files used for that locally. It belongs to
+# MIT / MITx and stays on the student's own machine, never committed (see ATTRIBUTION.md and LICENSE Part 3).
+MIT_Learn_Courses/
 /comprehensive_review_pe.jpeg
+/check_auth.js
+/package.json
+/package-lock.json
 
 # Summaries and session index files the app writes while the student studies: derived from the course material and from the
 # student's own sessions, kept on the student's machine only

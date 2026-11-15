@@ -82,23 +82,14 @@ The install script needs `web/.env` (with `APP_PASSCODE` and `GOOGLE_API_KEY`) a
 
 Warning: the service opens the real database (`web/dev.db`), so back it up before the first install.
 
-## Data Ingestion, Seeding & Utilities
+## Data Ingestion & Utilities
 
-Data is generated through a crawler pipeline (see `README_CRAWLER.md` in the root).
+Course files are uploaded through the app (new studyspace, or Resources, Add files). Files you saved from a course yourself can live in
+`../MIT_Learn_Courses/` (git-ignored, never committed).
 
-*   `check_auth.js`: A helper script in the root directory to verify your authentication status with the MIT learn platform via Puppeteer. You can configure Chrome paths via `CHROME_PATH` and `CHROME_PROFILE_DIR` environment variables if needed.
-*   **Seeding the Database**: To populate your local SQLite database with crawled courses, topics, and exercises, make sure the crawl records exist under `../MIT_Learn_Courses/` and run:
-    ```bash
-    npx tsx src/scripts/seed.ts
-    ```
-*   **LaTeX Format Fixes**: If there are unescaped LaTeX symbols/formulas in your question prompts, run the cleanup utility:
-    ```bash
-    npx tsx fix-latex-prompts.ts
-    ```
-*   **Image Alignment Fixes**: If some exercise explanations contain external images that are not correctly aligned/rendered in questions, run:
-    ```bash
-    npx tsx fix-images.ts
-    ```
+*   **Seeding the Database** (older, pre-studyspace courses only): `npx tsx src/scripts/seed.ts` reads the files under `../MIT_Learn_Courses/`.
+*   **Exercise files with multi-part problems**: `npx tsx src/scripts/build-edx-exercises.ts <course dir> <output dir>` builds upload files from a course folder you saved (see the header of the script).
+*   **Week labels**: `DATABASE_URL=file:./dev.db npx tsx src/scripts/relabel-weeks.ts <course id> <names.json>` labels the topics of a studyspace with the course weeks (see `src/lib/weekLabels.ts`).
 
 ## Deployment (Google Cloud Run)
 

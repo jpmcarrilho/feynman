@@ -90,7 +90,7 @@ The Resources tab catalogues all ingested course assets:
 * **AI Integration**: Vercel AI SDK (`ai`), `@ai-sdk/google` using Google Gemini models (`gemini-2.0-flash`, `gemini-1.5-pro`)
 * **Interactive Charts**: Responsive data visualization powered by [Recharts](https://recharts.org/)
 * **Formulas & Markdown**: LaTeX mathematical formatting typeset via [KaTeX](https://katex.org/)
-* **Data Ingestion**: Custom Puppeteer crawler and parser scripts for unzipping, reading, and indexing PDFs/CSVs/Markdowns.
+* **Data Ingestion**: server-side parsing of PDFs, text and Markdown files (`pdf-parse`, with a Gemini OCR fallback for scans).
 
 ---
 
@@ -98,7 +98,7 @@ The Resources tab catalogues all ingested course assets:
 
 ```
 dedp/
-├── MIT_Learn_Courses/         # Ingested syllabus slide PDFs, transcripts, and metadata
+├── MIT_Learn_Courses/         # Local, git-ignored folder for course files you saved yourself (not in the repository)
 ├── web/                       # The Next.js web application
 │   ├── prisma/                # SQLite database schema definition (schema.prisma)
 │   ├── public/                # Static assets (SVGs, icons, screenshots)
@@ -109,8 +109,7 @@ dedp/
 │   │   ├── services/          # Prisma database service layers & ingestion handlers
 │   │   └── scripts/           # Seeding, cleanup, and validation helpers
 │   └── package.json           # Web app configuration and script commands
-├── package.json               # Parent directory configuration
-└── check_auth.js              # MIT crawler authentication helper
+└── scripts/                   # run.sh (start the app) and the launchd service installer
 ```
 
 ---

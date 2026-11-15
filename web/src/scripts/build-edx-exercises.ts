@@ -1,4 +1,4 @@
-// Builds the exercise upload files of an edX crawl (MIT_Learn_Courses/<course>) with multi-part problems.
+// Builds the exercise upload files of a course you saved locally (MIT_Learn_Courses/<course>, edX Markdown layout) with multi-part problems.
 //
 //   npx tsx src/scripts/build-edx-exercises.ts <course dir> <output dir>
 //

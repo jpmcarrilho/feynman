@@ -14,7 +14,7 @@ the faculty names, so they are not repeated here. Add them from the course pages
 
 ## What is used, and how it is referenced
 
-- **Lecture transcripts, slides, readings and exercises** are read from the author's own enrolled account and used for personal,
+- **Lecture transcripts, slides, readings and exercises** come from the author's own enrolled account and are used for personal,
   non-commercial self-study. The imported exercises keep the course's own wording and answers.
 - **Questions written by the app** (generated questions, starter questions and multi-part problems) are derived from that material.
   They are marked as AI-written wherever they are shown.
@@ -26,9 +26,8 @@ the faculty names, so they are not repeated here. Add them from the course pages
 
 ## Where the files are
 
-The downloaded course files (transcripts, slides, exercises, readings, datasets) live in `MIT_Learn_Courses/<course>/` on the
-student's own machine. They are git-ignored and are not part of this repository. The crawler scripts that download them, and the
-registry and outline files they create, are code and metadata for the student's own account; the generated files are ignored too.
+The course files (transcripts, slides, exercises, readings, datasets) live in `MIT_Learn_Courses/<course>/` on the student's own
+machine. They are git-ignored and are not part of this repository, and this repository contains no tool for downloading them.
 
 ## Terms
 
