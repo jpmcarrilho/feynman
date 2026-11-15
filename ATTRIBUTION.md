@@ -24,6 +24,12 @@ the faculty names, so they are not repeated here. Add them from the course pages
 - **Papers, datasets and handouts** that the course links (journal articles, working papers, the assignment handouts) belong to their
   authors and publishers. The app only reads them for study; it does not republish them.
 
+## Where the files are
+
+The downloaded course files (transcripts, slides, exercises, readings, datasets) live in `MIT_Learn_Courses/<course>/` on the
+student's own machine. They are git-ignored and are not part of this repository. The crawler scripts that download them, and the
+registry and outline files they create, are code and metadata for the student's own account; the generated files are ignored too.
+
 ## Terms
 
 The course content is not covered by this repository's software licence. The repository `LICENSE` (Part 2) asks that any derivative
