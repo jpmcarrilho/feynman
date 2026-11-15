@@ -7,6 +7,8 @@
 
 The **Feynman Study Platform** is a highly personalized, adaptive, and visually rich educational workspace originally built to help students master complex graduate-level academic curricula. **Please note**: The platform is currently in its initial pre-seeded release state; it does **not yet** support uploading custom files, creating new courses, or customizing topics directly through the user interface. These user-customization features represent our immediate upcoming development milestones.
 
+**Course material and attribution**: the studyspaces use material from MITx courses (14.740x, 14.750x, JPAL102x). See [ATTRIBUTION.md](ATTRIBUTION.md) for the courses, how they are referenced in the app, and the terms.
+
 ### 🌟 Origins of the Platform
 The inception of this platform came directly from my personal journey studying for **MIT's Data, Economics, and Development Policy (DEDP) MicroMasters** program. Faced with highly complex, mathematically rigorous econometric papers, regression tables, and lecture slides, I searched for an active learning assistant that supported typeset LaTeX formulas, diagnostic conceptual-gap analysis, and hands-free conversational Socratic instruction—but found **no existing system** that met those academic needs. To solve this, I designed and built this platform.
 

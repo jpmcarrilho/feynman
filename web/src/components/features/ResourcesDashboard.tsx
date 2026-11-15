@@ -1,5 +1,6 @@
 'use client'
 
+import { SourceCredit } from './SourceCredit'
 import { useEffect, useState } from 'react'
 import { getCourseArtifacts, generateWeekSummaryAction } from '@/app/actions'
 import { Button } from '@/components/ui/button'
@@ -145,6 +146,7 @@ export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, s
             <p className="text-sm text-charcoal-graphite/65 max-w-2xl">
               Explore and study all lecture materials, original slides, video lecture transcripts, reading notes, and AI-generated Feynman summaries of this studyspace, organized per module.
             </p>
+            <SourceCredit courseCode={activeCourseCode} className="mt-2" />
           </div>
           {allowAddFiles && (
             <Button
