@@ -7,71 +7,170 @@ datasource db {
 }
 
 model Course {
-  id          String   @id @default(uuid())
-  code        String   @unique
-  title       String
-  description String?
-  topics      Topic[]
+  id                String         @id @default(uuid())
+  code              String         @unique
+  title             String
+  description       String?
+  profile           String?        // NEW: JSON TutorProfile (accepted persona); null until accepted
+  profileSuggestion String?        // NEW: JSON ProfileSuggestion (initial proposal or "suggested update")
+  goal              String?        // NEW: free text from the wizard
+  starterStatus     String?        // NEW: null | "waiting_for_profile" | "pending" | "running" | "done" | "failed" (starter exercises for a new space, 4.6)
+  createdAt         DateTime       @default(now())   // NEW
+  topics            Topic[]
+  sources           Source[]       // NEW
+  sessions          StudySession[] // NEW
+  plans             StudyPlan[]    // NEW
+}
+
+model Source {                                        // NEW
+  id              String    @id @default(uuid())
+  courseId        String
+  originalName    String
+  mimeType        String
+  sizeBytes       Int
+  storageKey      String    // relative to STORAGE_DIR, e.g. "sources/<courseId>/<sourceId>/original.pdf"
+  bundle          String    @default("initial") // "initial" | "later"
+  status          String    @default("uploaded") // see 4.2
+  failedStage     String?
+  error           String?
+  warning         String?
+  pageCount       Int?
+  charCount       Int?
+  usedOcrFallback Boolean   @default(false)
+  leaseExpiresAt  DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  course          Course    @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  topics          Topic[]
+
+  @@index([courseId])
 }
 
 model Topic {
-  id           String     @id @default(uuid())
-  courseId     String
-  
-  // --- NEW HIERARCHY FIELDS ---
-  week         String?  // e.g., "Week 01"
-  className    String?  // e.g., "Introduction to Political Economy"
-  unit         String?  // e.g., "1"
-  title        String   // Unit Title, e.g., "Intro to Political Economy part1"
-  
-  // --- CONTENT DETAILS ---
-  resourceType String?  // e.g., "Video", "Slides PDF", "Exercise"
-  content      String?   // The actual extracted text from the file
-  localPath    String?  // Keep track of the original file path
+  id             String     @id @default(uuid())
+  courseId       String
+  sourceId       String?    // NEW
+  order          Int        @default(0)  // NEW: global order inside the course
+  week           String?    // UI label "Module"
+  className      String?
+  unit           String?
+  title          String
+  resourceType   String?
+  content        String?
+  localPath      String?
+  summary        String?    // NEW
+  keyTerms       String?    // NEW: JSON string[]
+  isQuantitative Boolean    @default(false) // NEW
+  pageStart      Int?       // NEW
+  pageEnd        Int?       // NEW
 
-  course       Course     @relation(fields: [courseId], references: [id])
-  exercises    Exercise[]
+  course         Course     @relation(fields: [courseId], references: [id], onDelete: Cascade)   // NEW delete rule
+  source         Source?    @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  exercises      Exercise[]
+  groups         ExerciseGroup[]
+
+  @@index([courseId, order])
+  @@index([courseId, week])  // NEW
+  @@index([sourceId])
 }
 
 model Exercise {
-  id            String        @id @default(uuid())
-  topicId       String
-  questionText  String
-  exerciseType  String        @default("single_choice") // "single_choice", "multiple_choice", "numeric", "dropdown"
-  choices       String        // Stored as JSON string
-  correctAnswer String
-  explanation   String?
-  topic         Topic         @relation(fields: [topicId], references: [id])
-  logs          ExerciseLog[]
+  id                   String        @id @default(uuid())
+  topicId              String
+  questionText         String
+  exerciseType         String        @default("single_choice")
+  choices              String
+  correctAnswer        String
+  explanation          String?
+  isGraded             Boolean       @default(true)       // NEW: false for surveys/feedback/participation items (replaces the text filter)
+  origin               String        @default("imported") // NEW: "imported" | "generated" | "starter"
+  status               String        @default("active")   // NEW: "active" | "rejected" | "reported" | "retired"
+  promptVersion        String?       // NEW: prompt version that generated it
+  originalQuestionText String?       // NEW: text before enrichment
+  enrichedAt           DateTime?     // NEW: replaces the "<!-- enriched -->" marker
+  reportedReason       String?       // NEW
+  keyPoints            String?       // JSON string[] (2 to 4 points) for exerciseType "open"; null for every other type
+  groupId              String?       // NEW: the multi-part problem this question belongs to (shared stem), null for a standalone question
+  groupPosition        Int?          // NEW: order inside the group, 0-based
+  createdAt            DateTime      @default(now())      // NEW
+  topic                Topic         @relation(fields: [topicId], references: [id], onDelete: Cascade) // NEW delete rule
+  group                ExerciseGroup? @relation(fields: [groupId], references: [id], onDelete: SetNull)
+  logs                 ExerciseLog[]
+  sessionItems         SessionExercise[] // NEW
+
+  @@index([topicId]) // NEW
+  @@index([groupId])
+}
+
+/// A multi-part problem: a shared stem (setup, model, figure) and its ordered sub-questions (Exercise.groupId/groupPosition).
+model ExerciseGroup {
+  id        String     @id @default(uuid())
+  topicId   String
+  title     String
+  stem      String     // markdown shown above every sub-question
+  origin    String     @default("imported") // "imported" | "generated"
+  status    String     @default("active")
+  createdAt DateTime   @default(now())
+  topic     Topic      @relation(fields: [topicId], references: [id], onDelete: Cascade)
+  exercises Exercise[]
+
+  @@index([topicId])
 }
 
 model StudySession {
-  id           String        @id @default(uuid())
-  title        String?       // e.g., "JPAL102x - Week 4"
-  startTime    DateTime      @default(now())
-  endTime      DateTime?
-  status       String        // e.g., "active", "completed"
-  mode         String        @default("study") // "study" or "exam"
-  timeLimit    Int?          // Time limit in seconds (e.g., 4500 for 1h15m)
-  draftAnswers String?       // JSON string mapping exerciseId -> user's draft answer
-  flaggedIds   String?       // JSON array of exercise IDs flagged for review
-  sourcingMix  Int           @default(50) // % of AI generated questions (0 to 100)
-  diagnosis    String?       // Markdown of the analytical diagnosis report
-  chatLog      String?       // JSON string of chat messages
-  exerciseIds  String?       // JSON array of exercise IDs selected for this session
-  studyPlanId  String?       // Link to the parent curriculum study plan
-  studyPlan    StudyPlan?    @relation(fields: [studyPlanId], references: [id], onDelete: Cascade)
-  logs         ExerciseLog[]
+  id              String        @id @default(uuid())
+  courseId        String?       // NEW (nullable for legacy rows)
+  title           String?
+  startTime       DateTime      @default(now())
+  endTime         DateTime?
+  status          String        // "active" | "completed" | "cancelled" (NEW value)
+  mode            String        @default("study")
+  timeLimit       Int?
+  draftAnswers    String?       // legacy, unused (0 rows hold data); kept to avoid scope creep
+  flaggedIds      String?       // legacy, unused
+  sourcingMix     Int           @default(50)
+  diagnosis       String?
+  chatLog         String?
+  exerciseIds     String?       // legacy; replaced by SessionExercise from T17 on, no longer written after T17
+  studyPlanId     String?
+  topicIds        String?       // NEW: JSON string[] selected when the session started
+  targetCount     Int?          // NEW: requested question count
+  deadline        DateTime?     // NEW: exam end time (server-authoritative timer)
+  currentPosition Int           @default(0) // NEW: resume point
+  course          Course?       @relation(fields: [courseId], references: [id], onDelete: Cascade) // NEW
+  studyPlan       StudyPlan?    @relation(fields: [studyPlanId], references: [id], onDelete: Cascade)
+  logs            ExerciseLog[]
+  items           SessionExercise[] // NEW
+
+  @@index([courseId, startTime])
+}
+
+model SessionExercise {                                  // NEW
+  id           String       @id @default(uuid())
+  sessionId    String
+  exerciseId   String
+  position     Int
+  draftAnswer  String?
+  flagged      Boolean      @default(false)
+  timeSpentSec Int          @default(0)
+  session      StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  exercise     Exercise     @relation(fields: [exerciseId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, exerciseId])
+  @@unique([sessionId, position])
+  @@index([exerciseId])
 }
 
 model StudyPlan {
   id               String         @id @default(uuid())
-  title            String         // e.g., "DEDP 5-Day Exam Sprint"
-  executiveSummary String         // Analytical summary compiled by Gemini
-  status           String         @default("active") // "active", "completed", "archived"
+  courseId         String?        // NEW
+  title            String
+  executiveSummary String
+  status           String         @default("active")
   createdAt        DateTime       @default(now())
   updatedAt        DateTime       @updatedAt
-  sessions         StudySession[] // Pre-created timeline of sessions
+  course           Course?        @relation(fields: [courseId], references: [id], onDelete: Cascade) // NEW
+  sessions         StudySession[]
 }
 
 model ExerciseLog {
@@ -79,9 +178,16 @@ model ExerciseLog {
   sessionId  String
   exerciseId String
   isCorrect  Boolean
-  userAnswer String?      // The exact choice selected by the user
-  duration   Int          // Time taken in seconds
+  score      Float?       // NEW: 0..1 partial credit from gradeAnswer()
+  assisted   Boolean      @default(false) // NEW: tutor was asked before answering
+  userAnswer String?
+  feedback   String?      // JSON { v, keyPoints: [{ point, status }], misconceptions, text, selfScore? } for "open" answers; null otherwise
+  gradedBy   String?      // null (key-graded types and all earlier rows) | "model" | "self" | "pending" (open answer awaiting the model check)
+  duration   Int          // seconds; real visible time from T18 on
   timestamp  DateTime     @default(now())
-  session    StudySession @relation(fields: [sessionId], references: [id])
-  exercise   Exercise     @relation(fields: [exerciseId], references: [id])
+  session    StudySession @relation(fields: [sessionId], references: [id], onDelete: Cascade) // NEW delete rule (was RESTRICT)
+  exercise   Exercise     @relation(fields: [exerciseId], references: [id], onDelete: Cascade) // NEW delete rule (was RESTRICT)
+
+  @@unique([sessionId, exerciseId]) // NEW: also serves lookups by sessionId
+  @@index([exerciseId])             // NEW
 }

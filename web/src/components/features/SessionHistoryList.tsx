@@ -2,6 +2,8 @@
 
 import { Button } from '@/components/ui/button'
 import { History, Trash2 } from 'lucide-react'
+import { LocalDate } from './LocalDate'
+import { sessionHeadline, formatScore } from '@/lib/grading'
 
 interface SessionHistoryListProps {
   histories: any[];
@@ -19,12 +21,8 @@ export function SessionHistoryList({
   return (
     <div className="space-y-2">
       {histories.map(h => {
-        const logs = h.logs || [];
-        const answeredLogs = logs.filter((l: any) => l.userAnswer !== null && l.userAnswer !== undefined && l.userAnswer !== '');
-        const correct = logs.filter((l: any) => l.isCorrect).length;
-        const total = h.mode === 'exam' && h.exerciseIds
-          ? JSON.parse(h.exerciseIds).length
-          : answeredLogs.length;
+        // Same helper as the results dialog: one headline score for the same session
+        const { scoreSum, total, unchecked } = sessionHeadline({ mode: h.mode, exerciseCount: h.exerciseCount, logs: h.logs || [] });
         const isActiveSession = session?.id === h.id;
         return (
           <div 
@@ -37,17 +35,18 @@ export function SessionHistoryList({
             onClick={() => setSelectedHistory(h)}
           >
             <div className="font-medium text-charcoal-graphite">
-              {h.title || new Date(h.startTime).toLocaleString()}
+              {h.title || <LocalDate value={h.startTime} kind="datetime" />}
             </div>
             {h.title && (
               <div className="text-[10px] mt-0.5 text-charcoal-graphite/50">
-                {new Date(h.startTime).toLocaleString()}
+                <LocalDate value={h.startTime} kind="datetime" />
               </div>
             )}
             <div className="mt-1 flex justify-between text-charcoal-graphite/60">
-              <span>Score: {correct}/{total}</span>
-              <span className={h.status === 'active' ? 'text-lecture-red font-semibold' : isActiveSession ? 'text-fountain-ink' : 'text-fountain-ink/80'}>
-                {h.status}
+              <span>{h.status === 'cancelled' ? 'No score' : `Score: ${formatScore(scoreSum)}/${total}`}</span>
+              {unchecked ? <span>{unchecked} not checked yet</span> : null}
+              <span className={h.status === 'active' ? 'text-lecture-red font-semibold' : h.status === 'cancelled' ? 'text-charcoal-graphite/50' : isActiveSession ? 'text-fountain-ink' : 'text-fountain-ink/80'}>
+                {h.status === 'cancelled' ? 'Cancelled' : h.status}
               </span>
             </div>
             <Button

@@ -1,16 +1,13 @@
-import { StudyInterface } from '@/components/features/StudyInterface'
-import { checkIsAuthenticated } from '@/app/auth-actions'
 import { redirect } from 'next/navigation'
+import { checkIsAuthenticated } from '@/app/auth-actions'
 
 export const dynamic = 'force-dynamic'
 
+// The study interface lives under /spaces/[id] now. Authentication is checked first, so a visitor without the
+// passcode lands on the login, not on a list they cannot open.
 export default async function StudyPage() {
-  const isAuthenticated = await checkIsAuthenticated()
-
-  // Guard: if unauthenticated, send them to the home page login gate
-  if (!isAuthenticated) {
+  if (!(await checkIsAuthenticated())) {
     redirect('/')
   }
-
-  return <StudyInterface />
+  redirect('/spaces')
 }

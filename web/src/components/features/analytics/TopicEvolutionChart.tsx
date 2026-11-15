@@ -19,11 +19,10 @@ interface TopicEvolutionChartProps {
 }
 
 export function TopicEvolutionChart({ evolutionData }: TopicEvolutionChartProps) {
-  const [granularity, setGranularity] = useState<'course' | 'week' | 'topic'>('course')
+  const [granularity, setGranularity] = useState<'week' | 'topic'>('week')
   const [metric, setMetric] = useState<'accuracy' | 'coverage' | 'combined'>('combined')
   
   // Track checked lines per granularity level to prevent spaghetti clutter
-  const [checkedCourses, setCheckedCourses] = useState<Record<string, boolean>>({})
   const [checkedWeeks, setCheckedWeeks] = useState<Record<string, boolean>>({})
   const [checkedTopics, setCheckedTopics] = useState<Record<string, boolean>>({})
 
@@ -34,12 +33,8 @@ export function TopicEvolutionChart({ evolutionData }: TopicEvolutionChartProps)
     let map: Record<string, boolean> = {};
     let setMap: React.Dispatch<React.SetStateAction<Record<string, boolean>>> = () => {};
 
-    if (granularity === 'course') {
-      accuracyData = evolutionData.courseData || [];
-      coverageData = evolutionData.courseCoverageData || [];
-      map = checkedCourses;
-      setMap = setCheckedCourses;
-    } else if (granularity === 'week') {
+    // A studyspace is one course, so there is no course level: modules (the `week` data) and topics only
+    if (granularity === 'week') {
       accuracyData = evolutionData.weekData || [];
       coverageData = evolutionData.weekCoverageData || [];
       map = checkedWeeks;
@@ -109,7 +104,7 @@ export function TopicEvolutionChart({ evolutionData }: TopicEvolutionChartProps)
       setCheckedMap: setMap,
       allBaseKeys: finalBaseKeys 
     };
-  }, [granularity, metric, evolutionData, checkedCourses, checkedWeeks, checkedTopics]);
+  }, [granularity, metric, evolutionData, checkedWeeks, checkedTopics]);
 
   // Extract checked line keys
   const activeBaseKeys = useMemo(() => {
@@ -195,17 +190,6 @@ export function TopicEvolutionChart({ evolutionData }: TopicEvolutionChartProps)
           <div className="flex bg-muted p-1 rounded-lg border border-charcoal-graphite/10 shadow-inner gap-1 w-full sm:w-auto justify-between sm:justify-start">
             <button
               type="button"
-              onClick={() => setGranularity('course')}
-              className={`flex-1 sm:flex-initial text-[10px] sm:text-xs px-2.5 py-1.5 rounded-md font-semibold transition-all duration-150 shrink-0 ${
-                granularity === 'course' 
-                  ? 'bg-background text-charcoal-graphite shadow-sm border border-charcoal-graphite/5' 
-                  : 'text-charcoal-graphite/60 hover:text-charcoal-graphite'
-              }`}
-            >
-              🏫 Course
-            </button>
-            <button
-              type="button"
               onClick={() => setGranularity('week')}
               className={`flex-1 sm:flex-initial text-[10px] sm:text-xs px-2.5 py-1.5 rounded-md font-semibold transition-all duration-150 shrink-0 ${
                 granularity === 'week' 
@@ -213,7 +197,7 @@ export function TopicEvolutionChart({ evolutionData }: TopicEvolutionChartProps)
                   : 'text-charcoal-graphite/60 hover:text-charcoal-graphite'
               }`}
             >
-              📅 Week
+              📅 Module
             </button>
             <button
               type="button"

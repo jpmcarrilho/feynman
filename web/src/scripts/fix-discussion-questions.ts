@@ -3,7 +3,7 @@ process.env.DATABASE_URL = process.env.DATABASE_URL || 'file:./dev.db';
 import { PrismaClient } from '@prisma/client'
 import { PrismaBetterSqlite3 } from '@prisma/adapter-better-sqlite3'
 import { generateObject } from 'ai'
-import { google } from '@ai-sdk/google'
+import { textModel } from '../lib/ai'
 import { z } from 'zod'
 
 const adapter = new PrismaBetterSqlite3({ url: 'file:./dev.db' });
@@ -34,7 +34,7 @@ async function main() {
         
         // Dry-run call to Gemini to generate the correct answers and brilliant socratic explanation
         const { object } = await generateObject({
-          model: google('gemini-3.6-flash'),
+          model: textModel(),
           schema: z.object({
             correctAnswer: z.string(),
             explanation: z.string()

@@ -7,3 +7,16 @@ node_modules/
 *.db.bak
 *.log
 test.js
+
+# Course material the student saved from MIT Learn for their own study, and the helper files used for that locally. It belongs to
+# MIT / MITx and stays on the student's own machine, never committed (see ATTRIBUTION.md and LICENSE Part 3).
+MIT_Learn_Courses/
+/comprehensive_review_pe.jpeg
+/check_auth.js
+/package.json
+/package-lock.json
+
+# Summaries and session index files the app writes while the student studies: derived from the course material and from the
+# student's own sessions, kept on the student's machine only
+web/summaries/
+

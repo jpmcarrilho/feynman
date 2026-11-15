@@ -1,13 +1,111 @@
 'use server'
 
+import { expandGroupSelection } from '@/lib/exerciseGroups'
+import { transcriptForSave } from '@/lib/tutorText'
+import { buildSessionTitle } from '@/lib/sessionTitle';
 import { generateText, generateObject } from 'ai'
-import { google } from '@ai-sdk/google'
+import { textModel } from '@/lib/ai'
 import { prisma } from '@/lib/db'
 import { createSessionSummary } from '@/services/summaryService'
 import { getCourseArtifactsService, generateWeekSummaryService } from '@/services/artifactsService'
 import { z } from 'zod'
-import fs from 'fs'
-import path from 'path'
+import { requireAuth } from '@/server/auth'
+import { buildVoiceContext } from '@/services/voiceContext'
+import { getCourseWithProfile, getProfileForTopic, getProfileForCourse, getProfileForCourses } from '@/services/studyspaceService'
+import { cleanCourseId, dominantCourseId, CourseScopeError } from '@/services/courseScope'
+import { getGlobalContext, getPrecedingTopicsContext } from '@/services/contextSearch'
+import { generateNextForSession, type NextExerciseResult } from '@/services/sessionGeneration'
+import {
+  submitExamForSession,
+  finalizeOverdueExams,
+  createSessionWithItems,
+  endPreviousActiveSessions,
+  completeSession,
+  cancelSession,
+  getSessionStateFor,
+  getActiveSessionFor,
+  saveDraftFor,
+  recordStudyTimeFor,
+  setFlaggedFor,
+  setCurrentPositionFor,
+  logAnswerForSession,
+  getSessionResultsFor,
+  type SessionResultItem,
+  type ExamSubmission,
+  type SessionState,
+  type MutationResult,
+} from '@/services/sessionService'
+import { enrichInBackground, isBackgroundEnrichmentEnabled, type EnrichableRow } from '@/services/enrichment'
+import { gradeAnswer, logScore } from '@/lib/grading'
+import { checkSessionStartable as checkSessionStartableFor, SessionNotStartableError, type StartCheck } from '@/services/sessionStartCheck'
+import { isListableSession } from '@/lib/sessionList'
+import { LEGACY_VOICE_PROFILE } from '@/lib/studyspace/legacyProfiles'
+import {
+  explainMistakePrompt,
+  examDiagnosisPrompt,
+  examWrongAnswerBlock,
+  globalDiagnosisPrompt,
+  plannerChatPrompt,
+  studyPlanPrompt,
+} from '@/lib/prompts'
+
+const round2 = (n: number) => Math.round(n * 100) / 100
+
+/** Profile and identity of one course, in the shape getProfileForCourses returns for the unscoped actions. */
+async function getScopedProfile(courseId: string) {
+  const course = await getCourseWithProfile(courseId)
+  if (!course) return { profile: await getProfileForCourse(courseId), courses: [] as { id: string; code: string; title: string; calibrationModule: string | null }[] }
+  return {
+    profile: course.profile,
+    courses: [{ id: course.id, code: course.code, title: course.title, calibrationModule: course.profile.calibrationModule }],
+  }
+}
+
+// Fields the session list, results dialog and plan view read. No chatLog, diagnosis, draftAnswers or flaggedIds.
+// The session's SessionExercise rows are selected only so the server can order the logs by question position and turn
+// them into exerciseCount (see withItemInfo); the id list itself never reaches the client.
+const SESSION_LIST_SELECT = {
+  id: true,
+  title: true,
+  startTime: true,
+  endTime: true,
+  status: true,
+  mode: true,
+  timeLimit: true,
+  sourcingMix: true,
+  studyPlanId: true,
+  courseId: true,
+  items: { select: { exerciseId: true, position: true } },
+  logs: {
+    select: {
+      id: true,
+      exerciseId: true,
+      isCorrect: true,
+      score: true,
+      userAnswer: true,
+      gradedBy: true,
+      timestamp: true,
+      exercise: {
+        select: { id: true, questionText: true, correctAnswer: true, exerciseType: true },
+      },
+    },
+  },
+} as const
+
+/**
+ * Replaces the session's item rows with exerciseCount (its number of questions) and puts each log at the position of
+ * its question: logs are returned in question order and carry `position`. A log without an item (cannot happen for
+ * sessions written by this app) sorts last, in the order it was read.
+ */
+function withItemInfo<T extends { items: { exerciseId: string; position: number }[]; logs: { exerciseId: string }[] }>(session: T) {
+  const { items, logs, ...rest } = session
+  const positionOf = new Map(items.map((i) => [i.exerciseId, i.position]))
+  const ordered = logs
+    .map((log, index) => ({ log, index, position: positionOf.get(log.exerciseId) ?? Number.MAX_SAFE_INTEGER }))
+    .sort((a, b) => a.position - b.position || a.index - b.index)
+    .map(({ log, position }) => ({ ...log, position: position === Number.MAX_SAFE_INTEGER ? null : position }))
+  return { ...rest, logs: ordered, exerciseCount: items.length }
+}
 
 export async function explainMistake({
   questionText,
@@ -15,33 +113,24 @@ export async function explainMistake({
   correctAnswer,
   userAnswer,
   explanation,
-  topicTitle
+  topicTitle,
+  topicId
 }: {
   questionText: string,
   choices: string[],
   correctAnswer: string,
   userAnswer: string,
   explanation?: string | null,
-  topicTitle?: string
+  topicTitle?: string,
+  topicId?: string
 }) {
-  const prompt = `You are an expert tutor for the MIT DEDP MicroMasters.
-The student answered a multiple choice question incorrectly.
-
-Topic: ${topicTitle || 'Unknown'}
-Question: ${questionText}
-Choices:
-${choices.map(c => `- ${c}`).join('\n')}
-
-Correct Answer: ${correctAnswer}
-Student's Answer: ${userAnswer}
-
-Official Explanation: ${explanation || 'None provided.'}
-
-Your task: Gently explain to the student why their answer is incorrect and why the correct answer is right. Use the official explanation if available, but break it down so it's easy to understand. Be encouraging.`
+  await requireAuth()
+  const profile = topicId ? await getProfileForTopic(topicId) : LEGACY_VOICE_PROFILE
+  const prompt = explainMistakePrompt(profile, { questionText, choices, correctAnswer, userAnswer, explanation, topicTitle })
 
   try {
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'), // You can also use gemini-2.0-flash
+      model: textModel(),
       prompt,
     })
     return text
@@ -51,276 +140,119 @@ Your task: Gently explain to the student why their answer is incorrect and why t
   }
 }
 
-export async function getTopics() {
+/**
+ * Order of topics in every list: module label first, then the outline order inside the module. `week` leads because
+ * the module labels sort in module sequence (legacy "Week_NN_...", new spaces "NN · ..."), whereas `order` alone is not
+ * monotonic in the module for the two MIT courses (a few "R Code Solution" topics of weeks 2-10 sit in the week 1
+ * outline section), which would change the sequence in which the UI lists the modules.
+ */
+const TOPIC_ORDER = [{ week: 'asc' }, { order: 'asc' }] as const
+
+/** All topics, or only the topics of one course. */
+export async function getTopics(courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   return prisma.topic.findMany({
-    orderBy: { week: 'asc' },
+    where: scope ? { courseId: scope } : undefined,
+    orderBy: [...TOPIC_ORDER],
     include: { course: true }
   })
 }
 
+/** Transcript text that precedes a lecture/class, by class name. Thin wrapper over getPrecedingTopicsContext. */
 export async function getPreviousLectureTranscripts(courseId: string, currentClassName: string): Promise<string | null> {
+  await requireAuth()
   try {
-    const course = await prisma.course.findUnique({
-      where: { id: courseId }
-    });
-    if (!course) return null;
-
-    const courseCode = course.code;
-    const outlinePath = path.join(process.cwd(), '..', 'MIT_Learn_Courses', `${courseCode}_outline.json`);
-    
-    if (!fs.existsSync(outlinePath)) return null;
-
-    const outline = JSON.parse(fs.readFileSync(outlinePath, 'utf8'));
-
-    // Find the section and index of the current class
-    let targetSection: any = null;
-    let currentLinkIndex = -1;
-
-    for (const section of outline) {
-      const idx = section.links.findIndex((l: any) => l.text === currentClassName);
-      if (idx !== -1) {
-        targetSection = section;
-        currentLinkIndex = idx;
-        break;
-      }
-    }
-
-    if (!targetSection || currentLinkIndex === -1) return null;
-
-    // Search backwards for the first preceding class that contains a transcript in the DB
-    for (let i = currentLinkIndex - 1; i >= 0; i--) {
-      const precedingClassName = targetSection.links[i].text;
-      
-      // Fetch any Transcript topics under this class
-      const transcripts = await prisma.topic.findMany({
-        where: {
-          courseId,
-          className: precedingClassName,
-          resourceType: 'Transcript .txt'
-        }
-      });
-
-      if (transcripts.length > 0) {
-        const transcriptText = transcripts
-          .map(t => `Topic: ${t.title}\nTranscript:\n${t.content || ''}`)
-          .join('\n\n');
-        
-        if (transcriptText.trim().length > 50) {
-          return transcriptText;
-        }
-      }
-    }
+    const anchor = await prisma.topic.findFirst({
+      where: { courseId, className: currentClassName },
+      orderBy: { order: 'asc' },
+      select: { id: true, courseId: true, week: true, order: true, className: true },
+    })
+    if (!anchor) return null
+    // Walk back from the start of the class, so the class itself is not part of its own "preceding" context
+    return await getPrecedingTopicsContext(anchor)
   } catch (error) {
-    console.error("Error fetching previous lecture transcripts:", error);
+    console.error("Error fetching previous lecture transcripts:", error)
+    return null
   }
-  return null;
 }
 
+/** Context from the topics of the course that match the text (see searchTopics); the calibration module is left out. */
 export async function getGlobalCourseContext(courseId: string, text: string): Promise<string> {
-  const academicKeywords = [
-    "ferraz", "finan", "olken", "jones", "acemoglu", "robinson", "johnson", "nichter", "larreguy", 
-    "hsieh", "chavez", "marshall", "trucco", "nunn", "wantchekon", "fujiwara", "duflo", "banerjee", 
-    "kremer", "miguel", "glewwe", "balsakhi", "gobifo", "deworming", "mita", "maisanta", "audits", 
-    "corruption", "weigh station", "checkpoints", "re-election", "property rights", "titling", 
-    "vote-buying", "turnout buying", "media", "social media", "reciprocity", "trust game", "jonesolken", 
-    "ajr", "dell", "maternal", "coercion", "intimidation", "clientelism"
-  ];
-
-  const matchedKeywords: string[] = [];
-  const lowercaseText = text.toLowerCase();
-  for (const keyword of academicKeywords) {
-    if (lowercaseText.includes(keyword)) {
-      matchedKeywords.push(keyword);
-    }
-  }
-
-  if (matchedKeywords.length === 0) return "";
-
-  // Query topics in the database that match these keywords in their title or content
-  const orConditions = matchedKeywords.flatMap(kw => [
-    { title: { contains: kw } },
-    { content: { contains: kw } }
-  ]);
-
-  const matchedTopics = await prisma.topic.findMany({
-    where: {
-      courseId,
-      OR: orConditions,
-      NOT: [
-        { week: { contains: "comprehensive_review" } },
-        { week: { contains: "comprehensive review" } }
-      ]
-    },
-    select: { title: true, content: true, week: true, resourceType: true },
-    take: 10
-  });
-
-  const formattedContext = matchedTopics.map(t => {
-    let contentText = t.content || '';
-    if (contentText.length > 50000) {
-      contentText = contentText.slice(0, 50000) + '... [TRUNCATED]';
-    }
-    return `[Source: ${t.week} - ${t.title} (${t.resourceType})]\n${contentText}`;
-  }).join('\n\n=========================================\n\n');
-
-  return formattedContext;
+  await requireAuth()
+  return getGlobalContext(courseId, text)
 }
 
 export async function getGlobalCourseContextForExercises(courseId: string, exercises: any[]): Promise<string> {
+  await requireAuth()
   const combinedText = exercises.map(ex => ex.questionText).join(' ');
   return getGlobalCourseContext(courseId, combinedText);
 }
 
-export async function needsContextEnrichment(text: string): Promise<boolean> {
-  const lowercase = text.toLowerCase();
-  if (text.includes('<!-- enriched -->')) {
-    // If previous enrichment failed to provide table details (no markdown table | present)
-    if (lowercase.includes('table') && !text.includes('|')) {
-      return true;
-    }
-    return false;
+export type StartSessionInput = {
+  courseId?: string
+  topicIds: string[]
+  count: number
+  mode: 'study' | 'exam'
+  timeLimit: number | null
+  sourcingMix: number
+  weakPct: number
+  unstudiedPct: number
+  expertPct: number
+}
+
+const clampPct = (n: unknown, fallback: number) => (typeof n === 'number' && Number.isFinite(n) ? Math.max(0, Math.min(100, n)) : fallback)
+
+/**
+ * Starts a session: picks the questions (adaptive buckets, unchanged), ends the student's previous active session of
+ * the same scope without destroying answers (a study session is completed, an exam is submitted with its stored
+ * drafts; plan sessions are left alone), and stores the session with its topics, target count, exam deadline and
+ * positional SessionExercise rows. Returns the full SessionState; `missingCount` (targetCount minus the questions
+ * drawn from existing exercises) says how many the client must have generated.
+ * With a courseId the course must exist and every selected topic must belong to it (T16).
+ */
+export async function startSession(input: StartSessionInput): Promise<SessionState> {
+  await requireAuth()
+  const safe = (input ?? {}) as Partial<StartSessionInput>
+  const topicIds = Array.isArray(safe.topicIds) ? [...new Set(safe.topicIds.filter((id): id is string => typeof id === 'string' && id.length > 0))] : []
+  const count = Math.max(1, Math.min(500, Math.floor(Number(safe.count) || 10)))
+  const mode: 'study' | 'exam' = safe.mode === 'exam' ? 'exam' : 'study'
+  const timeLimit = typeof safe.timeLimit === 'number' && safe.timeLimit > 0 ? Math.floor(safe.timeLimit) : null
+  const sourcingMix = clampPct(safe.sourcingMix, 50)
+  const weakPct = clampPct(safe.weakPct, 60)
+  const unstudiedPct = clampPct(safe.unstudiedPct, 20)
+  const expertPct = clampPct(safe.expertPct, 20)
+  const scope = cleanCourseId(safe.courseId)
+  if (scope) {
+    const exists = await prisma.course.findUnique({ where: { id: scope }, select: { id: true } })
+    if (!exists) throw new CourseScopeError('Studyspace not found.')
   }
-  return true;
-}
-
-export async function enrichExerciseWithContext(exercise: any) {
-  try {
-    const topicData = exercise.topic;
-    if (!topicData) return exercise;
-
-    // 1. Fetch preceding lecture transcript context if it exists (highest local fidelity)
-    let contextText = await getPreviousLectureTranscripts(topicData.courseId, topicData.className);
-
-    // 2. If no preceding lecture transcript is found, fallback to global course-wide keyword search
-    if (!contextText) {
-      contextText = await getGlobalCourseContext(topicData.courseId, exercise.questionText);
-    }
-
-    // 3. Fallback to surrounding week topics
-    if (!contextText) {
-      const contextTopics = await prisma.topic.findMany({
-        where: {
-          courseId: topicData.courseId,
-          week: topicData.week
-        }
-      });
-      contextText = contextTopics.map(t => {
-        let text = t.content || '';
-        if (text.length > 100000) {
-          text = text.slice(0, 100000) + '... [TRUNCATED]';
-        }
-        return `Topic: ${t.title}\nContent:\n${text}`;
-      }).join('\n\n');
-    }
-
-    let parsedChoices: string[] = [];
-    try {
-      if (exercise.choices) {
-        parsedChoices = typeof exercise.choices === 'string' ? JSON.parse(exercise.choices) : exercise.choices;
-      }
-    } catch (e) {}
-
-    const prompt = `You are an expert curriculum developer and professor at MIT.
-We have a question from an MIT MicroMasters course that was extracted directly from a sequential series of exercises.
-Because it is played standalone in a flashcard interface, some questions might lack context because they refer to specific research papers, case studies, concrete programs/policies (e.g., the Balsakhi program, the GoBifo study, the Extra Teacher Program), figures, or lecture experiments.
-
-Your task is to review the question and decide if it actually needs context, and then re-generate it accordingly.
-
-Lecture Transcripts / Lesson Context:
-${contextText}
-
-Original Question Text:
-${exercise.questionText}
-
-Exercise Type: ${exercise.exerciseType}
-Choices/Options:
-${parsedChoices.map(c => `- ${c}`).join('\n')}
-Correct Answer: ${exercise.correctAnswer}
-
-Instructions & Constraints:
-
-1. CRITICAL: AVOID ADDING UNNECESSARY CONTEXT OR CONCEPTUAL THEORY:
-   - If the question is a general, purely theoretical, or conceptual question (e.g., "In a cluster randomized evaluation, doubling the sample size will...", "What is statistical power?", or general math/statistics/economics questions), it is already fully self-contained!
-   - For general theoretical/conceptual questions, do NOT add generic textbook preambles, and do NOT explain the theory. You must return the original question text exactly as is (do not summarize, explain, or prepend any generic textbook theory).
-   - ONLY enrich the question if it refers to a concrete, specific real-world case study, a particular research paper/author, a specific program/policy, a specific dataset, or a particular experiment from the lectures that is missing its setup context.
-
-2. RECONSTRUCT MISSING TABLES & DATA:
-   - If the original question refers to a Table (e.g., "Table 1", "Table 2", "according to the table") or a set of regression estimates, and the provided Lesson Context contains those estimates, values, or regression coefficients, you MUST reconstruct that table as a beautiful, clean Markdown table directly inside the enriched question text!
-   - Ensure all column headers and values are accurate based on the context. If the exact table isn't in the context, but the values are described, construct a parallel simplified representation.
-
-3. NEUTRALITY & NO HINTS:
-   - The re-generated text MUST NOT be biased, leading, or hint at the correct answer in any way! It must remain completely neutral and objective.
-   - Do NOT contain, define, explain, or suggest the correct answer, nor rule out any of the incorrect options.
-
-4. CONTEXT INTEGRATION (When needed):
-   - When the question refers to a concrete study/paper/case study (e.g., "Balsakhi program", "GoBifo"), ONLY append the necessary, specific setup details of that program, paper, or research scenario from the lecture transcripts.
-   - Do NOT add a generic textbook lecture summary. Only describe the concrete program/paper setup itself.
-   - Keep the underlying logic, question, options/choices, and correct answer exactly the same.
-   - Remove relative references like "above", "in the video", "in the lecture" and replace them with the concrete name of the program, policy, or dataset being discussed.
-   - Ensure the resulting question text is clear, professional, and directly answerable.
-
-Respond with a JSON object that contains the re-generated question text.
-
-JSON Schema:
-{
-  "enrichedQuestionText": string
-}
-`;
-
-    const { object } = await generateObject({
-      model: google('gemini-3.6-flash'),
-      schema: z.object({
-        enrichedQuestionText: z.string()
-      }),
-      prompt
-    });
-
-    if (object?.enrichedQuestionText) {
-      const enrichedText = `<!-- enriched -->\n${object.enrichedQuestionText}`;
-      
-      // Persist in DB so we never have to do this again for this exercise
-      await prisma.exercise.update({
-        where: { id: exercise.id },
-        data: { questionText: enrichedText }
-      });
-
-      return {
-        ...exercise,
-        questionText: enrichedText
-      };
-    }
-  } catch (error) {
-    console.error(`Failed to enrich exercise ${exercise.id} with context:`, error);
-  }
-  return exercise;
-}
-
-export async function createStudySession(
-  topicIds: string[], 
-  count: number, 
-  mode: 'study' | 'exam' = 'study', 
-  timeLimit: number | null = null, 
-  sourcingMix: number = 50,
-  weakPct: number = 60,
-  unstudiedPct: number = 20,
-  expertPct: number = 20
-) {
   let selected: any[] = []
-  let missingCount = 0;
+  // Candidates the student has never answered, kept for background enrichment (see below)
+  let unstudiedCandidates: EnrichableRow[] = [];
 
-  // Check if we are selecting from a comprehensive review topic
+  // Check if we are selecting from a calibration module (the profile's calibrationModule, e.g. a comprehensive review)
   let isComprehensiveReview = false;
   let comprehensiveCourseId: string | null = null;
+  // Courses of the selected topics, in the order the caller listed them (used to derive the session's course)
+  let selectedTopicCourseIds: string[] = [];
   if (topicIds.length > 0) {
     const selectedTopicsData = await prisma.topic.findMany({
       where: { id: { in: topicIds } }
     });
-    isComprehensiveReview = selectedTopicsData.some(t => 
-      t.week?.toLowerCase().includes('comprehensive_review') || 
-      t.week?.toLowerCase().includes('comprehensive review')
-    );
-    if (isComprehensiveReview && selectedTopicsData.length > 0) {
-      comprehensiveCourseId = selectedTopicsData[0].courseId;
+    // With a scope, topics of another course are rejected before anything is read or written
+    if (scope && selectedTopicsData.some(t => t.courseId !== scope)) throw new CourseScopeError();
+    const courseOfTopic = new Map(selectedTopicsData.map(t => [t.id, t.courseId]));
+    selectedTopicCourseIds = topicIds.map(id => courseOfTopic.get(id)).filter((c): c is string => !!c);
+    const { courses } = await getProfileForCourses(selectedTopicsData.map(t => t.courseId));
+    const calibrationByCourse = new Map(courses.map(c => [c.id, c.calibrationModule]));
+    const calibrationTopic = selectedTopicsData.find(t => {
+      const module = calibrationByCourse.get(t.courseId);
+      return !!module && t.week === module;
+    });
+    isComprehensiveReview = !!calibrationTopic;
+    if (calibrationTopic) {
+      comprehensiveCourseId = calibrationTopic.courseId;
     }
   }
 
@@ -336,42 +268,30 @@ export async function createStudySession(
       // For a comprehensive review session, automatically expand the candidate pool 
       // to include ALL exercises from the entire course to prevent clustered, repetitive questions!
       candidateExercises = await prisma.exercise.findMany({
-        where: { topic: { courseId: comprehensiveCourseId } },
+        where: { topic: { courseId: comprehensiveCourseId }, isGraded: true, status: 'active' },
         include: { topic: true }
       });
     } else {
       candidateExercises = await prisma.exercise.findMany({
-        where: { topicId: { in: topicIds } },
+        where: { topicId: { in: topicIds }, isGraded: true, status: 'active' },
         include: { topic: true }
       });
     }
   } else {
     candidateExercises = await prisma.exercise.findMany({
+      where: scope
+        ? { topic: { courseId: scope }, isGraded: true, status: 'active' }
+        : { isGraded: true, status: 'active' },
       include: { topic: true }
     });
   }
 
-  // Filter out any surveys, feedback forms, or ungraded discussion/demographic questions
-  candidateExercises = candidateExercises.filter(ex => {
-    const qText = ex.questionText.toLowerCase();
-    const tTitle = (ex.topic?.title || "").toLowerCase();
-    const isSurvey = 
-      qText.includes("survey") || 
-      qText.includes("ungraded") || 
-      qText.includes("feedback") || 
-      qText.includes("time spent") || 
-      qText.includes("hours per week") || 
-      qText.includes("how many hours did you spend") ||
-      tTitle.includes("survey") || 
-      tTitle.includes("ungraded") || 
-      tTitle.includes("required participation") ||
-      tTitle.includes("feedback");
-    return !isSurvey;
-  });
+  // Surveys, feedback forms and other ungraded items are excluded by `isGraded: true` in the queries above.
 
   if (candidateExercises.length > 0) {
     // 1. Fetch user accuracy and coverage stats per exercise to group candidates individually
     const logs = await prisma.exerciseLog.findMany({
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
       select: { exerciseId: true, isCorrect: true }
     });
 
@@ -446,85 +366,168 @@ export async function createStudySession(
     }
 
     selected = selectedExercises;
-    missingCount = count - selected.length;
+    unstudiedCandidates = unstudiedPool;
   } else {
     selected = [];
-    missingCount = count;
   }
 
-  // Enrich selected exercises that need context
-  selected = await Promise.all(selected.map(async (ex) => {
-    if (await needsContextEnrichment(ex.questionText)) {
-      return enrichExerciseWithContext(ex);
-    }
-    return ex;
-  }));
-
-  // Determine a descriptive title based on selected courses and weeks
-  let sessionTitle = mode === 'exam' ? "Timed Exam Session" : "Random Study Session";
-  if (topicIds.length > 0) {
-    const selectedTopicsData = await prisma.topic.findMany({
-      where: { id: { in: topicIds } },
-      include: { course: true }
-    });
-    
-    const courseCodes = Array.from(new Set(selectedTopicsData.map(t => t.course?.code).filter(Boolean)));
-    const weeks = Array.from(new Set(selectedTopicsData.map(t => {
-      const w = t.week || "";
-      const match = w.match(/Week_(\d+)/i) || w.match(/Week\s*(\d+)/i);
-      if (match) {
-        return `Week ${parseInt(match[1])}`;
-      }
-      return w.replace(/_/g, ' ').replace(/\s+/g, ' ').trim();
-    }).filter(Boolean)));
-
-    const typePrefix = mode === 'exam' ? "Exam" : "Study";
-
-    if (courseCodes.length > 0 && weeks.length > 0) {
-      sessionTitle = `${courseCodes.join(', ')} - ${weeks.join(', ')} (${typePrefix})`;
-    } else if (courseCodes.length > 0) {
-      sessionTitle = `${courseCodes.join(', ')} ${typePrefix} Session`;
-    } else if (weeks.length > 0) {
-      sessionTitle = `${weeks.join(', ')} ${typePrefix} Session`;
-    }
+  // A multi-part problem is never split: the drawn sub-questions bring their group, in order, and the session may run over the
+  // asked size by one group (standalone questions at the end make room first)
+  const drawnGroupIds = [...new Set(selected.map((e: any) => e.groupId as string | null).filter((id): id is string => !!id))]
+  if (drawnGroupIds.length > 0) {
+    const members = await prisma.exercise.findMany({
+      where: { groupId: { in: drawnGroupIds }, isGraded: true, status: 'active' },
+      include: { topic: true },
+    })
+    const siblings = new Map<string, any[]>()
+    for (const m of members) siblings.set(m.groupId as string, [...(siblings.get(m.groupId as string) ?? []), m])
+    selected = expandGroupSelection(selected, siblings, count)
   }
 
-  const session = await prisma.studySession.create({
-    data: {
-      status: 'active',
-      title: sessionTitle,
-      mode,
-      timeLimit,
-      sourcingMix,
-      exerciseIds: JSON.stringify(selected.map((e: any) => e.id))
-    },
-    include: { logs: true }
+  // Determine a descriptive title based on selected courses and weeks (the title of the studyspace for uploaded ones)
+  const titleTopics = topicIds.length > 0
+    ? await prisma.topic.findMany({
+        where: { id: { in: topicIds } },
+        select: { week: true, sourceId: true, course: { select: { code: true, title: true } } },
+      })
+    : [];
+  const sessionTitle = buildSessionTitle(mode, titleTopics);
+
+  // The session always stores a course. Scoped: that course. Unscoped: the course with most of the selected topics
+  // (ties: the first selected topic's course); with no topics selected, the course with most of the drawn questions.
+  const sessionCourseId = scope
+    ?? dominantCourseId(topicIds.length > 0 ? selectedTopicCourseIds : selected.map((e: { topic?: { courseId?: string } | null }) => e.topic?.courseId));
+
+  // No stored question was drawn: the session lives on generation alone. If nothing can be generated either (checked
+  // from the database only, no model call), no session is created at all.
+  if (selected.length === 0) {
+    const check = await checkSessionStartableFor({ courseId: scope, topicIds, count, sourcingMix })
+    if (!check.startable) throw new SessionNotStartableError(check.message)
+  }
+
+  // The previous active session of this scope ends first (answers are kept), then the new one is stored with its items
+  await endPreviousActiveSessions(scope ? { courseId: scope } : {})
+  const session = await createSessionWithItems({
+    courseId: sessionCourseId,
+    title: sessionTitle,
+    mode,
+    timeLimit,
+    sourcingMix,
+    topicIds,
+    targetCount: count,
+    exerciseIds: selected.map((e: any) => e.id as string),
   })
 
-  return { session, exercises: selected, missingCount }
+  // Optional context enrichment (off unless ENRICH_IN_BACKGROUND=1). It never delays session start and never rewrites a
+  // question the student is about to see: it runs after the response, on never-answered questions that are not in this
+  // session (their improved text is used by later sessions). At most ENRICH_MAX_PER_SESSION_START questions and
+  // ENRICH_MAX_CALLS_PER_BATCH model calls.
+  if (isBackgroundEnrichmentEnabled()) {
+    const selectedIdSet = new Set(selected.map((e) => e.id as string))
+    enrichInBackground(unstudiedCandidates.filter((e) => !selectedIdSet.has(e.id)))
+  }
+
+  const state = await getSessionStateFor(session.id)
+  if (!state) throw new Error('The session could not be read back after it was created.')
+  return state
 }
 
-export async function logAnswer(sessionId: string, exerciseId: string, isCorrect: boolean, duration: number, userAnswer?: string) {
+/**
+ * Asks, before startSession, whether a session over these topics could show any question (stored graded questions
+ * that the sourcing mix leaves room for, or a topic the generator can use). Database reads only. The study screen calls
+ * it first so that it can say why a start is impossible; startSession enforces the same rule.
+ */
+export async function checkSessionStartable(input: Pick<StartSessionInput, 'courseId' | 'topicIds' | 'count' | 'sourcingMix'>): Promise<StartCheck> {
+  await requireAuth()
+  const safe = (input ?? {}) as Partial<StartSessionInput>
+  const topicIds = Array.isArray(safe.topicIds) ? [...new Set(safe.topicIds.filter((id): id is string => typeof id === 'string' && id.length > 0))] : []
+  return checkSessionStartableFor({
+    courseId: cleanCourseId(safe.courseId),
+    topicIds,
+    count: Math.max(1, Math.min(500, Math.floor(Number(safe.count) || 10))),
+    sourcingMix: clampPct(safe.sourcingMix, 50),
+  })
+}
+
+/** The latest active session of the studyspace (all courses when no courseId), or null. See getActiveSessionFor. */
+export async function getActiveSession(courseId?: string): Promise<SessionState | null> {
+  await requireAuth()
+  return getActiveSessionFor(cleanCourseId(courseId))
+}
+
+/**
+ * Full state of one session, read from the server (questions in order, drafts, flags, answers, remaining questions to
+ * generate, deadline and server clock). An exam whose deadline passed more than 30 s ago is finalized with its stored
+ * drafts first. Null when the session does not exist or, with a courseId, belongs to another course.
+ */
+export async function getSessionState(sessionId: string, courseId?: string): Promise<SessionState | null> {
+  await requireAuth()
+  if (typeof sessionId !== 'string' || !sessionId) return null
+  return getSessionStateFor(sessionId, cleanCourseId(courseId))
+}
+
+/** Stores one exam draft (null clears it; undefined keeps the stored draft and only adds time). Does nothing and reports a reason for a non-item, an inactive session or after the deadline. */
+export async function saveDraft(sessionId: string, exerciseId: string, draftAnswer: string | null | undefined, timeSpentDeltaSec: number = 0): Promise<MutationResult> {
+  await requireAuth()
+  return saveDraftFor(sessionId, exerciseId, draftAnswer, timeSpentDeltaSec)
+}
+
+/** Adds visible seconds to a question of an active study session (an exam adds its time through saveDraft). */
+export async function recordCardTime(sessionId: string, exerciseId: string, deltaSec: number): Promise<MutationResult> {
+  await requireAuth()
+  return recordStudyTimeFor(sessionId, exerciseId, deltaSec)
+}
+
+export async function setFlagged(sessionId: string, exerciseId: string, flagged: boolean): Promise<MutationResult> {
+  await requireAuth()
+  return setFlaggedFor(sessionId, exerciseId, flagged)
+}
+
+export async function setCurrentPosition(sessionId: string, position: number): Promise<MutationResult> {
+  await requireAuth()
+  return setCurrentPositionFor(sessionId, position)
+}
+
+/**
+ * Grades the answer on the server (gradeAnswer on the stored exercise) and logs it. The client no longer sends
+ * correctness. First attempt wins: a repeat for the same (sessionId, exerciseId) returns the stored result.
+ */
+export async function logAnswer(
+  sessionId: string,
+  exerciseId: string,
+  userAnswer: string,
+  opts?: { durationSec?: number; assisted?: boolean }
+): Promise<{ score: number; isCorrect: boolean } | null> {
+  await requireAuth()
+  // A stale browser tab running the old client would pass a boolean here. The service accepts the answer only for an
+  // item of an active study session; anything else returns null and writes nothing.
+  return logAnswerForSession(sessionId, exerciseId, userAnswer, opts)
+}
+
+/**
+ * Submits a timed exam: grades every question of the session on the server (unanswered ones score 0), creates the
+ * logs and completes the session in one transaction. Answers come from the drafts stored on the server; `answers` is
+ * optional and overrides them per question until the deadline plus 30 s. Repeating the call changes nothing and
+ * returns the same totals.
+ */
+export async function submitExam(sessionId: string, answers?: Record<string, string>): Promise<ExamSubmission | null> {
+  await requireAuth()
   try {
-    await prisma.exerciseLog.create({
-      data: {
-        sessionId,
-        exerciseId,
-        isCorrect,
-        userAnswer,
-        duration
-      }
-    })
-  } catch (error: any) {
-    console.error("Failed to log answer (likely stale session):", error.message)
+    return await submitExamForSession(sessionId, answers)
+  } catch (error) {
+    console.error("Failed to submit exam:", error instanceof Error ? error.message : error)
+    return null
   }
 }
 
 export async function saveChatLog(sessionId: string, messages: any[]) {
+  await requireAuth()
   try {
+    // Injected voice context and directive echoes are never part of the transcript (also cleans logs from older clients)
+    const transcript = transcriptForSave(messages || [])
     await prisma.studySession.update({
       where: { id: sessionId },
-      data: { chatLog: JSON.stringify(messages) }
+      data: { chatLog: JSON.stringify(transcript) }
     })
   } catch (error: any) {
     console.error("Failed to save chat log (likely stale session):", error.message)
@@ -532,28 +535,63 @@ export async function saveChatLog(sessionId: string, messages: any[]) {
 }
 
 export async function finishStudySession(sessionId: string) {
+  await requireAuth()
   try {
-    return await prisma.studySession.update({
-      where: { id: sessionId },
-      data: { 
-        status: 'completed',
-        endTime: new Date()
-      }
-    })
+    // Study session: marked completed (only while active). Exam: submitted with its stored drafts.
+    return await completeSession(sessionId)
   } catch (error: any) {
     console.error("Failed to finish study session:", error.message)
-    return null
+    return false
   }
 }
 
-export async function getSessionHistory() {
-  return prisma.studySession.findMany({
+export async function cancelStudySession(sessionId: string) {
+  await requireAuth()
+  try {
+    // No logs are written: a cancelled exam has no score. Only an active session can be cancelled.
+    return await cancelSession(sessionId)
+  } catch (error) {
+    console.error("Failed to cancel study session:", error instanceof Error ? error.message : error)
+    return false
+  }
+}
+
+/**
+ * Session list. With a courseId: the sessions stored under that course (a session belongs to the course it was started
+ * in), without the course's diagnosis holder row (mode 'global_diagnosis', not a study session). Without: all rows.
+ * Finished sessions that have no answers are left out (see isListableSession); running sessions and cancelled exams stay.
+ */
+export async function getSessionHistory(courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
+  // An exam whose deadline passed is never listed as active: it is finalized with its stored drafts first
+  await finalizeOverdueExams(scope ? { courseId: scope } : {})
+  const sessions = await prisma.studySession.findMany({
+    where: scope ? { courseId: scope, mode: { not: 'global_diagnosis' } } : undefined,
     orderBy: { startTime: 'desc' },
-    include: { logs: { include: { exercise: true } } }
+    select: SESSION_LIST_SELECT
+  })
+  // Sessions without answers that are over (double-click leftovers, sessions ended at once) stay in the database but are not history
+  return sessions.map(withItemInfo).filter((s) => isListableSession({ status: s.status, logCount: s.logs.length }))
+}
+
+/** Every question of a session in order, with its answer or null; what the results dialog lists. */
+export async function getSessionResults(sessionId: string): Promise<SessionResultItem[]> {
+  await requireAuth()
+  if (typeof sessionId !== 'string' || !sessionId) return []
+  return getSessionResultsFor(sessionId)
+}
+
+export async function getSessionDetail(sessionId: string) {
+  await requireAuth()
+  return prisma.studySession.findUnique({
+    where: { id: sessionId },
+    select: { chatLog: true, diagnosis: true }
   })
 }
 
 export async function getClassContextForTopic(topicId: string) {
+  await requireAuth()
   const topic = await prisma.topic.findUnique({ where: { id: topicId } })
   if (!topic || !topic.className) return null
   
@@ -566,35 +604,37 @@ export async function getClassContextForTopic(topicId: string) {
   })
   
   return classTopics.map(t => ({
+    id: t.id,
     title: t.title,
     content: t.content,
-    localPath: t.localPath
   }))
 }
 
-export async function getSessionWithExercises(sessionId: string) {
-  const session = await prisma.studySession.findUnique({
-    where: { id: sessionId },
-    include: { logs: { include: { exercise: true } } }
-  })
-  
-  if (!session || !session.exerciseIds) return null
-
-  const ids = JSON.parse(session.exerciseIds) as string[]
-  const exercises = await prisma.exercise.findMany({
-    where: { id: { in: ids } },
-    include: { topic: { include: { course: true } } }
-  })
-
-  // Restore original order
-  const orderedExercises = ids.map(id => exercises.find(e => e.id === id)).filter(Boolean)
-
-  return { session, exercises: orderedExercises }
+export async function getVoiceContextForExercise(exerciseId: string, mode: string) {
+  await requireAuth()
+  return buildVoiceContext({ exerciseId, mode })
 }
 
-export async function getAnalyticsData() {
+/**
+ * Dashboard numbers. With a courseId every figure covers only that course: its sessions (not cancelled, not the
+ * diagnosis holder), the logs of questions that belong to the course, its topics and its diagnosis. A session started
+ * across courses (only possible before scoping) belongs to the course stored on it; its answers to the other course's
+ * questions are not counted here.
+ */
+export async function getAnalyticsData(courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
+  await finalizeOverdueExams(scope ? { courseId: scope } : {})
   const sessions = await prisma.studySession.findMany({
-    include: { logs: { include: { exercise: { include: { topic: { include: { course: true } } } } } } }
+    where: scope
+      ? { status: { not: 'cancelled' }, courseId: scope, mode: { not: 'global_diagnosis' } }
+      : { status: { not: 'cancelled' } },
+    include: {
+      logs: {
+        where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
+        include: { exercise: { include: { topic: { include: { course: true } } } } },
+      },
+    }
   });
 
   const totalSessions = sessions.length;
@@ -622,8 +662,10 @@ export async function getAnalyticsData() {
     session.logs.forEach(log => {
       if (log.userAnswer === null || log.userAnswer === undefined || log.userAnswer === '') return;
 
+      // Partial credit: every aggregate below sums per-question scores (legacy logs count as 1 or 0)
+      const pts = logScore(log);
       totalExercises++;
-      if (log.isCorrect) totalCorrect++;
+      totalCorrect += pts;
 
       const courseCode = log.exercise?.topic?.course?.code || 'Unknown';
       const week = log.exercise?.topic?.week || 'Unknown';
@@ -635,7 +677,7 @@ export async function getAnalyticsData() {
         courseStats[courseCode] = { total: 0, correct: 0 };
       }
       courseStats[courseCode].total++;
-      if (log.isCorrect) courseStats[courseCode].correct++;
+      courseStats[courseCode].correct += pts;
 
       if (!heatmapStats[courseCode]) {
         heatmapStats[courseCode] = {};
@@ -644,7 +686,7 @@ export async function getAnalyticsData() {
         heatmapStats[courseCode][week] = { total: 0, correct: 0, classes: {} };
       }
       heatmapStats[courseCode][week].total++;
-      if (log.isCorrect) heatmapStats[courseCode][week].correct++;
+      heatmapStats[courseCode][week].correct += pts;
 
       // Nest class/subtopic details
       const classKey = className;
@@ -657,7 +699,7 @@ export async function getAnalyticsData() {
         };
       }
       heatmapStats[courseCode][week].classes[classKey].total++;
-      if (log.isCorrect) heatmapStats[courseCode][week].classes[classKey].correct++;
+      heatmapStats[courseCode][week].classes[classKey].correct += pts;
 
       const subtopicKey = `${unit ? `Unit ${unit}: ` : ''}${subtopicTitle}`;
       if (!heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey]) {
@@ -669,7 +711,7 @@ export async function getAnalyticsData() {
         };
       }
       heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].total++;
-      if (log.isCorrect) heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].correct++;
+      heatmapStats[courseCode][week].classes[classKey].subtopics[subtopicKey].correct += pts;
     });
   });
 
@@ -692,14 +734,14 @@ export async function getAnalyticsData() {
           title: sub.title,
           accuracy: sub.total > 0 ? Math.round((sub.correct / sub.total) * 100) : 0,
           total: sub.total,
-          correct: sub.correct
+          correct: round2(sub.correct)
         }));
         
         return {
           className: cl.className,
           accuracy: cl.total > 0 ? Math.round((cl.correct / cl.total) * 100) : 0,
           total: cl.total,
-          correct: cl.correct,
+          correct: round2(cl.correct),
           subtopics
         };
       });
@@ -718,25 +760,28 @@ export async function getAnalyticsData() {
     .filter(s => s.mode === 'exam' && s.status === 'completed')
     .map(s => {
       const totalQs = s.logs.length;
-      const correctQs = s.logs.filter(l => l.isCorrect).length;
+      const fullyCorrect = s.logs.filter(l => l.isCorrect).length;
+      const scoreSum = s.logs.reduce((sum, l) => sum + logScore(l), 0);
       return {
         id: s.id,
         title: s.title || "Timed Exam",
         startTime: s.startTime,
         endTime: s.endTime,
         totalQuestions: totalQs,
-        correctQuestions: correctQs,
-        accuracy: totalQs > 0 ? Math.round((correctQs / totalQs) * 100) : 0,
+        correctQuestions: fullyCorrect,
+        scoreSum: round2(scoreSum),
+        accuracy: totalQs > 0 ? Math.round((scoreSum / totalQs) * 100) : 0,
         diagnosis: s.diagnosis
       };
     })
     .sort((a, b) => new Date(b.startTime).getTime() - new Date(a.startTime).getTime());
 
+  // Unscoped: the course-less row that has always held the global diagnosis. Scoped: the row of that course.
   const globalSession = await prisma.studySession.findFirst({
-    where: { mode: 'global_diagnosis' }
+    where: { mode: 'global_diagnosis', courseId: scope ?? null }
   });
 
-  const evolutionData = await getTopicEvolutionData();
+  const evolutionData = await getTopicEvolutionData(scope);
 
   return {
     totalSessions,
@@ -751,322 +796,51 @@ export async function getAnalyticsData() {
   };
 }
 
-function shuffleArray<T>(array: T[]): T[] {
-  const shuffled = [...array];
-  for (let i = shuffled.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-  }
-  return shuffled;
+/**
+ * Generates one more question for the session. The work lives in `generateNextForSession` (also used by the
+ * `POST /api/sessions/[sessionId]/generate-next` route, which the study interface calls so that a 20-40 second
+ * generation does not block the other server actions: Next.js dispatches server actions one at a time per client).
+ */
+export async function generateNextExercise(sessionId: string, courseId?: string): Promise<NextExerciseResult> {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
+  return scope ? generateNextForSession(sessionId, scope) : generateNextForSession(sessionId)
 }
 
-function determineTargetQuestionType(week: string | null, existingCount: number): 'single_choice' | 'multiple_choice' | 'numeric' | 'dropdown' {
-  const isQuantitativeWeek = 
-    week?.toLowerCase().includes('week_06') || 
-    week?.toLowerCase().includes('week 6') || 
-    week?.toLowerCase().includes('week_09') || 
-    week?.toLowerCase().includes('week 9') || 
-    week?.toLowerCase().includes('week_03') || 
-    week?.toLowerCase().includes('week 3');
+/** Reasons the student can give when reporting a question. */
+const REPORT_REASONS = ['wrong_answer', 'unclear', 'off_topic', 'other'] as const
 
-  if (isQuantitativeWeek) {
-    // Quantitative weeks benefit heavily from numeric answers and multi-select formula proofs
-    const quantTypes: Array<'numeric' | 'multiple_choice' | 'single_choice' | 'dropdown'> = [
-      'numeric',
-      'multiple_choice',
-      'single_choice',
-      'numeric',
-      'multiple_choice',
-      'dropdown'
-    ];
-    return quantTypes[existingCount % quantTypes.length];
-  } else {
-    // Qualitative/operational weeks should completely avoid numeric, relying on scenario case-studies and fill-ins
-    const qualTypes: Array<'single_choice' | 'dropdown' | 'multiple_choice'> = [
-      'single_choice',
-      'dropdown',
-      'single_choice',
-      'multiple_choice',
-      'dropdown'
-    ];
-    return qualTypes[existingCount % qualTypes.length];
-  }
-}
-
-async function fetchRigorExamples(courseId: string): Promise<string> {
-  // Find the Comprehensive Review topic under this course to get rigor style standards
-  const compReviewTopics = await prisma.topic.findMany({
-    where: {
-      courseId,
-      OR: [
-        { week: { contains: "comprehensive_review" } },
-        { week: { contains: "comprehensive review" } }
-      ]
-    },
-    select: { id: true }
-  });
-
-  const compReviewTopicIds = compReviewTopics.map(t => t.id);
-  
-  let rigorExercises: any[] = [];
-  if (compReviewTopicIds.length > 0) {
-    rigorExercises = await prisma.exercise.findMany({
-      where: { topicId: { in: compReviewTopicIds } },
-      take: 3
-    });
-  }
-
-  return rigorExercises.map(ex => {
-    return `Type: ${ex.exerciseType}\nQuestion: ${ex.questionText}\nChoices: ${ex.choices}\nCorrect Answer: ${ex.correctAnswer}`;
-  }).join('\n\n');
-}
-
-async function fetchLocalStyleExamples(topicData: any, topicIds: string[], existingIds: string[]): Promise<any[]> {
-  // Fetch exercises from the same week in the database (including generated ones since user allowed them)
-  let exercises = await prisma.exercise.findMany({
-    where: { 
-      topic: { week: topicData.week, courseId: topicData.courseId }, 
-      id: { notIn: existingIds }
-    },
-    take: 5,
-    include: { topic: true }
-  });
-
-  // Fallback to fetching from all selected topicIds if we don't have enough in this week
-  if (exercises.length < 3) {
-    const fallbackExercises = await prisma.exercise.findMany({
-      where: { 
-        topicId: { in: topicIds }, 
-        id: { notIn: existingIds }
-      },
-      take: 5 - exercises.length,
-      include: { topic: true }
-    });
-    exercises = [...exercises, ...fallbackExercises];
-  }
-
-  return exercises;
-}
-
-async function compileGroundingContext(topicData: any, bucketTopics: any[], localStyleExercises: any[]): Promise<string> {
-  let bucketContext = bucketTopics.map(t => {
-    let text = t.content || '';
-    if (text.length > 100000) text = text.substring(0, 100000) + '...';
-    return `Unit/Topic: ${t.title}\nContent:\n${text}`;
-  }).join('\n\n');
-
-  // For comprehensive reviews, fetch global course context matching papers/keywords in style examples
-  const isCompReview = 
-    topicData.week?.toLowerCase().includes('comprehensive_review') || 
-    topicData.week?.toLowerCase().includes('comprehensive review');
-
-  if (isCompReview) {
-    const globalContext = await getGlobalCourseContextForExercises(topicData.courseId, localStyleExercises);
-    if (globalContext) {
-      bucketContext = `${bucketContext}\n\n=========================================\n\nADDITIONAL GROUNDING CONTEXT FROM PRECEDING LECTURES/SLIDES:\n\n${globalContext}`;
-    }
-  }
-
-  return bucketContext;
-}
-
-export async function generateNextExercise(sessionId: string, topicIds: string[], existingExerciseIds: string[], missingCount: number = 1) {
-  if (topicIds.length === 0) return null;
-
+/**
+ * Marks a question as reported: it is no longer selected for future sessions. Logs and the sessions that already
+ * contain it are untouched, so the student still sees it (and its result) in the current and past sessions.
+ * Works for any origin. Returns false when the reason is unknown or the question cannot be reported.
+ */
+export async function reportExercise(exerciseId: string, reason: string): Promise<boolean> {
+  await requireAuth()
+  const cleaned = typeof reason === 'string' ? reason.trim() : ''
+  if (!exerciseId || !(REPORT_REASONS as readonly string[]).includes(cleaned)) return false
   try {
-    // 1. Find current representation of selected topics in the session to ensure proportional balance
-    const existingExercisesInSession = await prisma.exercise.findMany({
-      where: { id: { in: existingExerciseIds } },
-      select: { topicId: true, questionText: true }
-    });
-
-    const representedTopicIds = new Set(existingExercisesInSession.map(ex => ex.topicId));
-    const uncoveredTopicIds = topicIds.filter(id => !representedTopicIds.has(id));
-
-    // If all selected topics are already represented, fallback to the full list of topicIds
-    const targetPool = uncoveredTopicIds.length > 0 ? uncoveredTopicIds : topicIds;
-
-    // Shuffle targetPool to randomize starting order and eliminate alphabetical or week-sorting bias in selection
-    const shuffledTargetPool = [...targetPool];
-    for (let i = shuffledTargetPool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [shuffledTargetPool[i], shuffledTargetPool[j]] = [shuffledTargetPool[j], shuffledTargetPool[i]];
-    }
-
-    // Identify primaryTopicId first
-    const primaryTopicId = shuffledTargetPool[0];
-    const topicData = await prisma.topic.findUnique({ where: { id: primaryTopicId } });
-    if (!topicData) return null;
-
-    // Fetch local style examples belonging to this target topic's week (can use previously generated ones)
-    const existingExercises = await fetchLocalStyleExamples(topicData, topicIds, existingExerciseIds);
-    const existingExercisesContext = existingExercises.map(ex => {
-      return `Type: ${ex.exerciseType}\nQuestion: ${ex.questionText}\nChoices: ${ex.choices}\nCorrect Answer: ${ex.correctAnswer}`;
-    }).join('\n\n');
-
-    // 2. Determine target question type adaptively based on the week signature
-    const targetType = determineTargetQuestionType(topicData.week, existingExerciseIds.length);
-
-    // 3. To provide more context from the same week to enhance the question, we group topics of the same week
-    const sameWeekTopics = await prisma.topic.findMany({
-      where: { 
-        courseId: topicData.courseId,
-        week: topicData.week
-      }
-    });
-    const sameWeekTopicIdSet = new Set(sameWeekTopics.map(t => t.id));
-    
-    // We filter targetPool for topics from the same week to form our grounding bucket
-    const bucketTopicIds = targetPool.filter(id => sameWeekTopicIdSet.has(id));
-    
-    // If no same-week topics are in targetPool (unlikely), default to just the primary topic
-    if (bucketTopicIds.length === 0) {
-      bucketTopicIds.push(primaryTopicId);
-    }
-
-    const bucketTopics = await prisma.topic.findMany({
-      where: { id: { in: bucketTopicIds } }
-    });
-
-    // 4. Compile core topic bucket context & global course-wide context
-    const bucketContext = await compileGroundingContext(topicData, bucketTopics, existingExercises);
-
-    // 5. Fetch Comprehensive Review style standards for difficulty/rigor calibration
-    const rigorExercisesContext = await fetchRigorExamples(topicData.courseId);
-
-    // 6. Format existing questions in the active session for Gemini's deduplication context
-    const alreadyAskedQuestionsText = existingExercisesInSession
-      .map((ex, idx) => `Question ${idx + 1}: ${ex.questionText}`)
-      .join('\n\n');
-
-    const { object } = await generateObject({
-      model: google('gemini-3.6-flash'),
-      prompt: `You are an MIT economics professor.
-Your goal is to generate EXACTLY 1 NEW exercise for an MIT economics course. The question MUST test concepts and terminology specifically from the Target Topic: "${topicData.title}" in "${topicData.week}".
-
-Here is the primary target content:
-${bucketContext}
-
-CRITICAL WEEK & TOPICS INTEGRITY RULE:
-The generated question, its choices, correct answer, and explanation MUST be based directly on concepts from "${topicData.title}" (in "${topicData.week}"). You may use the other topics from "${topicData.week}" provided in the content for background enhancement, but you MUST NOT write a question about a different week or general topic.
-
-CRITICAL DIFFICULTY & RIGOR CALIBRATION (MIT MicroMasters Final Exam Level):
-The target question you generate must match the high analytical depth, multi-step logical reasoning, and mathematical complexity found on actual MIT final exams.
-To calibrate this difficulty, review these "Comprehensive Review" example questions representing the true final-exam-level rigor and question length:
-${rigorExercisesContext || "No specific comprehensive review style examples available."}
-
-However, do NOT copy their topic. Your generated question MUST test concepts from the Target Topic "${topicData.title}", matching the style, formatting, and academic level of these local week style examples:
-${existingExercisesContext}
-
-CRITICAL: Do NOT copy the specific questions or concepts from the local week style examples listed above. Focus your question entirely on testing the concept of "${topicData.title}".
-
-Here are the questions that are ALREADY present in the student's active study session. You MUST NOT repeat, duplicate, or ask about the exact same concepts or scenarios tested in these questions:
-${alreadyAskedQuestionsText || "No questions have been asked yet in this session."}
-
-CRITICAL DEDUPLICATION RULES:
-1. Review the "ALREADY present" questions listed above. Your newly generated question MUST NOT test the same concept, use the same core scenario, or ask the same question as any of them. It must be completely distinct and test a different concept or scenario from the Target Topic: "${topicData.title}".
-2. The new question MUST be about the concepts described in the Target Topic. Do NOT generate questions about other topics in the surrounding context or style examples.
-3. Ensure that the question covers a concept or uses a scenario from the Target Topic. Every question MUST be completely self-contained (invent hypothetical scenarios or markdown data tables if a concept requires it).
-
-CRITICAL VARIANT GENERATION RULES (VARIATION & RIGOR):
-1. CONCEPTUAL PARALLELISM WITH VARIATION: Use the style examples in the database to generate a conceptually parallel but completely fresh exercise. Do NOT clone existing questions. Instead, adapt their core economic, statistical, or data collection principles into a new, original scenario.
-2. VARY SCENARIOS, TITLES, & SETUPS: Change the titles of researchers, names of programs, policies, geographic locations, and experimental setups. If an existing question uses Olken's corruption study in Indonesia, your new question should describe a parallel hypothetical or actual evaluation in another context (e.g., an educational audit in India or construction in Kenya) to test the same underlying statistical principles.
-3. VARY MATHEMATICAL & CALCULATION PARAMETERS: If the exercise requires any calculations (such as Wald estimates, standard errors, coefficients, utility functions, or regression equations), you MUST change the specific numeric variables, equations, or coefficients. The student should be forced to calculate a completely new result (do not repeat the numerical formulas, values, or options from the examples).
-4. VARY THEORETICAL PERSPECTIVES & ANGLES: Look at the topic from another perspective or analytical angle. For example, if the existing question tests the "exclusion restriction" of an IV, your new question can test the "reduced form", "first stage strength", or discuss why "parallel trends" or "omitted variable bias" would fail in a similar model. If an existing question is from a citizen-candidate perspective, look at it from the voter's perspective, or modify the cost of entry parameter.
-
-CRITICAL GROUNDING AND TRUTHFULNESS RULES:
-1. STRICT GROUNDING: The generated question, choices, correct answer, and official explanation MUST be 100% strictly grounded in and derived from the provided Target Topic content above.
-2. NO EXTERNAL TERMS: You MUST NOT introduce or test any external concepts, acronyms, economic terms, or advanced terminology that are not explicitly defined, mentioned, or discussed in the provided Target Topic Content.
-3. NO EXTRAPOLATIONS: Do not assume the student knows prerequisite or external context that is not directly present in the provided lecture notes/transcript. If a term is not in the provided text, you must not use or refer to it.
-
-CRITICAL SELF-CONTAINEDNESS MANDATE (NO OUTSIDE KNOWLEDGE ASSUMPTION):
-1. MANDATORY CONTEXTUAL BACKGROUND: If your generated question mentions, tests, or refers to any specific research paper, author, academic study, historical event, or public policy (such as Acemoglu et al. 2001, Dell 2010, Olken 2007, Ferraz & Finan 2008, the Balsakhi program, or the Mita system), you MUST explicitly include a clear, 2-3 sentence introductory background summary of that study directly inside the question text itself.
-2. BACKGROUND SETUP SPECIFICS: This summary must explain the study's primary setup (e.g., who/what was studied and where), the methodology used (e.g., differences-in-differences, RCT, or RD design), and any critical parameters.
-3. LOGICAL ANSWERABILITY: Every question must be completely self-contained. A student who has never read the referenced paper or memorized its details must be able to understand the scenario and answer the question successfully purely by using logical reasoning, scientific principles, and the contextual details you have provided in the question text.
-4. NO TRIVIA OR ROTE MEMORIZATION: Avoid testing rote memorization of paper titles or isolated facts. Instead, test the conceptual economic, statistical, or logical principles within the paper's framework, which you must explain in the setup.
-
-COMPREHENSIVE REVIEW SYNTHESIS METHODOLOGY (HOW TO EXTRACT FROM CONTENT):
-You must extract high-signal concepts from the provided Target Topic content and synthesize them into questions that mirror the style, depth, and layout of MIT MicroMasters Comprehensive Review exams:
-1. EMPIRICAL/ECONOMETRIC SYNTHESIS: 
-   - Identify the regression equation or causal identification strategy mentioned in the text (e.g. Difference-in-Differences, Instrumental Variables, or Regression Discontinuity).
-   - Write a self-contained question that explicitly presents the regression equation (using clean LaTeX formatting, e.g., \( Y_{ic} = \alpha + \beta \text{Treatment}_c + \gamma X_i + \epsilon_{ic} \)), defines what each variable represents, and asks about the interpretation, bias, or sign of the coefficients (\(\beta\)).
-2. THEORETICAL/MICROECONOMIC SYNTHESIS:
-   - Identify the economic actor's decisions, payoffs, costs of effort, or utility functions described in the text (e.g., citizen-candidate entry costs, politician rent-seeking, or taxpayer bribe negotiation).
-   - Present the math clearly (e.g., utility \( U_i = p(e) \cdot B - C(e) \)), explain each parameter, and ask questions requiring the student to identify the correct objective function, utility constraint, or the sign/implication of a derivative (e.g., \(\dfrac{db}{dr}\)).
-3. RESEARCH METHODOLOGY & LOGISTICS SYNTHESIS:
-   - Identify the survey design, field pilot, quality control, or IRB ethical principles discussed in the text (e.g., attrition bias, Minimum Detectable Effect standard deviations, dual-entry discrepancies, spot checks, or behavioral trust games).
-   - Present a concrete, self-contained operational scenario (e.g., "A research team is administering surveys in-house...") and ask the student to identify the specific operational issue (e.g., differential coverage bias, social desirability, or telescoping), calculate the MDE, or explain the logical survey skip patterns.
-
-CRITICAL FORMATTING & STRUCTURE INSTRUCTIONS:
-1. EMPIRICAL DATA TABLES: When generating questions for empirical or measurement weeks, you are strongly encouraged to construct a realistic, clean Markdown data table representing survey audit discrepancies, sample allocation matrices, standard deviation blocks, or regression output coefficients. The question must then require the student to analyze, calculate, or interpret values directly from this Markdown table.
-2. NO PLACEHOLDERS: Do not use spinner or loading image placeholders. All images, tables, and references must be fully specified or represented in text/markdown.
-
-CRITICAL FORMAT SELECTION:
-You MUST generate an exercise of type: "${targetType}".
-Follow these rules strictly based on the target type:
-- If "${targetType}" is "single_choice": Create a standard multiple choice question. 'choices' MUST contain exactly 4 options. 'correctAnswer' MUST be the exact matching string of the single correct answer.
-- If "${targetType}" is "multiple_choice": Create a multiple-response check-box question (multiple correct answers allowed). 'choices' MUST contain 4 or 5 options. 'correctAnswer' MUST be a JSON array string containing all of the correct option texts (e.g. '["Option A", "Option C"]').
-- If "${targetType}" is "numeric": Create a question requiring a numerical response. The 'choices' array MUST be completely empty ([]). The 'correctAnswer' MUST be a clean numeric string (e.g. "0.8" or "-0.07"). The 'questionText' should explicitly tell the student: "Please enter your numeric response rounded to two decimal places (for example, -0.07)".
-- If "${targetType}" is "dropdown": Create a fill-in-the-blank sentence. The 'questionText' MUST contain exactly one "[Dropdown 1]" placeholder. The 'choices' array MUST contain 3 to 5 options that could fit in that blank. The 'correctAnswer' MUST be the exact correct literal word/option.`,
-      schema: z.object({
-        newExercise: z.object({
-          questionText: z.string(),
-          exerciseType: z.enum(['single_choice', 'multiple_choice', 'numeric', 'dropdown']),
-          choices: z.array(z.string()),
-          correctAnswer: z.string(),
-          explanation: z.string()
-        })
-      })
-    });
-
-    const genEx = object.newExercise;
-
-    // Explicitly randomize choices to eliminate LLM position bias
-    let finalChoices = genEx.choices;
-    if (genEx.exerciseType === 'single_choice' || genEx.exerciseType === 'multiple_choice' || genEx.exerciseType === 'dropdown') {
-      finalChoices = shuffleArray(genEx.choices);
-    }
-
-    const newEx = await prisma.exercise.create({
-      data: {
-        id: `gen-${crypto.randomUUID()}`,
-        topicId: primaryTopicId,
-        questionText: genEx.questionText,
-        exerciseType: genEx.exerciseType,
-        choices: JSON.stringify(finalChoices),
-        correctAnswer: genEx.correctAnswer,
-        explanation: genEx.explanation
-      },
-      include: { topic: true }
-    });
-
-    // Update session
-    const session = await prisma.studySession.findUnique({ where: { id: sessionId } });
-    if (session) {
-      const currentIds = session.exerciseIds ? JSON.parse(session.exerciseIds) : [];
-      await prisma.studySession.update({
-        where: { id: sessionId },
-        data: { exerciseIds: JSON.stringify([...currentIds, newEx.id]) }
-      });
-    }
-
-    return newEx;
-  } catch (e) {
-    console.error("Failed to generate next exercise:", e);
-    return null;
+    const res = await prisma.exercise.updateMany({
+      // 'rejected' and 'retired' rows are never shown, so there is nothing to report on them
+      where: { id: exerciseId, status: { in: ['active', 'reported'] } },
+      data: { status: 'reported', reportedReason: cleaned },
+    })
+    return res.count > 0
+  } catch (error) {
+    console.error('Failed to report exercise:', error)
+    return false
   }
 }
 
 export async function deleteStudySession(sessionId: string) {
+  await requireAuth()
   try {
-    // Delete logs first to avoid foreign key constraint violations
-    await prisma.exerciseLog.deleteMany({
-      where: { sessionId }
-    });
-    // Delete session
-    await prisma.studySession.delete({
-      where: { id: sessionId }
-    });
+    // Delete dependents first, explicitly, so this works whether or not foreign keys are enforced
+    await prisma.$transaction([
+      prisma.exerciseLog.deleteMany({ where: { sessionId } }),
+      prisma.sessionExercise.deleteMany({ where: { sessionId } }),
+      prisma.studySession.delete({ where: { id: sessionId } }),
+    ]);
     return true;
   } catch (error) {
     console.error("Failed to delete study session:", error);
@@ -1075,6 +849,7 @@ export async function deleteStudySession(sessionId: string) {
 }
 
 export async function generateExamDiagnosis(sessionId: string) {
+  await requireAuth()
   try {
     // 1. Fetch StudySession with logs, exercises and topics
     const session = await prisma.studySession.findUnique({
@@ -1092,104 +867,27 @@ export async function generateExamDiagnosis(sessionId: string) {
 
     if (!session || session.logs.length === 0) return null;
 
-    // 2. Compute metrics (with proportional partial credit & negative marking rule)
+    // 2. Compute metrics from the stored per-question scores (partial credit)
     const totalCount = session.logs.length;
     let examScoreSum = 0;
 
-    const topicPerformance: Record<string, { correct: number, total: number, localPath: string, week: string }> = {};
+    const topicPerformance: Record<string, { correct: number, total: number, topicId: string, week: string }> = {};
     const wrongAnswers: any[] = [];
 
     for (const log of session.logs) {
       const ex = log.exercise;
       const topic = ex.topic;
-      const tTitle = topic?.title || "General Economics";
-      const localPath = topic?.localPath || "";
+      const tTitle = topic?.title || "General";
+      const topicId = topic?.id || "";
       const week = topic?.week || "";
 
-      let partialScore = 0;
-      const draftAns = log.userAnswer || "";
-
-      if (draftAns) {
-        const isUserAnsArray = draftAns.startsWith('[') && draftAns.endsWith(']');
-        const isCorrAnsArray = ex.correctAnswer.startsWith('[') && ex.correctAnswer.endsWith(']');
-
-        if (isUserAnsArray) {
-          try {
-            const userAnsList = JSON.parse(draftAns);
-            const correctAnsList = isCorrAnsArray ? JSON.parse(ex.correctAnswer) : [ex.correctAnswer];
-            const choicesList = ex.choices ? JSON.parse(ex.choices) : [];
-
-            const rightOptions = correctAnsList;
-            const wrongOptions = choicesList.filter((c: string) => !correctAnsList.includes(c));
-
-            const rightSelected = userAnsList.filter((c: string) => rightOptions.includes(c)).length;
-            const wrongSelected = userAnsList.filter((c: string) => wrongOptions.includes(c)).length;
-
-            const totalRight = rightOptions.length;
-            if (totalRight > 0) {
-              const netScore = (rightSelected - wrongSelected) / totalRight;
-              partialScore = Math.max(0, netScore);
-            }
-          } catch {
-            partialScore = 0;
-          }
-        } else if (ex.exerciseType === 'numeric') {
-          const isCorrect = Math.abs(parseFloat(draftAns) - parseFloat(ex.correctAnswer)) < 0.01;
-          partialScore = isCorrect ? 1.0 : 0.0;
-        } else if (ex.exerciseType === 'dropdown') {
-          let isCorrect = false;
-          try {
-            if (draftAns.startsWith('{') && draftAns.endsWith('}')) {
-              const parsedUserAns = JSON.parse(draftAns);
-              const isCorrAnsArray = ex.correctAnswer.startsWith('[') && ex.correctAnswer.endsWith(']');
-              const correctAnsList = isCorrAnsArray ? JSON.parse(ex.correctAnswer) : [ex.correctAnswer];
-              
-              let matchedCount = 0;
-              const totalDropdowns = Object.keys(parsedUserAns).length;
-              
-              for (const [key, userVal] of Object.entries(parsedUserAns)) {
-                const cleanUserVal = String(userVal).trim().toLowerCase();
-                const cleanKey = String(key).trim().toLowerCase();
-                
-                const isMatch = correctAnsList.some((corr: string) => {
-                  const cleanCorr = String(corr).trim().toLowerCase();
-                  if (cleanCorr.includes(cleanKey)) {
-                    const cleanCorrVal = cleanCorr.replace(cleanKey, "").trim();
-                    return cleanCorrVal === cleanUserVal || 
-                           cleanCorrVal.replace(/\\+/g, "") === cleanUserVal.replace(/\\+/g, "");
-                  }
-                  return cleanCorr === cleanUserVal || 
-                         cleanCorr.replace(/\\+/g, "") === cleanUserVal.replace(/\\+/g, "");
-                });
-                
-                if (isMatch) matchedCount++;
-              }
-              
-              if (totalDropdowns === 1) {
-                const userVal = Object.values(parsedUserAns)[0];
-                const cleanUserVal = String(userVal).trim().toLowerCase().replace(/\\+/g, "");
-                const cleanCorr = String(correctAnsList[0]).trim().toLowerCase().replace(/\\+/g, "");
-                isCorrect = cleanUserVal === cleanCorr;
-              } else {
-                isCorrect = matchedCount === totalDropdowns && totalDropdowns === correctAnsList.length;
-              }
-            } else {
-              isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-            }
-          } catch {
-            isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-          }
-          partialScore = isCorrect ? 1.0 : 0.0;
-        } else {
-          const isCorrect = draftAns.trim().toLowerCase() === ex.correctAnswer.trim().toLowerCase();
-          partialScore = isCorrect ? 1.0 : 0.0;
-        }
-      }
+      // The stored score is the source of truth; logs written before scores existed are graded now
+      const partialScore = typeof log.score === 'number' ? log.score : gradeAnswer(ex, log.userAnswer).score;
 
       examScoreSum += partialScore;
 
       if (!topicPerformance[tTitle]) {
-        topicPerformance[tTitle] = { correct: 0, total: 0, localPath, week };
+        topicPerformance[tTitle] = { correct: 0, total: 0, topicId, week };
       }
       topicPerformance[tTitle].total += 1;
       topicPerformance[tTitle].correct += partialScore; // Use precise proportional score
@@ -1201,9 +899,13 @@ export async function generateExamDiagnosis(sessionId: string) {
           correctAnswer: ex.correctAnswer,
           explanation: ex.explanation,
           topicTitle: tTitle,
-          localPath,
+          topicId,
           week,
-          partialScore
+          partialScore,
+          exerciseType: ex.exerciseType,
+          gradedBy: log.gradedBy,
+          feedback: log.feedback,
+          keyPoints: ex.keyPoints,
         });
       }
     }
@@ -1213,65 +915,26 @@ export async function generateExamDiagnosis(sessionId: string) {
     // Format metrics and data for the Gemini model to synthesize
     const topicSummaryString = Object.entries(topicPerformance).map(([title, stats]) => {
       const accuracy = Math.round((stats.correct / stats.total) * 100);
-      return `- **${title}** (${stats.week}): ${stats.correct.toFixed(2)}/${stats.total} Correct (${accuracy}%). File: ${stats.localPath}`;
+      return `- **${title}** (${stats.week}): ${stats.correct.toFixed(2)}/${stats.total} Correct (${accuracy}%). Topic ID: ${stats.topicId || 'none'}`;
     }).join('\n');
 
-    const wrongAnswersString = wrongAnswers.map((w, idx) => {
-      return `### Question Review ${idx + 1}:
-Topic: ${w.topicTitle}
-Question: ${w.question}
-User Answer: "${w.userAnswer || 'Unanswered'}"
-Correct Answer: "${w.correctAnswer}"
-Your Partial Score: ${w.partialScore.toFixed(2)}/1.00
-Official Explanation: ${w.explanation || "No explanation available."}
-Source File Path: ${w.localPath}`;
-    }).join('\n\n');
+    const wrongAnswersString = wrongAnswers.map((w, idx) => examWrongAnswerBlock(idx + 1, w)).join('\n\n');
 
-    const prompt = `You are a brilliant MIT MicroMasters economics professor.
-The student has completed a timed mock exam graded under a proportional partial credit "one wrong cancels one right" scoring protocol. You need to write a deeply professional, encouraging, and detailed analytical diagnostic report.
-
---- EXAM RESULTS OVERVIEW ---
-Overall Proportional Score: ${examScoreSum.toFixed(2)}/${totalCount} (${scorePct}%)
-Mode: ${session.mode} (Timed Exam)
-
---- TOPIC BREAKDOWNS ---
-${topicSummaryString}
-
---- DETAILED WRONG ANSWERS & COGNITIVE MISTAKES ---
-${wrongAnswersString || "No wrong answers! Perfect score!"}
-
-Your output MUST be a gorgeous Markdown document structured exactly as follows:
-
-# Timed Exam Diagnostic Report
-
-## 1. Executive Performance Summary
-Provide a 2-3 sentence overview of their performance. Be encouraging but academically rigorous. Highlight their immediate strengths.
-
-## 2. Topic-by-Topic Mastery Breakdown
-For each tested topic, assign one of these levels:
-- **High Mastery** (Accuracy >= 80%): Short description of what they understand.
-- **Developing Mastery** (Accuracy 50% - 79%): Identify small conceptual gaps.
-- **Critical Remediation Needed** (Accuracy < 50%): Highlight foundational gaps.
-
-## 3. Deep Error Deconstruction
-Review each wrong answer. Explain the *cognitive trap* or economic misinterpretation they fell into (e.g., confusing OLS correlation with causality, failing to solve the first-order conditions, or forgetting how selection bias affects simple difference measures). Explain the underlying economic intuition clearly.
-
-## 4. Tailored Study Plan & Grounding Map
-Generate a clear, numbered list of study tasks.
-For each task, refer to the exact lecture file (using its localPath) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
-Format the links EXACTLY like this:
-- For Slides PDFs: [Source Lecture Slides Title](/api/file?path=URL_ENCODED_LOCAL_PATH#page=ESTIMATED_PAGE_NUMBER) (choose an estimated page number, e.g., 5, where the concept is taught)
-- For Transcripts/Readings: [Source Lecture Title](/api/file?path=URL_ENCODED_LOCAL_PATH&highlight=SHORT_UNIQUE_QUOTE_FROM_TEXT) (choose a 5-10 word unique quote from the text that they should review)
-
-Example:
-1. **Review Multi-stage Randomization**: Read page 15 of [Leaders and Democratic Institutions](/api/file?path=${encodeURIComponent('/Users/name/slides.pdf')}#page=15) to understand how the standard errors cluster.
-2. **Re-evaluate OLS Coefficients**: Review the transcript [OLS Basics](/api/file?path=${encodeURIComponent('/Users/name/transcript.txt')}&highlight=estimate%20the%20OLS%20equation) to brush up on standard error interpretation.
-
-Ensure that ALL file paths used in the links correspond to the actual ones listed in the breakdowns above. If no local file path was provided, use a placeholder. Do NOT invent external domains or paths outside of the provided localPaths.
-`;
+    const examCourse = await getCourseWithProfile(
+      session.courseId ?? session.logs.find((l) => l.exercise?.topic?.courseId)?.exercise.topic?.courseId ?? ''
+    );
+    const prompt = examDiagnosisPrompt(examCourse?.profile ?? LEGACY_VOICE_PROFILE, {
+      courseCode: examCourse?.code,
+      scoreSum: examScoreSum,
+      totalCount,
+      scorePct,
+      sessionMode: session.mode,
+      topicSummary: topicSummaryString,
+      wrongAnswers: wrongAnswersString,
+    });
 
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       prompt
     });
 
@@ -1288,10 +951,17 @@ Ensure that ALL file paths used in the links correspond to the actual ones liste
   }
 }
 
-export async function generateGlobalDiagnosis() {
+/**
+ * Diagnosis over all answers (or, with a courseId, over the answers to that course's questions, with that course's
+ * profile and topics). The text is stored on the diagnosis holder row of the course; unscoped it is the course-less row.
+ */
+export async function generateGlobalDiagnosis(courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     // 1. Fetch all completed logs with exercises and topics
     const logs = await prisma.exerciseLog.findMany({
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
       include: {
         exercise: {
           include: { topic: true }
@@ -1304,7 +974,7 @@ export async function generateGlobalDiagnosis() {
     }
 
     // 2. Group logs by topicId
-    const topicStats: Record<string, { correct: number, total: number, title: string, course: string, week: string, localPath: string }> = {};
+    const topicStats: Record<string, { correct: number, total: number, title: string, course: string, week: string }> = {};
     for (const log of logs) {
       const ex = log.exercise;
       if (!ex || !ex.topic) continue;
@@ -1318,13 +988,10 @@ export async function generateGlobalDiagnosis() {
           title: topic.title || "General",
           course: topic.courseId || "General",
           week: topic.week || "",
-          localPath: topic.localPath || ""
         };
       }
       topicStats[tId].total += 1;
-      if (log.isCorrect) {
-        topicStats[tId].correct += 1;
-      }
+      topicStats[tId].correct += logScore(log);
     }
 
     // Sort topics by accuracy ascending
@@ -1351,73 +1018,42 @@ export async function generateGlobalDiagnosis() {
       }
       return {
         ...wt,
-        courseCode: detail?.course?.code || "DEDP",
+        courseCode: detail?.course?.code || "Unknown",
         content
       };
     });
 
     // Format stats and content summaries for prompt
     const allTopicsSummary = topicList.map(t => {
-      return `- **${t.title}** (${t.course} - ${t.week}): ${t.correct}/${t.total} Correct (${t.accuracy}%). Source: ${t.localPath}`;
+      return `- **${t.title}** (${t.course} - ${t.week}): ${round2(t.correct)}/${t.total} Correct (${t.accuracy}%). Topic ID: ${t.id}`;
     }).join('\n');
 
     const weakTopicsContext = weakTopicsWithContent.map((wt, idx) => {
       return `### Weak Area ${idx + 1}: ${wt.title}
 Course: ${wt.courseCode} (${wt.week})
-Your Accuracy Score: ${wt.correct}/${wt.total} (${wt.accuracy}%)
-Local File Path: ${wt.localPath}
+Your Accuracy Score: ${round2(wt.correct)}/${wt.total} (${wt.accuracy}%)
+Topic ID: ${wt.id}
 Lecture Material Content Summary:
 ${wt.content}`;
     }).join('\n\n');
 
-    const prompt = `You are a brilliant MIT MicroMasters economics professor acting as a Socratic Academic Advisor.
-The student wants a comprehensive **Global Learning Diagnosis & Personalized Study Plan** based on their performance across ALL study and exam sessions.
-
---- GLOBAL PERFORMANCE METRICS ---
-${allTopicsSummary}
-
---- RELEVANT CLASS CONTENT TRANSCRIPTIONS / SLIDES FOR WEAKEST AREAS ---
-${weakTopicsContext || "No weak areas found! Perfect accuracy across all topics!"}
-
-Your output MUST be a beautiful, highly thorough Markdown document structured exactly as follows:
-
-# Global Learning Diagnostic Report
-
-## 1. Executive Learning Profile
-Provide a 3-4 sentence comprehensive analysis of their learning journey across both MITx courses (14.750x and JPAL102x). Identify high-level patterns (e.g. "strong on theoretical RCT layouts, but struggling on mathematical modeling, statistical sampling power, or empirical identification strategies"). Be encouraging but highly rigorous.
-
-## 2. Global Topic Mastery Heatmap
-Categorize their active topics into:
-- **High Mastery** (Accuracy >= 75%)
-- **Developing Mastery** (Accuracy 60% - 74%)
-- **Critical Conceptual Gaps** (Accuracy < 60%)
-
-## 3. Core Conceptual Gaps & Error Deconstructions
-Analyze their weakest areas. Ground your explanations directly in the provided lecture transcriptions/slides above!
-Detail the *precise theoretical or mathematical mistakes* they are making (e.g., explaining why adding more individual observations to clustered samples does not solve power issues if the Intra-cluster Correlation is high, or explaining Olken's media study designs in Indonesia, or Ferraz & Finan's re-election incentive model). Ensure this section is academically rich and deeply informative.
-
-## 4. Tailored Remedial Syllabus & Clickable Grounding Map
-Generate a clear, numbered list of study tasks linking directly to their weak areas.
-For each task, refer to the exact lecture file (using its localPath) with a direct clickable Markdown link so they can click to open and review it in the Visualizer.
-Format the links EXACTLY like this:
-- For Slides PDFs: [Source Lecture Slides Title](/api/file?path=URL_ENCODED_LOCAL_PATH#page=ESTIMATED_PAGE_NUMBER) (choose an estimated page number, e.g., 5, where the concept is taught)
-- For Transcripts/Readings: [Source Lecture Title](/api/file?path=URL_ENCODED_LOCAL_PATH&highlight=SHORT_UNIQUE_QUOTE_FROM_TEXT) (choose a 5-10 word unique quote from the text that they should review)
-
-Example:
-1. **Review Multi-stage Randomization**: Read page 15 of [Leaders and Democratic Institutions](/api/file?path=${encodeURIComponent('/Users/name/slides.pdf')}#page=15) to understand how the standard errors cluster.
-2. **Re-evaluate OLS Coefficients**: Review the transcript [OLS Basics](/api/file?path=${encodeURIComponent('/Users/name/transcript.txt')}&highlight=estimate%20the%20OLS%20equation) to brush up on standard error interpretation.
-
-Ensure that ALL file paths used in the links correspond to the actual ones listed in the breakdowns above. Do NOT invent external domains or paths outside of the provided localPaths.
-`;
+    const profileScope = scope
+      ? await getScopedProfile(scope)
+      : await getProfileForCourses(Object.values(topicStats).map(t => t.course));
+    const prompt = globalDiagnosisPrompt(profileScope.profile, {
+      courseCodes: profileScope.courses.map(c => c.code),
+      topicLines: allTopicsSummary,
+      weakTopicContent: weakTopicsContext,
+    });
 
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       prompt
     });
 
     // Create or update a special StudySession for the global diagnosis
     let globalSession = await prisma.studySession.findFirst({
-      where: { mode: 'global_diagnosis' }
+      where: { mode: 'global_diagnosis', courseId: scope ?? null }
     });
 
     if (globalSession) {
@@ -1431,6 +1067,7 @@ Ensure that ALL file paths used in the links correspond to the actual ones liste
           title: "Global AI Learning Diagnosis",
           status: "completed",
           mode: "global_diagnosis",
+          courseId: scope ?? null,
           diagnosis: text,
           endTime: new Date()
         }
@@ -1444,38 +1081,32 @@ Ensure that ALL file paths used in the links correspond to the actual ones liste
   }
 }
 
-export async function generateSessionSummary(sessionId: string) {
+export async function generateSessionSummary(sessionId: string, courseId?: string) {
+  await requireAuth()
   try {
-    return await createSessionSummary(sessionId);
+    return await createSessionSummary(sessionId, cleanCourseId(courseId));
   } catch (error) {
     console.error('Error in generateSessionSummary action:', error)
     throw error
   }
 }
 
-export async function generatePlannerResponse(messages: any[], accuracyStats: any) {
+/** Planner chat. With a courseId only the persona changes: that course's profile instead of the legacy one. */
+export async function generatePlannerResponse(messages: any[], accuracyStats: any, courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     const formattedHistory = messages.map(m => {
       return `${m.role === 'user' ? 'Student' : 'Professor (Planner)'}: ${m.content}`;
     }).join('\n');
 
-    const prompt = `You are an elite, warm MIT MicroMasters academic planner and Socratic curriculum advisor.
-You are chatting with a student inside their "Study Plan Creator Workspace" to help them formulate their personalized study schedule timeline.
-
-Here is the conversation history so far:
-${formattedHistory}
-
-Here is their current learning accuracy and heatmaps:
-${JSON.stringify(accuracyStats)}
-
-Your goal is to reply in 3-4 sentences. Be encouraging, intellectually rigorous, and follow these socratic guidelines:
-1. Challenge their schedule: If they propose studying 6 hours a day or a very compact timeline, ask them about sustainability and the opportunity costs (what are they giving up?).
-2. Discuss pedagogical techniques: Remind them of the importance of Active Recall and Spaced Repetition (e.g. testing themselves using timed mocks rather than passive reading).
-3. Keep it brief: Be extremely concise, warm, and encourage them to click the "Compile Timeline Schedule" button when they feel ready to see the visual days/slots pre-created!
-`;
+    const prompt = plannerChatPrompt(scope ? await getProfileForCourse(scope) : LEGACY_VOICE_PROFILE, {
+      history: formattedHistory,
+      stats: JSON.stringify(accuracyStats),
+    });
 
     const { text } = await generateText({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       prompt
     });
 
@@ -1506,10 +1137,15 @@ const StudyPlanSchema = z.object({
   sessions: z.array(StudyPlanSessionSchema)
 });
 
-export async function generateStructuredStudyPlan(chatMessages: any[], accuracyStats: any) {
+/** Study plan from the planner chat. With a courseId the topic catalog, the profile and the calibration module are that course's. */
+export async function generateStructuredStudyPlan(chatMessages: any[], accuracyStats: any, courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     // Fetch actual database Topic catalog so Gemini can map correct IDs
     const dbTopics = await prisma.topic.findMany({
+      where: scope ? { courseId: scope } : undefined,
+      ...(scope ? { orderBy: [...TOPIC_ORDER] } : {}),
       select: { id: true, title: true, week: true, courseId: true }
     });
 
@@ -1517,28 +1153,17 @@ export async function generateStructuredStudyPlan(chatMessages: any[], accuracyS
       `ID: "${t.id}" | Course: "${t.courseId}" | Week: "${t.week}" | Title: "${t.title}"`
     ).join('\n');
 
-    const prompt = `You are an elite MIT MicroMasters academic advisor and syllabus curriculum designer.
-A student wants you to create a structured, multi-day, personalized timeline Study Plan (curriculum) to prepare for their exams.
-
-Here is their conversation history, containing their specific study preferences, available hours, and constraints:
-${JSON.stringify(chatMessages)}
-
-Here is their current learning accuracy and heatmaps:
-${JSON.stringify(accuracyStats)}
-
-Here is the exact Catalog of Topics available in the database (including their correct IDs, weeks, and titles):
-${topicsCatalog}
-
-CRITICAL PLANNING RULES:
-1. Identify their weakest areas from the accuracy stats (prioritize areas with accuracy < 60%).
-2. Schedule a chronological timeline (e.g. Tuesday through Friday, Morning/Afternoon/Night slots).
-3. For each scheduled slot, you MUST assign actual, correct topic IDs from the provided database Catalog above. DO NOT invent topic IDs. Look at the Week or Title of the weak area, find its matching IDs in the Catalog, and insert those IDs inside the 'topicIds' array.
-4. On the final days, schedule timed Mock Exams (using 'mode': 'exam') targeting Comprehensive Reviews (assign topics IDs matching Week 13/Week 16 comprehensive reviews).
-5. Compile a type-safe JSON StudyPlan object matching the requested schema.
-`;
+    const profileScope = scope ? await getScopedProfile(scope) : await getProfileForCourses(dbTopics.map(t => t.courseId));
+    const calibrationModules = [...new Set(profileScope.courses.map(c => c.calibrationModule).filter((m): m is string => !!m))];
+    const prompt = studyPlanPrompt(profileScope.profile, {
+      history: JSON.stringify(chatMessages),
+      stats: JSON.stringify(accuracyStats),
+      topicCatalog: topicsCatalog,
+      calibrationModules,
+    });
 
     const { object } = await generateObject({
-      model: google('gemini-3.6-flash'),
+      model: textModel(),
       schema: StudyPlanSchema,
       prompt
     });
@@ -1550,22 +1175,44 @@ CRITICAL PLANNING RULES:
   }
 }
 
-export async function saveAndDeployStudyPlan(planData: any) {
+/**
+ * Saves a plan and pre-creates its sessions. With a courseId the plan and every session store it, and a plan that
+ * names topics of another course is rejected as a whole (returns null, nothing is written). Without: each session
+ * stores the course of most of its topics (ties: the first topic), the plan the course of most topics overall.
+ */
+export async function saveAndDeployStudyPlan(planData: any, courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
+    if (!Array.isArray(planData.sessions)) throw new Error('A study plan needs a list of sessions.')
+    const plannedSessions = planData.sessions as z.infer<typeof StudyPlanSessionSchema>[]
+    const sessionTopicIds = (sd: { topicIds?: unknown } | null | undefined): string[] => (Array.isArray(sd?.topicIds) ? sd.topicIds.filter((id: unknown) => typeof id === 'string') : [])
+    const allTopicIds = [...new Set(plannedSessions.flatMap(sessionTopicIds))]
+    const topicRows = allTopicIds.length > 0
+      ? await prisma.topic.findMany({ where: { id: { in: allTopicIds } }, select: { id: true, courseId: true } })
+      : []
+    if (scope && topicRows.some(t => t.courseId !== scope)) throw new CourseScopeError()
+    const courseOfTopic = new Map(topicRows.map(t => [t.id, t.courseId]))
+    const coursesOf = (ids: string[]) => ids.map(id => courseOfTopic.get(id))
+    const planCourseId = scope ?? dominantCourseId(plannedSessions.flatMap(sd => coursesOf(sessionTopicIds(sd))))
+
     // 1. Create the StudyPlan record
     const plan = await prisma.studyPlan.create({
       data: {
         title: planData.title,
         executiveSummary: planData.executiveSummary,
-        status: "active"
+        status: "active",
+        courseId: planCourseId
       }
     });
 
     // 2. Loop over and pre-create each StudySession pre-populated
-    for (const sessionData of planData.sessions) {
+    for (const sessionData of plannedSessions) {
       // Find matching exercises in the database for the given topicIds to seed this session
       const exercises = await prisma.exercise.findMany({
-        where: { topicId: { in: sessionData.topicIds } },
+        where: scope
+          ? { topicId: { in: sessionData.topicIds }, topic: { courseId: scope }, status: 'active' }
+          : { topicId: { in: sessionData.topicIds }, status: 'active' },
         take: sessionData.questionCount
       });
 
@@ -1578,8 +1225,11 @@ export async function saveAndDeployStudyPlan(planData: any) {
           mode: sessionData.mode,
           timeLimit: sessionData.mode === 'exam' ? sessionData.durationMinutes * 60 : null,
           sourcingMix: sessionData.sourcingMix,
-          exerciseIds: JSON.stringify(exercises.map(e => e.id)),
-          studyPlanId: plan.id
+          topicIds: JSON.stringify(sessionTopicIds(sessionData)),
+          targetCount: exercises.length,
+          items: { create: exercises.map((e, position) => ({ exerciseId: e.id, position })) },
+          studyPlanId: plan.id,
+          courseId: scope ?? dominantCourseId(coursesOf(sessionTopicIds(sessionData))) ?? planCourseId
         }
       });
     }
@@ -1591,16 +1241,22 @@ export async function saveAndDeployStudyPlan(planData: any) {
   }
 }
 
-export async function getStudyPlans() {
+export async function getStudyPlans(courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
-    return await prisma.studyPlan.findMany({
+    await finalizeOverdueExams(scope ? { courseId: scope } : {})
+    const plans = await prisma.studyPlan.findMany({
+      where: scope ? { courseId: scope } : undefined,
       orderBy: { createdAt: 'desc' },
       include: {
         sessions: {
-          include: { logs: true }
+          ...(scope ? { where: { courseId: scope } } : {}),
+          select: SESSION_LIST_SELECT
         }
       }
     });
+    return plans.map(plan => ({ ...plan, sessions: plan.sessions.map(withItemInfo) }));
   } catch (error) {
     console.error("Failed to fetch study plans:", error);
     return [];
@@ -1608,11 +1264,15 @@ export async function getStudyPlans() {
 }
 
 export async function deleteStudyPlan(planId: string) {
+  await requireAuth()
   try {
-    // Cascading deletion handles related StudySessions and ExerciseLogs automatically
-    await prisma.studyPlan.delete({
-      where: { id: planId }
-    });
+    // Explicit order (logs and items, sessions, plan) so it works whether or not foreign keys are enforced
+    await prisma.$transaction([
+      prisma.exerciseLog.deleteMany({ where: { session: { studyPlanId: planId } } }),
+      prisma.sessionExercise.deleteMany({ where: { session: { studyPlanId: planId } } }),
+      prisma.studySession.deleteMany({ where: { studyPlanId: planId } }),
+      prisma.studyPlan.delete({ where: { id: planId } }),
+    ]);
     return true;
   } catch (error) {
     console.error("Failed to delete study plan:", error);
@@ -1620,34 +1280,46 @@ export async function deleteStudyPlan(planId: string) {
   }
 }
 
-export async function getTopicsWithPerformance() {
+export async function getTopicsWithPerformance(courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     const topics = await prisma.topic.findMany({
-      orderBy: { week: 'asc' },
+      where: scope ? { courseId: scope } : undefined,
+      orderBy: [...TOPIC_ORDER],
       include: { course: true }
     });
 
+    // Rejected questions were never shown, so they are not part of any total. Reported ones stay for the accuracy of
+    // what the student already answered, but are not part of the pool they can still cover.
     const exercises = await prisma.exercise.findMany({
-      select: { id: true, topicId: true }
+      where: scope ? { status: { not: 'rejected' }, topic: { courseId: scope } } : { status: { not: 'rejected' } },
+      select: { id: true, topicId: true, status: true, groupId: true }
     });
 
     const logs = await prisma.exerciseLog.findMany({
-      select: { exerciseId: true, isCorrect: true }
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
+      select: { exerciseId: true, isCorrect: true, score: true }
     });
 
     // Compute metrics per topicId
     const topicMetrics = topics.map(t => {
       const topicExercises = exercises.filter(e => e.topicId === t.id);
-      const totalExercises = topicExercises.length;
+      const activeIds = new Set(topicExercises.filter(e => e.status === 'active').map(e => e.id));
+      const totalExercises = activeIds.size;
+      // Multi-part problems among the questions that can still be covered: how many problems and how many parts
+      const activeGrouped = topicExercises.filter((e) => e.status === 'active' && e.groupId)
+      const groupedExercises = activeGrouped.length
+      const groupCount = new Set(activeGrouped.map((e) => e.groupId)).size
 
       const exerciseIds = topicExercises.map(e => e.id);
       const topicLogs = logs.filter(l => exerciseIds.includes(l.exerciseId));
       
       const totalLogged = topicLogs.length;
-      const correctCount = topicLogs.filter(l => l.isCorrect).length;
+      const correctCount = topicLogs.reduce((sum, l) => sum + logScore(l), 0);
 
-      // Uniquely completed exercises
-      const uniquelyCompleted = new Set(topicLogs.map(l => l.exerciseId)).size;
+      // Uniquely completed exercises of the pool that can still be covered
+      const uniquelyCompleted = new Set(topicLogs.filter(l => activeIds.has(l.exerciseId)).map(l => l.exerciseId)).size;
 
       const accuracy = totalLogged > 0 ? Math.round((correctCount / totalLogged) * 100) : null;
       const coverage = totalExercises > 0 ? Math.round((uniquelyCompleted / totalExercises) * 100) : 0;
@@ -1658,12 +1330,14 @@ export async function getTopicsWithPerformance() {
         week: t.week,
         className: t.className,
         unit: t.unit,
-        courseCode: t.course?.code || "DEDP",
+        courseCode: t.course?.code || "Unknown",
         course: t.course ? { id: t.course.id, code: t.course.code, title: t.course.title } : null,
         totalExercises,
         uniquelyCompleted,
         accuracy,
-        coverage
+        coverage,
+        groupedExercises,
+        groupCount,
       };
     });
 
@@ -1674,10 +1348,13 @@ export async function getTopicsWithPerformance() {
   }
 }
 
-export async function getTopicEvolutionData() {
+export async function getTopicEvolutionData(courseId?: string) {
+  await requireAuth()
+  const scope = cleanCourseId(courseId)
   try {
     // 1. Fetch all completed ExerciseLogs with timestamps and exercises details
     const logs = await prisma.exerciseLog.findMany({
+      where: scope ? { exercise: { topic: { courseId: scope } } } : undefined,
       orderBy: { timestamp: 'asc' },
       include: {
         exercise: {
@@ -1699,6 +1376,7 @@ export async function getTopicEvolutionData() {
 
     // Fetch all available exercises in the DB to count total pools for coverage calculation
     const allExercises = await prisma.exercise.findMany({
+      where: scope ? { status: 'active', topic: { courseId: scope } } : { status: 'active' },
       include: {
         topic: {
           include: { course: true }
@@ -1711,7 +1389,7 @@ export async function getTopicEvolutionData() {
     const topicTotals: Record<string, number> = {};
 
     allExercises.forEach(e => {
-      const cCode = e.topic?.course?.code || "DEDP";
+      const cCode = e.topic?.course?.code || "Unknown";
       const wName = e.topic?.week || "General";
       const wTitle = `${cCode} - ${wName.replace(/_+/g, ' ').trim()}`;
       const tTitle = e.topic?.title || "General";
@@ -1734,7 +1412,7 @@ export async function getTopicEvolutionData() {
       return {
         ...l,
         formattedDate,
-        courseCode: l.exercise?.topic?.course?.code || "DEDP",
+        courseCode: l.exercise?.topic?.course?.code || "Unknown",
         weekTitle: wCleaned,
         topicTitle: l.exercise?.topic?.title || "General"
       };
@@ -1765,19 +1443,19 @@ export async function getTopicEvolutionData() {
       if (!courseGroup[d][cCode]) courseGroup[d][cCode] = { correct: 0, total: 0, exerciseIds: new Set() };
       courseGroup[d][cCode].total += 1;
       courseGroup[d][cCode].exerciseIds.add(exId);
-      if (l.isCorrect) courseGroup[d][cCode].correct += 1;
+      courseGroup[d][cCode].correct += logScore(l);
 
       // Week Level (Meso)
       if (!weekGroup[d][wTitle]) weekGroup[d][wTitle] = { correct: 0, total: 0, exerciseIds: new Set() };
       weekGroup[d][wTitle].total += 1;
       weekGroup[d][wTitle].exerciseIds.add(exId);
-      if (l.isCorrect) weekGroup[d][wTitle].correct += 1;
+      weekGroup[d][wTitle].correct += logScore(l);
 
       // Topic Level (Micro)
       if (!topicGroup[d][tTitle]) topicGroup[d][tTitle] = { correct: 0, total: 0, exerciseIds: new Set() };
       topicGroup[d][tTitle].total += 1;
       topicGroup[d][tTitle].exerciseIds.add(exId);
-      if (l.isCorrect) topicGroup[d][tTitle].correct += 1;
+      topicGroup[d][tTitle].correct += logScore(l);
     }
 
     // Compile into flat timelines with running cumulative averages and coverages
@@ -1888,9 +1566,10 @@ export async function getTopicEvolutionData() {
   }
 }
 
-export async function getCourseArtifacts() {
+export async function getCourseArtifacts(courseId?: string) {
+  await requireAuth()
   try {
-    return await getCourseArtifactsService();
+    return await getCourseArtifactsService(cleanCourseId(courseId));
   } catch (error) {
     console.error("Failed to get course artifacts:", error);
     return [];
@@ -1898,6 +1577,7 @@ export async function getCourseArtifacts() {
 }
 
 export async function generateWeekSummaryAction(courseCode: string, weekName: string) {
+  await requireAuth()
   try {
     return await generateWeekSummaryService(courseCode, weekName);
   } catch (error: any) {

@@ -1,6 +1,7 @@
 'use server'
 
 import { cookies } from 'next/headers'
+import { mintLiveToken, type LiveToken } from '@/services/liveToken'
 
 /**
  * Verifies if the request possesses a valid session cookie matching the configured passcode.
@@ -30,7 +31,10 @@ export async function loginWithPasscode(passcode: string): Promise<{ success: bo
     return { success: false, error: 'Server authentication is unconfigured.' }
   }
 
-  if (passcode === securePasscode) {
+  // A passcode pasted on a phone or copied from a terminal often carries a trailing space or newline: compare without them
+  const submitted = typeof passcode === 'string' ? passcode.trim() : ''
+
+  if (submitted !== '' && submitted === securePasscode) {
     const cookieStore = await cookies()
     cookieStore.set('feynman_session', securePasscode, {
       httpOnly: true,
@@ -54,12 +58,12 @@ export async function logout(): Promise<void> {
 }
 
 /**
- * Securely retrieves the Gemini API Key from the server environment, gated by passcode validation.
+ * Mints a short-lived, single-use Gemini Live token for the browser. The API key never leaves the server.
  */
-export async function getGeminiApiKey(): Promise<string> {
+export async function createLiveToken(): Promise<LiveToken> {
   const isAuthenticated = await checkIsAuthenticated()
   if (!isAuthenticated) {
     throw new Error('Unauthorized')
   }
-  return process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || ''
+  return mintLiveToken(process.env.GOOGLE_API_KEY || process.env.GEMINI_API_KEY || '')
 }

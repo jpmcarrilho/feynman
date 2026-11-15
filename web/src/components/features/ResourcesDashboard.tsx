@@ -1,5 +1,6 @@
 'use client'
 
+import { SourceCredit } from './SourceCredit'
 import { useEffect, useState } from 'react'
 import { getCourseArtifacts, generateWeekSummaryAction } from '@/app/actions'
 import { Button } from '@/components/ui/button'
@@ -16,8 +17,12 @@ import {
   Clock,
   CheckCircle,
   FileCode,
-  Award
+  Award,
+  Upload
 } from 'lucide-react'
+
+import { studyGuideBlurb } from '@/lib/studyspace/studyGuide'
+import { AddFilesPanel } from './spaces/AddFilesPanel'
 
 // Simple helper to prettify/format week and titles
 const formatDisplayName = (name: string | null | undefined): string => {
@@ -28,30 +33,44 @@ const formatDisplayName = (name: string | null | undefined): string => {
 }
 
 interface ResourcesDashboardProps {
-  onViewFile: (href: string) => void;
+  /** The studyspace whose materials are listed. */
+  courseId: string;
+  onViewFile: (href: string, title?: string) => void;
   onStartWeekSession: (topicIds: string[], weekName: string) => void;
+  /** True while a session is being created: the practice buttons are disabled so a second click cannot start another. */
+  startingSession?: boolean;
+  /** Subject of the studyspace's tutor profile, named in the study guide blurb. */
+  subject?: string | null;
+  /** Shows "Add files" in the header (uploads that are processed in the background; new topics appear here when a file is ready). */
+  allowAddFiles?: boolean;
+  /** A file was uploaded or became ready (the page may get a tutor-update suggestion). */
+  onFilesActivity?: () => void;
 }
 
-export function ResourcesDashboard({ onViewFile, onStartWeekSession }: ResourcesDashboardProps) {
+export function ResourcesDashboard({ courseId, onViewFile, onStartWeekSession, startingSession = false, subject = null, allowAddFiles = false, onFilesActivity }: ResourcesDashboardProps) {
   const [courses, setCourses] = useState<any[]>([])
   const [loading, setLoading] = useState(true)
   const [activeCourseCode, setActiveCourseCode] = useState<string>('')
   const [searchText, setSearchText] = useState('')
   const [generatingWeek, setGeneratingWeek] = useState<string | null>(null)
+  const [addOpen, setAddOpen] = useState(false)
+  // Bumped when a file added later is ready: the list is read again in place (no loading screen, so the open panel stays)
+  const [reloadKey, setReloadKey] = useState(0)
 
   // Load initial data
   useEffect(() => {
-    getCourseArtifacts().then((data) => {
+    let cancelled = false
+    getCourseArtifacts(courseId).then((data) => {
+      if (cancelled) return
       setCourses(data)
-      if (data.length > 0) {
-        setActiveCourseCode(data[0].courseCode)
-      }
+      setActiveCourseCode((current) => (data.some((c: { courseCode: string }) => c.courseCode === current) ? current : data[0]?.courseCode ?? ''))
       setLoading(false)
     }).catch(err => {
       console.error("Failed to load course artifacts:", err)
-      setLoading(false)
+      if (!cancelled) setLoading(false)
     })
-  }, [])
+    return () => { cancelled = true }
+  }, [courseId, reloadKey])
 
   // Find currently active course
   const activeCourse = courses.find(c => c.courseCode === activeCourseCode)
@@ -66,11 +85,10 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
   }) || []
 
   // Handler for opening files in side-visualizer
-  const handleOpenFile = (localPath: string | null, title: string) => {
-    if (!localPath) return
-    // Format matching the URL expectation of SideVisualizer
-    const formattedUrl = `/api/file?path=${encodeURIComponent(localPath)}`
-    onViewFile(formattedUrl)
+  const handleOpenFile = (link: string | null, title: string) => {
+    if (!link) return
+    // link is an /api/files/... URL built by the server (topic id or summary key)
+    onViewFile(link, title)
   }
 
   // Handler for generating Feynman study guide summary on-demand
@@ -79,12 +97,12 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
     setGeneratingWeek(key)
     try {
       const result = await generateWeekSummaryAction(courseCode, weekName)
-      if (result && result.filePath) {
+      if (result && result.link) {
         // Open the newly generated summary in visualizer
-        handleOpenFile(result.filePath, "Feynman Study Guide: " + formatDisplayName(weekName))
+        handleOpenFile(result.link, "Feynman Study Guide: " + formatDisplayName(weekName))
         
         // Refresh local courses list to reflect summaryExists = true
-        const updatedData = await getCourseArtifacts()
+        const updatedData = await getCourseArtifacts(courseId)
         setCourses(updatedData)
       }
     } catch (err) {
@@ -100,7 +118,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
       <div className="py-24 flex flex-col items-center justify-center text-center gap-4 bg-background h-full font-sans animate-pulse">
         <Loader2 className="w-12 h-12 text-lecture-red animate-spin" />
         <h4 className="font-bold text-lg font-display italic text-charcoal-graphite">Retrieving Course Materials & Study Guides...</h4>
-        <p className="text-sm text-charcoal-graphite/60 max-w-xs">Organizing course slides, transcriptions, and summaries per week</p>
+        <p className="text-sm text-charcoal-graphite/60 max-w-xs">Organizing slides, transcriptions, and summaries per module</p>
       </div>
     )
   }
@@ -111,7 +129,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
         <BookOpen className="w-12 h-12 text-charcoal-graphite/40" />
         <h4 className="font-bold text-lg font-display italic text-charcoal-graphite">No Resources Available</h4>
         <p className="text-sm text-charcoal-graphite/60">
-          Make sure course topics are seeded and loaded in your database. Follow instructions to run the seeder inside your local terminal.
+          This studyspace has no material yet.
         </p>
       </div>
     )
@@ -121,17 +139,36 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
     <div className="w-full max-w-6xl mx-auto space-y-8 pb-16 font-sans">
       
       {/* 1. Header and Intro */}
-      <div className="space-y-2">
-        <h1 className="text-3xl font-bold tracking-tight font-display italic text-charcoal-graphite">Course Resources</h1>
-        <p className="text-sm text-charcoal-graphite/65 max-w-2xl">
-          Explore and study all course lecture materials, original slides, video lecture transcripts, reading notes, and AI-generated Feynman summaries organized dynamically per course and week.
-        </p>
+      <div className="space-y-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div className="space-y-2">
+            <h1 className="text-3xl font-bold tracking-tight font-display italic text-charcoal-graphite">Resources</h1>
+            <p className="text-sm text-charcoal-graphite/65 max-w-2xl">
+              Explore and study all lecture materials, original slides, video lecture transcripts, reading notes, and AI-generated Feynman summaries of this studyspace, organized per module.
+            </p>
+            <SourceCredit courseCode={activeCourseCode} className="mt-2" />
+          </div>
+          {allowAddFiles && (
+            <Button
+              type="button"
+              variant="outline"
+              aria-expanded={addOpen}
+              aria-controls="add-files-panel"
+              onClick={() => setAddOpen((o) => !o)}
+              className="h-10 shrink-0 gap-1.5 self-start px-4 font-semibold sm:h-9"
+            >
+              <Upload className="w-4 h-4" aria-hidden />
+              Add files
+            </Button>
+          )}
+        </div>
+        {allowAddFiles && <AddFilesPanel courseId={courseId} open={addOpen} onTopicsChanged={() => setReloadKey((k) => k + 1)} onActivity={onFilesActivity} />}
       </div>
 
       {/* 2. Search and Course Select Filters */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 bg-card p-4 rounded-xl border border-charcoal-graphite/10 shadow-sm">
-        {/* Course Tabs */}
-        <div className="flex items-center gap-2 overflow-x-auto pb-1 md:pb-0 scrollbar-none">
+        {/* Course Tabs (only when several courses are listed; a studyspace has one) */}
+        <div className={`flex items-center gap-2 overflow-x-auto pb-1 md:pb-0 scrollbar-none ${courses.length > 1 ? '' : 'hidden'}`}>
           {courses.map((course) => (
             <button
               key={course.courseId}
@@ -165,7 +202,7 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
       {/* 3. Weeks List Accordion / Timeline */}
       {filteredWeeks.length === 0 ? (
         <div className="text-center py-16 bg-card border border-charcoal-graphite/15 rounded-xl">
-          <p className="text-sm text-charcoal-graphite/50">No weeks or materials matching your search terms.</p>
+          <p className="text-sm text-charcoal-graphite/50">No modules or materials matching your search terms.</p>
         </div>
       ) : (
         <div className="space-y-6">
@@ -205,11 +242,12 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                   {week.exercisesCount > 0 && (
                     <Button
                       onClick={() => onStartWeekSession(week.topicIds, week.weekName)}
+                      disabled={startingSession}
                       size="sm"
                       className="bg-lecture-red hover:bg-lecture-red/90 text-white font-semibold text-xs rounded-lg shrink-0 flex items-center gap-1.5 shadow-sm animate-sketch-draw h-9"
                     >
                       <Play className="w-3.5 h-3.5 fill-current" />
-                      <span>Practice This Week</span>
+                      <span>Practice This Module</span>
                     </Button>
                   )}
                 </div>
@@ -224,12 +262,12 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                       <h4 className="font-bold text-sm tracking-tight text-charcoal-graphite">Feynman Study Guide</h4>
                     </div>
                     <p className="text-xs text-charcoal-graphite/65 leading-relaxed flex-1">
-                      A structured, concept-demystifying lecture summary compiling the core intuitive economics and policy models, analogies, common pitfalls, and formulas using the Feynman style.
+                      {studyGuideBlurb(subject)}
                     </p>
                     
                     {week.summaryExists ? (
                       <Button
-                        onClick={() => handleOpenFile(week.summaryPath, "Feynman Study Guide: " + formatDisplayName(week.weekName))}
+                        onClick={() => handleOpenFile(week.summaryLink, "Feynman Study Guide: " + formatDisplayName(week.weekName))}
                         variant="outline"
                         size="sm"
                         className="w-full text-xs font-semibold h-9 rounded-lg border-bongo-gold/40 text-bongo-gold bg-bongo-gold/5 hover:bg-bongo-gold/15 flex items-center justify-center gap-1.5 shadow-sm"
@@ -274,8 +312,12 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                         {week.slides.map((slide: any) => (
                           <div 
                             key={slide.id}
-                            onClick={() => handleOpenFile(slide.localPath, slide.title)}
-                            className="p-2.5 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group"
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Open ${slide.title}`}
+                            onClick={() => handleOpenFile(slide.link, slide.title)}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpenFile(slide.link, slide.title) } }}
+                            className="p-2.5 min-h-11 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group focus-visible:outline-2 focus-visible:outline-fountain-ink"
                           >
                             <div className="w-6 h-6 rounded bg-lecture-red/10 text-lecture-red flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
                               PDF
@@ -284,7 +326,9 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                               <p className="text-xs font-semibold text-charcoal-graphite leading-tight truncate group-hover:text-lecture-red transition-colors duration-100">
                                 {slide.title}
                               </p>
-                              {slide.unit && (
+                              {slide.detail ? (
+                                <p className="text-[10px] text-muted-foreground">{slide.detail}</p>
+                              ) : slide.unit && (
                                 <p className="text-[10px] text-muted-foreground">Unit {slide.unit} {slide.className ? `• ${slide.className}` : ''}</p>
                               )}
                             </div>
@@ -308,8 +352,12 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                         {week.transcriptions.map((transcript: any) => (
                           <div 
                             key={transcript.id}
-                            onClick={() => handleOpenFile(transcript.localPath, transcript.title)}
-                            className="p-2.5 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group"
+                            role="button"
+                            tabIndex={0}
+                            aria-label={`Open ${transcript.title}`}
+                            onClick={() => handleOpenFile(transcript.link, transcript.title)}
+                            onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); handleOpenFile(transcript.link, transcript.title) } }}
+                            className="p-2.5 min-h-11 rounded-md border border-charcoal-graphite/5 bg-background hover:bg-muted/35 cursor-pointer transition-all duration-150 flex items-start gap-2.5 group focus-visible:outline-2 focus-visible:outline-fountain-ink"
                           >
                             <div className="w-6 h-6 rounded bg-fountain-ink/10 text-fountain-ink flex items-center justify-center text-[10px] font-bold shrink-0 mt-0.5">
                               TXT
@@ -318,7 +366,9 @@ export function ResourcesDashboard({ onViewFile, onStartWeekSession }: Resources
                               <p className="text-xs font-semibold text-charcoal-graphite leading-tight truncate group-hover:text-fountain-ink transition-colors duration-100">
                                 {transcript.title}
                               </p>
-                              {transcript.unit && (
+                              {transcript.detail ? (
+                                <p className="text-[10px] text-muted-foreground">{transcript.detail}</p>
+                              ) : transcript.unit && (
                                 <p className="text-[10px] text-muted-foreground">Unit {transcript.unit} {transcript.className ? `• ${transcript.className}` : ''}</p>
                               )}
                             </div>

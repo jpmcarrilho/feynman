@@ -355,3 +355,10 @@
   scrollbar-color: rgba(44, 46, 51, 0.15) transparent;
 }
 
+
+/* Block formulas wider than their box scroll inside it instead of widening the page */
+.katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}

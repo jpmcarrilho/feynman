@@ -1,13 +1,17 @@
-import { useState, useRef, useCallback } from 'react'
-import { getGeminiApiKey } from '@/app/auth-actions'
+import { useState, useRef, useCallback, useEffect } from 'react'
+import { createLiveToken } from '@/app/auth-actions'
+import { stripDirectiveEcho } from '@/lib/tutorText'
+import { SpeechDetector, type SpeechSource } from '@/lib/speechDetector'
 
 export type ChatMessage = {
   id: string
   role: 'user' | 'model' | 'system'
   text: string
+  /** Model messages only: the text as received; `text` is what is shown (a leaked directive echo removed). */
+  raw?: string
 }
 
-export function useLiveAPI(systemInstructionText: string) {
+export function useLiveAPI(systemInstructionText: string, onUserSpeech?: (source: SpeechSource) => void) {
   const [isConnected, setIsConnected] = useState(false)
   const [isConnecting, setIsConnecting] = useState(false)
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -15,6 +19,15 @@ export function useLiveAPI(systemInstructionText: string) {
   const [isMuted, setIsMuted] = useState(false)
 
   const isMutedRef = useRef(false)
+  // Called when the student is heard speaking: loud microphone audio while unmuted and connected ('mic'), or an input
+  // transcript of the student's audio ('transcript'). A server `interrupted` event is NOT a signal: the app's own
+  // messages (a new exercise context, a typed message) interrupt the tutor too. It only observes; it never changes what is sent.
+  const onUserSpeechRef = useRef(onUserSpeech)
+  useEffect(() => { onUserSpeechRef.current = onUserSpeech })
+  const [speechDetector] = useState(() => new SpeechDetector())
+  const noteMicChunk = useCallback((buffer: ArrayBuffer) => {
+    if (speechDetector.feed(new Int16Array(buffer))) onUserSpeechRef.current?.('mic')
+  }, [speechDetector])
   const wsRef = useRef<WebSocket | null>(null)
   const audioContextRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -69,6 +82,7 @@ export function useLiveAPI(systemInstructionText: string) {
             // Hook up processor port to current websocket
             processorRef.current.port.onmessage = (e) => {
               if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && !isMutedRef.current) {
+                noteMicChunk(e.data)
                 const base64 = arrayBufferToBase64(e.data)
                 wsRef.current.send(JSON.stringify({
                   realtimeInput: {
@@ -95,7 +109,7 @@ export function useLiveAPI(systemInstructionText: string) {
         }
       }
     }
-  }, [])
+  }, [noteMicChunk])
 
   // Converts ArrayBuffer (PCM16) to Base64 string
   const arrayBufferToBase64 = (buffer: ArrayBuffer) => {
@@ -128,6 +142,13 @@ export function useLiveAPI(systemInstructionText: string) {
     setMessages(prev => {
       // Append text if it's the same role in the last message (streaming accumulation)
       const last = prev[prev.length - 1]
+      if (role === 'model') {
+        // The model's text is kept as received and shown without a leaked directive echo
+        const raw = (last && last.role === role ? (last.raw ?? last.text) : '') + text
+        const shown = { role, raw, text: stripDirectiveEcho(raw) }
+        if (last && last.role === role) return [...prev.slice(0, -1), { ...last, ...shown }]
+        return [...prev, { id: Date.now().toString() + Math.random(), ...shown }]
+      }
       if (last && last.role === role) {
         const newMsg = { ...last, text: last.text + text }
         return [...prev.slice(0, -1), newMsg]
@@ -176,13 +197,29 @@ export function useLiveAPI(systemInstructionText: string) {
     }
   }, [])
 
+  // The attempt in flight, if any. Connecting is idempotent: a second call while one is being set up (Enter pressed in the
+  // text box during "Connecting...", a double click) gets the same promise and opens no second socket and mints no second token.
+  const pendingConnectRef = useRef<Promise<void> | null>(null)
   const connect = (audioEnabled: boolean = true): Promise<void> => {
+    if (pendingConnectRef.current) return pendingConnectRef.current
+    // Already connected: nothing to set up
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return Promise.resolve()
+    const attempt = openConnection(audioEnabled)
+    pendingConnectRef.current = attempt
+    // A failed attempt clears the slot too, so a later call can try again
+    const clear = () => { if (pendingConnectRef.current === attempt) pendingConnectRef.current = null }
+    attempt.then(clear, clear)
+    return attempt
+  }
+
+  const openConnection = (audioEnabled: boolean): Promise<void> => {
     return new Promise(async (resolve, reject) => {
       setIsConnecting(true)
       setError(null)
       
       // Initialize correct initial muted state based on audioEnabled
       isMutedRef.current = !audioEnabled
+      speechDetector.reset()
       setIsMuted(!audioEnabled)
       
       try {
@@ -204,10 +241,10 @@ export function useLiveAPI(systemInstructionText: string) {
         }
 
         // 2. Init WebSocket
-        const key = await getGeminiApiKey()
-        if (!key) throw new Error("Missing Gemini API Key on server")
+        // Single-use token: mint a fresh one for every connection attempt
+        const { token } = await createLiveToken()
 
-        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1alpha.GenerativeService.BidiGenerateContent?key=${key}`
+        const wsUrl = `wss://generativelanguage.googleapis.com/ws/google.ai.generativelanguage.v1beta.GenerativeService.BidiGenerateContentConstrained?access_token=${encodeURIComponent(token)}`
         const ws = new WebSocket(wsUrl)
         wsRef.current = ws
 
@@ -235,6 +272,7 @@ export function useLiveAPI(systemInstructionText: string) {
           if (audioEnabled && processorRef.current && sourceRef.current) {
             processorRef.current.port.onmessage = (e) => {
               if (ws.readyState === WebSocket.OPEN && !isMutedRef.current) {
+                noteMicChunk(e.data)
                 const base64 = arrayBufferToBase64(e.data)
                 ws.send(JSON.stringify({
                   realtimeInput: {
@@ -250,6 +288,8 @@ export function useLiveAPI(systemInstructionText: string) {
         }
 
         ws.onmessage = async (event) => {
+          // a connection that was closed (for example because the session changed) adds nothing to the conversation
+          if (wsRef.current !== ws) return
           try {
             let text = event.data
             if (event.data instanceof Blob) {
@@ -277,7 +317,10 @@ export function useLiveAPI(systemInstructionText: string) {
             const inputTranscript = data.serverContent?.inputTranscription
             if (inputTranscript) {
               const transcriptText = inputTranscript.text || (inputTranscript.parts && inputTranscript.parts[0]?.text)
-              if (transcriptText) addMessage('user', transcriptText)
+              if (transcriptText) {
+                addMessage('user', transcriptText)
+                onUserSpeechRef.current?.('transcript')
+              }
             }
 
             const outputTranscript = data.serverContent?.outputTranscription
@@ -299,6 +342,11 @@ export function useLiveAPI(systemInstructionText: string) {
 
         ws.onclose = (event) => {
           console.log("Live API WS Closed:", event.code, event.reason)
+          // the close event of an old connection must not tear down a newer one
+          if (wsRef.current && wsRef.current !== ws) return
+          // Still our current socket: the server or the network ended the call (the student's own End Call clears wsRef first).
+          // Say so, otherwise the panel just goes back to "Start Voice Tutor" with no explanation.
+          if (wsRef.current === ws) setError('The tutor call ended. Start the voice tutor again to continue.')
           disconnect()
         }
 
@@ -352,15 +400,33 @@ export function useLiveAPI(systemInstructionText: string) {
     }
   }
 
+  // Sends hidden context to the model: not shown in the chat panel, not saved in the chat log.
+  // Only interrupts the tutor's audio when asked to.
+  // respond (default true): the model starts answering right away. With respond:false the turn is only appended
+  // to the conversation (turnComplete:false) and the model waits for the next message, e.g. the student's typed one.
+  const sendContext = (text: string, opts?: { interrupt?: boolean; respond?: boolean }) => {
+    if (opts?.interrupt) stopAllAudio()
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({
+        clientContent: {
+          turns: [{ role: 'user', parts: [{ text }] }],
+          turnComplete: opts?.respond !== false
+        }
+      }))
+    }
+  }
+
   return {
     isConnected,
     isConnecting,
     error,
+    // The state array itself (ChatBuffer compares its identity); a model message that is empty after the strip is skipped when shown and saved
     messages,
     setMessages,
     connect,
     disconnect,
     sendText,
+    sendContext,
     isMuted,
     setMuted
   }

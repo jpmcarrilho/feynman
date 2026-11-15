@@ -2,23 +2,37 @@ import { prisma } from '@/lib/db'
 import fs from 'fs'
 import path from 'path'
 import { generateText } from 'ai'
-import { google } from '@ai-sdk/google'
+import { textModel } from '@/lib/ai'
+import { moduleSummaryPrompt } from '@/lib/prompts'
+import { resolveProfile } from '@/lib/studyspace/resolveProfile'
+import { summaryLink, topicFileLink } from '@/lib/fileLinks'
+import { findSummaryFile, newSummaryFilePath, summaryKey } from '@/server/storage'
+
+type UploadedTopic = { sourceId: string | null; pageStart: number | null; pageEnd: number | null; source?: { originalName: string; mimeType: string } | null }
+
+/** "engines.pdf · pages 3-4" / "engines.pdf · page 2" / "notes.md"; null for topics that did not come from an upload. */
+export function uploadedDetail(t: UploadedTopic): string | null {
+  if (!t.sourceId) return null
+  const name = t.source?.originalName ?? 'Uploaded file'
+  if (t.source?.mimeType !== 'application/pdf' || !t.pageStart) return name
+  return t.pageEnd && t.pageEnd !== t.pageStart ? `${name} · pages ${t.pageStart}-${t.pageEnd}` : `${name} · page ${t.pageStart}`
+}
 
 /**
  * Retrieves all courses and groups their resources (slides, transcriptions, exercises)
- * into a weekly structured hierarchy.
+ * into a weekly structured hierarchy. With a courseId only that course is returned.
  */
-export async function getCourseArtifactsService() {
+export async function getCourseArtifactsService(courseId?: string) {
   const courses = await prisma.course.findMany({
+    where: courseId ? { id: courseId } : undefined,
     orderBy: { code: 'asc' }
   });
 
   const topics = await prisma.topic.findMany({
-    orderBy: { week: 'asc' },
-    include: { course: true, exercises: { select: { id: true } } }
+    where: courseId ? { courseId } : undefined,
+    orderBy: [{ week: 'asc' }, { order: 'asc' }], // module label first, outline order inside it
+    include: { course: true, source: { select: { originalName: true, mimeType: true } }, exercises: { where: { origin: 'imported', status: 'active', isGraded: true }, select: { id: true } } }
   });
-
-  const summariesDir = path.join(process.cwd(), 'summaries');
 
   const results = courses.map(course => {
     const courseTopics = topics.filter(t => t.courseId === course.id);
@@ -36,8 +50,8 @@ export async function getCourseArtifactsService() {
 
     const weeksList = Array.from(weeksMap.entries()).map(([weekName, weekTopics]) => {
       const weekFileSlug = weekName.replace(/\s+/g, '_');
-      const summaryFilePath = path.join(summariesDir, course.code, `${weekFileSlug}.md`);
-      const summaryExists = fs.existsSync(summaryFilePath);
+      const key = summaryKey(weekName);
+      const summaryExists = key !== null && findSummaryFile(course, key) !== null;
 
       // Group topics into slides, transcriptions, exercises
       const slides: any[] = [];
@@ -54,7 +68,10 @@ export async function getCourseArtifactsService() {
           unit: t.unit,
           className: t.className,
           resourceType: t.resourceType,
-          localPath: t.localPath
+          // Uploaded topics: the file and, for PDFs, the pages (the unit is only a position in the module). Imported ones keep unit and class name.
+          detail: uploadedDetail(t),
+          // An uploaded PDF topic opens at its first page; the two legacy studyspaces keep their plain links
+          link: topicFileLink(t.id, t.sourceId && t.pageStart ? { page: t.pageStart } : undefined)
         };
 
         const typeLower = (t.resourceType || '').toLowerCase();
@@ -76,13 +93,24 @@ export async function getCourseArtifactsService() {
         weekName,
         weekSlug: weekFileSlug,
         summaryExists,
-        summaryPath: summaryExists ? summaryFilePath : null,
+        summaryLink: summaryExists && key ? summaryLink(course.id, key) : null,
         slides,
         transcriptions,
         exercisesCount,
         topicIds
       };
     });
+
+    // Modules made only of uploaded files come after the imported ones, in outline order (their labels need not sort like the imported
+    // labels: a file added to an imported studyspace gets "17 · Title", which sorts before "Week_01..."). Imported modules keep their order.
+    const uploadedOnly = (weekName: string) => (weeksMap.get(weekName) ?? []).every((t) => t.sourceId)
+    const firstOrder = (weekName: string) => Math.min(...(weeksMap.get(weekName) ?? []).map((t) => t.order))
+    weeksList.sort((a, b) => {
+      const ua = uploadedOnly(a.weekName)
+      const ub = uploadedOnly(b.weekName)
+      if (ua !== ub) return ua ? 1 : -1
+      return ua ? firstOrder(a.weekName) - firstOrder(b.weekName) : 0
+    })
 
     // Filter out any courses that have no weeks/materials
     return {
@@ -106,18 +134,15 @@ export async function generateWeekSummaryService(courseCode: string, weekName: s
     throw new Error(`Course ${courseCode} not found`);
   }
 
-  const summariesDir = path.join(process.cwd(), 'summaries');
-  const courseDir = path.join(summariesDir, courseCode);
-  if (!fs.existsSync(courseDir)) {
-    fs.mkdirSync(courseDir, { recursive: true });
+  const key = summaryKey(weekName);
+  if (!key) {
+    throw new Error(`Invalid module name: ${weekName}`);
   }
 
-  const weekFileSlug = weekName.replace(/\s+/g, '_');
-  const weekSummaryFilePath = path.join(courseDir, `${weekFileSlug}.md`);
-
-  if (fs.existsSync(weekSummaryFilePath)) {
-    const content = fs.readFileSync(weekSummaryFilePath, 'utf8');
-    return { filePath: weekSummaryFilePath, content };
+  const existing = findSummaryFile(course, key);
+  if (existing) {
+    const content = fs.readFileSync(existing, 'utf8');
+    return { link: summaryLink(course.id, key), content };
   }
 
   const classTopics = await prisma.topic.findMany({
@@ -134,44 +159,28 @@ export async function generateWeekSummaryService(courseCode: string, weekName: s
       topicContent = topicContent.substring(0, 15000) + '\n\n[...Content truncated for context efficiency...]';
     }
     materialContext += `--- Lesson Name: ${t.className || 'Unknown'} | Topic Unit: ${t.title} ---\n`;
-    materialContext += `Content/Transcription Outline:\n${topicContent}\n`;
-    materialContext += `Local Slides/Reading Path: ${t.localPath || 'None'}\n\n`;
+    materialContext += `Content/Transcription Outline:\n${topicContent}\n\n`;
   });
 
-  const prompt = `You are a brilliant, world-class professor specializing in economics and public policy (MIT MicroMasters style), embodying the Feynman learning philosophy.
-Your task is to generate a comprehensive, highly detailed permanent study guide and week summary for the following course week:
-
-Course: ${courseCode} - ${course.title}
-Week: ${weekName}
-
-CRITICAL DIRECTIVES:
-1. Grounded in Lesson Content: This is a permanent, high-quality textbook study guide. You must use the actual Covered Material Context (the lecture transcripts, slides outlines, and textbook readings) to summarize and explain the core academic concepts. 
-2. Be concise and simplified: Adhere to the Feynman Technique of making concepts incredibly simple and intuitive using elegant, grounded analogies (like bongos, water-flows, or balance scales), but do not be overly verbose or repetitive.
-3. No Question Leakage: Under no circumstances should you generate or refer to specific sample questions or tests. Focus 100% on the core lecture topics and learning objectives.
-
-Covered Material Context (Extracted slides, transcripts, and reading content for this week):
-${materialContext || 'No raw lesson materials available.'}
-
-Generate a beautifully styled Markdown document. Break it down into these exact sections:
-1. # 📓 Course Study Guide: ${courseCode} | ${weekName}
-   An elegant overview of this week's topics, general learning objectives, and core themes.
-2. ## 🧠 Concepts Demystified (Feynman Style)
-   Explain the main 2-3 core academic concepts covered in this week's materials. Explain each one in simple terms, using an elegant analogy to convey the underlying economics or policy intuition.
-3. ## 🔍 Common Pitfalls & Key Terms
-   Identify common misconceptions, tricky details, or academic traps in these specific topics, and explain how to understand them correctly from first principles.
-4. ## 📝 Custom Class Cheat Sheet
-   A bulleted, extremely concise reference summarizing key equations, core definitions, or central principles from these specific lectures.
-5. ## 🚀 Recommended Next Steps
-   Suggested concrete review goals (e.g., specific slides, read-throughs, or topic units).
-
-Ensure all equations are nicely formatted in standard LaTeX format when appropriate (wrap math blocks in $$ block $$ or $ inline $).`;
+  const prompt = moduleSummaryPrompt(resolveProfile(course), {
+    courseCode,
+    courseTitle: course.title,
+    module: weekName,
+    material: materialContext,
+  });
 
   const { text } = await generateText({
-    model: google('gemini-3.6-flash'),
+    model: textModel(),
     prompt,
   });
 
-  fs.writeFileSync(weekSummaryFilePath, text, 'utf8');
+  // New summaries always go under storage/summaries/<courseId>/
+  const target = newSummaryFilePath(course, key);
+  if (!target) {
+    throw new Error(`Invalid module name: ${weekName}`);
+  }
+  fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.writeFileSync(target, text, 'utf8');
 
-  return { filePath: weekSummaryFilePath, content: text };
+  return { link: summaryLink(course.id, key), content: text };
 }

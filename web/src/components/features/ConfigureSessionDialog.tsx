@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
@@ -9,6 +9,15 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Search, X } from 'lucide-react'
 import { FeynmanLogo } from './FeynmanLogo'
+import { resolveTopicScope } from '@/lib/topicScope'
+import {
+  moduleStats, selectionStats, planSession, minutesPerQuestion, applyPreset, loadConfig, saveConfig,
+  type SessionConfig, type PresetId, type Focus,
+} from '@/lib/sessionConfig'
+import { ModulePicker } from './ModulePicker'
+import { PresetBar } from './PresetBar'
+import { KindFilter } from './KindFilter'
+import { HOMEWORK_CLASS, FINGER_CLASS } from '@/lib/weekLabels'
 
 const formatDisplayName = (name: string | null | undefined): string => {
   if (!name) return '';
@@ -25,8 +34,26 @@ interface ConfigureSessionDialogProps {
   setSessionDuration: (duration: number) => void;
   questionCount: number;
   setQuestionCount: (count: number) => void;
-  onStartSession: (mode: 'study' | 'exam', timeLimit: number | null, sourcingMix: number, weakPct: number, unstudiedPct: number, expertPct: number) => void;
+  onStartSession: (mode: 'study' | 'exam', timeLimit: number | null, sourcingMix: number, weakPct: number, unstudiedPct: number, expertPct: number, topicIds: string[]) => void;
   isLoading: boolean;
+  /** The studyspace's full-length exam (profile.examPreset), offered next to the standard question counts. */
+  examPreset?: { label: string; questionCount: number } | null;
+  /** Plain-language reason the last start failed, shown above the start button. */
+  errorMessage?: string | null;
+}
+
+const STANDARD_QUESTION_COUNTS = [5, 10, 20, 50]
+
+/** 5, 10, 20, 50 and the exam preset (once, in order); the preset's option carries its label. */
+export function questionCountOptions(examPreset?: { label: string; questionCount: number } | null): { value: number; label: string }[] {
+  const counts = new Set(STANDARD_QUESTION_COUNTS)
+  if (examPreset) counts.add(examPreset.questionCount)
+  return [...counts]
+    .sort((a, b) => a - b)
+    .map((value) => ({
+      value,
+      label: examPreset && value === examPreset.questionCount ? `${value} Questions (${examPreset.label})` : `${value} Questions`,
+    }))
 }
 
 export function ConfigureSessionDialog({
@@ -39,6 +66,8 @@ export function ConfigureSessionDialog({
   setQuestionCount,
   onStartSession,
   isLoading,
+  examPreset = null,
+  errorMessage = null,
 }: ConfigureSessionDialogProps) {
   const [selectedCourses, setSelectedCourses] = useState<string[]>([])
   const [selectedWeeks, setSelectedWeeks] = useState<string[]>([])
@@ -78,7 +107,42 @@ export function ConfigureSessionDialog({
     }
   };
 
+  // --- goals, remembered settings, module stats ---------------------------------------------------------------------------
+  const spaceKey: string = topics[0]?.course?.id ?? topics[0]?.course?.code ?? 'default'
+  const stats = useMemo(() => moduleStats(topics), [topics])
+  const [lastConfig, setLastConfig] = useState<SessionConfig | null>(null)
+  const restoredFor = useRef<string | null>(null)
+
+  const applyConfig = (cfg: SessionConfig, topicIds: string[] = []) => {
+    setSessionMode(cfg.mode)
+    setSessionDuration(cfg.practiceMinutes * 60)
+    if (countOptions.some((o) => o.value === cfg.count)) setQuestionCount(cfg.count)
+    setExamDuration(cfg.examMinutes)
+    setSourcingMix(cfg.sourcingMix)
+    handleFocusChange(cfg.focus)
+    const known = new Set(stats.map((s) => s.key))
+    setSelectedWeeks(cfg.weeks.filter((w) => known.has(w)))
+    setSelectedClasses([])
+    setSelectedUnits([])
+    setSelectedTopics(topicIds)
+  }
+
+  const chooseGoal = (id: PresetId) => {
+    const { config, topicIds } = applyPreset(id, topics, examPreset)
+    applyConfig(config, topicIds)
+  }
+
+  // The last configuration of this studyspace is offered once, when its topics are known (never applied silently)
+  useEffect(() => {
+    if (topics.length === 0 || restoredFor.current === spaceKey) return
+    restoredFor.current = spaceKey
+    setLastConfig(loadConfig(spaceKey))
+  }, [spaceKey, topics.length])
+
   const courses = useMemo(() => Array.from(new Set(topics.map(t => t.course?.code).filter(Boolean))), [topics])
+  // Inside a studyspace there is only one course: asking the student to filter by it would be noise
+  const showCourseFilter = courses.length > 1
+  const countOptions = useMemo(() => questionCountOptions(examPreset), [examPreset])
 
   const weeks = useMemo(() => {
     const filtered = topics.filter(t => selectedCourses.length === 0 || selectedCourses.includes(t.course?.code))
@@ -92,6 +156,12 @@ export function ConfigureSessionDialog({
     )
     return Array.from(new Set(filtered.map(t => t.className).filter(Boolean)))
   }, [topics, selectedCourses, selectedWeeks])
+
+  // The classes the ticked modules offer (all modules when none is ticked): the kind filter shows only kinds that exist there
+  const allClassNames = useMemo(() => {
+    const inModules = topics.filter((t) => selectedWeeks.length === 0 || selectedWeeks.includes(t.week))
+    return Array.from(new Set(inModules.map((t) => t.className).filter(Boolean))) as string[]
+  }, [topics, selectedWeeks])
 
   const units = useMemo(() => {
     const filtered = topics.filter(t => 
@@ -123,12 +193,28 @@ export function ConfigureSessionDialog({
     );
   }, [filteredTopics, topicSearchText])
 
+  // What the session will draw from, decided once: ticked topics, else the topics the filters match, else everything shown
+  const filterLabels = [
+    ...selectedCourses,
+    ...selectedWeeks.map(formatDisplayName),
+    ...selectedClasses.map(formatDisplayName),
+    ...selectedUnits.map(formatDisplayName),
+    ...(topicSearchText.trim() ? [`"${topicSearchText.trim()}"`] : []),
+  ]
+  const scope = resolveTopicScope({
+    selectedIds: selectedTopics,
+    matchedIds: searchedTopics.map((t: any) => t.id),
+    filterLabels,
+    shownCourseCodes: courses as string[],
+  })
+
   return (
     <DialogContent className="sm:max-w-5xl md:max-w-6xl w-[90vw] max-h-[90vh] overflow-y-auto bg-background border-2 border-charcoal-graphite/20 shadow-2xl rounded-xl p-4 sm:p-6 font-sans">
       <DialogHeader className="border-b border-charcoal-graphite/10 pb-4 mb-4">
         <DialogTitle className="text-xl sm:text-2xl font-display italic text-charcoal-graphite">Configure Study Session</DialogTitle>
       </DialogHeader>
       <div className="py-2 sm:py-4 space-y-6">
+        <PresetBar onPreset={chooseGoal} hasLast={!!lastConfig} onLast={() => lastConfig && applyConfig(lastConfig)} />
         <div className="grid grid-cols-1 sm:grid-cols-4 gap-4 sm:items-end mb-4 bg-card/20 p-4 rounded-lg border border-border/40">
           <div className="flex flex-col">
             <Label htmlFor="session-mode-select" className="mb-2 block text-xs sm:text-sm font-semibold">Session Mode</Label>
@@ -182,12 +268,9 @@ export function ConfigureSessionDialog({
               onChange={e => setQuestionCount(Number(e.target.value))}
               className="flex h-10 w-full rounded-md border border-input bg-transparent px-3 py-2 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
             >
-              <option value="5">5 Questions</option>
-              <option value="10">10 Questions</option>
-              <option value="20">20 Questions</option>
-              <option value="32">32 Questions (14.750x Final)</option>
-              <option value="50">50 Questions</option>
-              <option value="53">53 Questions (JPAL102x Final)</option>
+              {countOptions.map((o) => (
+                <option key={o.value} value={o.value}>{o.label}</option>
+              ))}
             </select>
           </div>
 
@@ -267,7 +350,7 @@ export function ConfigureSessionDialog({
         <div className="flex flex-col sm:flex-row justify-between sm:items-center gap-3 mb-4 pb-2 border-b">
           <div>
             <Label className="text-sm sm:text-base">Select Topics</Label>
-            <p className="text-xs sm:text-sm text-muted-foreground mt-1">Select specific topics or leave blank to randomize across all courses.</p>
+            <p className="text-xs sm:text-sm text-muted-foreground mt-1">Select specific topics or leave blank to randomize across the whole studyspace.</p>
           </div>
           <Button 
             variant="outline" 
@@ -285,8 +368,23 @@ export function ConfigureSessionDialog({
           </Button>
         </div>
         
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-[1fr_1.8fr_2.2fr_0.8fr] gap-4 mb-4">
-          {/* Course selection */}
+        <ModulePicker
+          stats={stats}
+          selected={selectedWeeks}
+          // Another module resets the class and unit choices, but not the kind (homework or finger exercises): it applies to every week
+          onChange={(next) => { setSelectedWeeks(next); setSelectedClasses(selectedClasses.filter((c) => c === HOMEWORK_CLASS || c === FINGER_CLASS)); setSelectedUnits([]) }}
+          formatLabel={formatDisplayName}
+        />
+
+        <KindFilter
+          availableClasses={allClassNames}
+          selectedClasses={selectedClasses}
+          onChange={(next) => { setSelectedClasses(next); setSelectedUnits([]) }}
+        />
+
+        <div className={`grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4 ${showCourseFilter ? 'lg:grid-cols-[1fr_2.2fr_1fr]' : 'lg:grid-cols-[2.2fr_1fr]'}`}>
+          {/* Course selection (hidden when there is a single course, as in a studyspace) */}
+          {showCourseFilter && (
           <div className="flex flex-col">
             <Label className="mb-2 block font-medium text-xs text-muted-foreground uppercase tracking-wider">Course</Label>
             <ScrollArea className="h-32 sm:h-44 w-full rounded-md border border-input bg-card/40 p-1">
@@ -323,44 +421,7 @@ export function ConfigureSessionDialog({
               </div>
             </ScrollArea>
           </div>
-
-          {/* Week selection */}
-          <div className="flex flex-col">
-            <Label className="mb-2 block font-medium text-xs text-muted-foreground uppercase tracking-wider">Week</Label>
-            <ScrollArea className="h-32 sm:h-44 w-full rounded-md border border-input bg-card/40 p-1">
-              <div className="flex flex-col space-y-0.5 pr-2">
-                {weeks.map((w: any) => {
-                  const isSelected = selectedWeeks.includes(w);
-                  const cleaned = formatDisplayName(w);
-                  return (
-                    <button
-                      key={w}
-                      type="button"
-                      onClick={() => {
-                        if (isSelected) {
-                          setSelectedWeeks(selectedWeeks.filter(v => v !== w));
-                        } else {
-                          setSelectedWeeks([...selectedWeeks, w]);
-                        }
-                        setSelectedClasses([]);
-                        setSelectedUnits([]);
-                      }}
-                      className={`w-full text-left px-2.5 py-1.5 rounded-sm transition-colors text-xs hover:bg-muted flex items-start justify-between group ${
-                        isSelected ? 'bg-fountain-ink/15 text-fountain-ink font-semibold' : 'text-charcoal-graphite/80'
-                      }`}
-                      title={cleaned}
-                    >
-                      <span className="whitespace-normal break-words pr-2">{cleaned}</span>
-                      {isSelected && <span className="text-[10px] bg-fountain-ink/20 text-fountain-ink px-1.5 py-0.5 rounded-sm font-semibold shrink-0 mt-0.5">✓</span>}
-                    </button>
-                  );
-                })}
-                {weeks.length === 0 && (
-                  <div className="text-xs text-muted-foreground p-3 text-center italic">Select course first</div>
-                )}
-              </div>
-            </ScrollArea>
-          </div>
+          )}
 
           {/* Class selection */}
           <div className="flex flex-col">
@@ -451,7 +512,7 @@ export function ConfigureSessionDialog({
             <div className="relative w-full md:w-80">
               <Search className="absolute left-2.5 top-2.5 h-4 w-4 text-muted-foreground" />
               <Input
-                placeholder="Search topics by title, week, or class..."
+                placeholder="Search topics by title, module, or class..."
                 value={topicSearchText}
                 onChange={e => setTopicSearchText(e.target.value)}
                 className="pl-9 h-9 text-xs bg-background"
@@ -491,6 +552,7 @@ export function ConfigureSessionDialog({
                 <div key={t.id} className="flex items-start space-x-3 bg-background p-3.5 rounded-lg border shadow-sm hover:border-blue-400 transition-colors">
                   <Checkbox 
                     id={t.id} 
+                    aria-label={t.title}
                     checked={selectedTopics.includes(t.id)}
                     className="mt-1"
                     onCheckedChange={(c) => {
@@ -589,20 +651,52 @@ export function ConfigureSessionDialog({
         )}
 
         <div className="pt-4 border-t space-y-3">
+          {errorMessage && (
+            <p role="alert" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-amber-900">{errorMessage}</p>
+          )}
+          <p data-testid="topic-scope-summary" className={`text-sm ${scope.canStart ? 'text-charcoal-graphite/80' : 'text-lecture-red'}`}>{scope.summary}</p>
+          {(() => {
+            const stat = selectionStats(topics, scope.topicIds)
+            const timeLimit = sessionMode === 'exam' ? (examDuration === 0 ? null : examDuration * 60) : sessionDuration
+            const plan = planSession(questionCount, sourcingMix, stat.questions)
+            const pace = minutesPerQuestion(timeLimit, questionCount)
+            return (
+              <div data-testid="session-summary" className="space-y-1 rounded-md border border-fountain-ink/20 bg-fountain-ink/5 p-3 text-sm text-charcoal-graphite/90">
+                <p>
+                  <span className="font-semibold">{stat.questions}</span> course {stat.questions === 1 ? 'question' : 'questions'} in this selection
+                  {stat.questions > 0 ? ` (${stat.unseen} not seen yet)` : ''}
+                  {stat.problems > 0 ? `, including ${stat.problems} multi-part ${stat.problems === 1 ? 'problem' : 'problems'} (${stat.problemParts} parts)` : ''}.
+                </p>
+                <p>
+                  This session: <span className="font-semibold">{plan.count} questions</span>
+                  {' - '}{plan.fromCourse} from the course{plan.fromAi > 0 ? `, ${plan.fromAi} written by the AI while you study (a few seconds each)` : ''}.
+                  {pace !== null ? ` About ${pace} min per question.` : ''}
+                </p>
+                {plan.shortOfCourse && (
+                  <p className="text-amber-800">{stat.questions === 0 ? 'There are no course questions for this selection, so the AI writes all of them.' : `The course has only ${stat.questions} questions for this selection, so the AI writes the rest.`}</p>
+                )}
+                {stat.problems > 0 && <p className="text-xs text-muted-foreground">A multi-part problem is never split, so a session can run a few questions over its size.</p>}
+              </div>
+            )
+          })()}
           <Button 
             onClick={() => {
               const limit = sessionMode === 'exam' 
                 ? (examDuration === 0 ? null : examDuration * 60)
                 : sessionDuration; // Let study mode use standard practice duration
-              onStartSession(sessionMode, limit, sourcingMix, weakPct, unstudiedPct, expertPct);
+              saveConfig(spaceKey, {
+                mode: sessionMode, count: questionCount, practiceMinutes: Math.round(sessionDuration / 60), examMinutes: examDuration,
+                sourcingMix, focus: (retrievalFocus === 'custom' ? 'balanced' : retrievalFocus) as Focus, weeks: selectedWeeks,
+              })
+              onStartSession(sessionMode, limit, sourcingMix, weakPct, unstudiedPct, expertPct, scope.topicIds);
             }} 
-            disabled={isLoading} 
+            disabled={isLoading || !scope.canStart} 
             className="w-full text-lg h-12 bg-lecture-red hover:bg-lecture-red/90 text-white border-0 shadow-sm font-semibold animate-sketch-draw"
           >
             {isLoading ? (
               <><FeynmanLogo variant="thinking" size={20} className="mr-2" /> Generating Exercises...</>
             ) : (
-              sessionMode === 'exam' ? '📋 Start Timed Exam' : (selectedTopics.length === 0 ? 'Start Random Session' : 'Start Focused Session')
+              sessionMode === 'exam' ? '📋 Start Timed Exam' : (scope.kind === 'all' ? 'Start Random Session' : 'Start Focused Session')
             )}
           </Button>
           {isLoading && (
